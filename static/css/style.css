@@ -1,0 +1,135 @@
+/* RTP Stream Analyzer - 自定义样式 */
+
+body {
+    background-color: #f5f7fa;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* 上传区域 */
+.upload-box {
+    border: 2px dashed #ccc;
+    border-radius: 12px;
+    padding: 25px 15px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    background: #fafafa;
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.upload-box:hover {
+    border-color: #0d6efd;
+    background: #f0f7ff;
+}
+
+.upload-box.has-file {
+    border-color: #198754;
+    background: #f0fff4;
+    border-style: solid;
+}
+
+.upload-box i {
+    font-size: 2rem;
+    color: #6c757d;
+}
+
+.upload-box.has-file i {
+    color: #198754;
+}
+
+.upload-label {
+    cursor: pointer;
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.file-input {
+    display: none;
+}
+
+.file-name {
+    font-size: 0.85rem;
+    color: #198754;
+    margin-top: 8px;
+    word-break: break-all;
+}
+
+/* 方向选项 */
+.direction-option {
+    display: block;
+    padding: 10px 15px;
+    margin-bottom: 8px;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.direction-option:hover {
+    border-color: #0d6efd;
+    background: #f0f7ff;
+}
+
+.direction-option.selected {
+    border-color: #0d6efd;
+    background: #e7f1ff;
+    font-weight: 600;
+}
+
+.direction-option.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+.direction-option .badge {
+    float: right;
+}
+
+/* 卡片 */
+.card {
+    border: none;
+    border-radius: 12px;
+}
+
+.card-header {
+    border-radius: 12px 12px 0 0 !important;
+}
+
+/* 加载动画 */
+.spinner-border {
+    width: 3rem;
+    height: 3rem;
+}
+
+/* 结果图表 */
+#result-chart, #chart-img {
+    max-width: 100%;
+    height: auto;
+}
+
+/* 表格 */
+.table-sm td, .table-sm th {
+    font-size: 0.85rem;
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+    .upload-box {
+        min-height: 100px;
+        padding: 15px 10px;
+    }
+    
+    .display-5 {
+        font-size: 1.8rem;
+    }
+}

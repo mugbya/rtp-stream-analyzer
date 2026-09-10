@@ -1,0 +1,265 @@
+{% extends "base.html" %}
+{% block title %}RTP Analyzer - Results{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-10 mx-auto">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2><i class="bi bi-clipboard-data text-info"></i> 分析结果</h2>
+            <a href="/" class="btn btn-outline-primary">
+                <i class="bi bi-arrow-left"></i> 返回首页
+            </a>
+        </div>
+
+        <div id="result-loading" class="text-center py-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-2 text-muted">正在加载分析结果...</p>
+        </div>
+
+        <div id="result-content" class="d-none">
+            <!-- 摘要卡片 -->
+            <div class="row g-3 mb-4" id="summary-cards"></div>
+
+            <!-- 分析图表 -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-info text-white">
+                    <h5 class="mb-0"><i class="bi bi-graph-up"></i> 分析图表</h5>
+                </div>
+                <div class="card-body text-center">
+                    <img id="chart-img" class="img-fluid border rounded shadow-sm" alt="Analysis Chart">
+                </div>
+            </div>
+
+            <!-- 音视频回放 -->
+            <div class="card shadow-sm mb-4 d-none" id="media-card">
+                <div class="card-header text-white" style="background-color: #6f42c1;">
+                    <h5 class="mb-0"><i class="bi bi-collection-play"></i> 音视频回放</h5>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small mb-3">
+                        从 RTP 流重建的音频/视频。按抓包文件分组，<strong>呼出</strong>为该端发送的媒体，<strong>呼入</strong>为该端接收的媒体。
+                    </p>
+                    <div id="media-container"></div>
+                </div>
+            </div>
+
+            <!-- 详细报告 -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0"><i class="bi bi-file-text"></i> 详细报告</h5>
+                </div>
+                <div class="card-body" id="detail-report"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+const SESSION_ID = '{{ session_id }}';
+
+document.addEventListener('DOMContentLoaded', () => {
+    fetch(`/api/session/${SESSION_ID}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.results) {
+                showResults(data.results);
+            } else {
+                document.getElementById('result-loading').innerHTML = 
+                    '<p class="text-warning">No results found for this session.</p>';
+            }
+        })
+        .catch(err => {
+            document.getElementById('result-loading').innerHTML = 
+                '<p class="text-danger">Failed to load results: ' + err.message + '</p>';
+        });
+});
+
+function showResults(results) {
+    document.getElementById('result-loading').classList.add('d-none');
+    document.getElementById('result-content').classList.remove('d-none');
+    
+    // 图表
+    if (results.chart_url) {
+        document.getElementById('chart-img').src = results.chart_url;
+    }
+    
+    // 摘要卡片
+    const summary = results.summary;
+    const cards = document.getElementById('summary-cards');
+    cards.innerHTML = `
+        <div class="col-md-3">
+            <div class="card border-primary">
+                <div class="card-body text-center">
+                    <h6 class="text-muted">FS 内部延迟</h6>
+                    <h3 class="text-primary">${summary.fs_delay_mean.toFixed(1)}ms</h3>
+                    <small class="text-muted">P95: ${summary.fs_delay_p95.toFixed(1)}ms</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-success">
+                <div class="card-body text-center">
+                    <h6 class="text-muted">抖动流数</h6>
+                    <h3 class="text-success">${summary.jitter_streams}</h3>
+                    <small class="text-muted">已分析</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-${summary.packet_loss_clean ? 'success' : 'danger'}">
+                <div class="card-body text-center">
+                    <h6 class="text-muted">丢包状态</h6>
+                    <h3 class="text-${summary.packet_loss_clean ? 'success' : 'danger'}">
+                        ${summary.packet_loss_clean ? '✓ 无丢包' : '✗ 有丢包'}
+                    </h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-${summary.overall === 'healthy' ? 'success' : summary.overall === 'warning' ? 'warning' : 'danger'}">
+                <div class="card-body text-center">
+                    <h6 class="text-muted">综合评估</h6>
+                    <h3 class="text-${summary.overall === 'healthy' ? 'success' : summary.overall === 'warning' ? 'warning' : 'danger'}">
+                        ${summary.overall === 'healthy' ? '✓ 健康' : summary.overall === 'warning' ? '⚠ 注意' : '✗ 异常'}
+                    </h3>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 详细报告
+    const report = results.report;
+    if (report) {
+        const detail = document.getElementById('detail-report');
+        let html = '';
+        
+        if (report.delay && report.delay.fs_internal && report.delay.fs_internal.available) {
+            html += '<h6>FS 内部处理延迟</h6>';
+            html += '<table class="table table-sm table-bordered"><tr>';
+            const d = report.delay.fs_internal;
+            for (const [k, v] of Object.entries(d)) {
+                if (k !== 'available' && k !== 'delays') {
+                    html += `<th>${k}</th><td>${typeof v === 'number' ? v.toFixed(2) : v}</td>`;
+                    if (Object.keys(d).indexOf(k) % 4 === 3) html += '</tr><tr>';
+                }
+            }
+            html += '</tr></table>';
+        }
+        
+        if (report.conclusion) {
+            html += '<h6>结论</h6>';
+            html += `<p><strong>${report.conclusion.root_cause}</strong></p>`;
+            if (report.conclusion.issues && report.conclusion.issues.length > 0) {
+                html += '<ul class="list-group mb-3">';
+                report.conclusion.issues.forEach(i => {
+                    html += `<li class="list-group-item list-group-item-${i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'info'}">${i.message}</li>`;
+                });
+                html += '</ul>';
+            }
+        }
+        
+        detail.innerHTML = html;
+    }
+    
+    // 音视频回放
+    if (results.media_manifest) {
+        showMedia(results.media_manifest);
+    }
+}
+
+// ====== 音视频回放展示 ======
+const ROLE_NAMES = { seat: '坐席端', fs: 'FS 服务器端', terminal: '终端 / 主叫端' };
+const ROLE_ICONS = { seat: 'bi-headset', fs: 'bi-server', terminal: 'bi-phone' };
+const DIR_NAMES = { inbound: '呼入（接收）', outbound: '呼出（发送）', unknown: '方向未知' };
+const DIR_BADGE = { inbound: 'bg-info', outbound: 'bg-success', unknown: 'bg-secondary' };
+
+function showMedia(manifest) {
+    const card = document.getElementById('media-card');
+    const container = document.getElementById('media-container');
+
+    if (!manifest || (!manifest.audio?.length && !manifest.video?.length && !manifest.unsupported?.length)) {
+        card.classList.add('d-none');
+        return;
+    }
+    card.classList.remove('d-none');
+
+    // 按角色分组
+    const byRole = {};
+    (manifest.audio || []).forEach(e => {
+        if (!byRole[e.role]) byRole[e.role] = { audio: [], video: [] };
+        byRole[e.role].audio.push(e);
+    });
+    (manifest.video || []).forEach(e => {
+        if (!byRole[e.role]) byRole[e.role] = { audio: [], video: [] };
+        byRole[e.role].video.push(e);
+    });
+
+    let html = '';
+    for (const [role, media] of Object.entries(byRole)) {
+        const roleName = ROLE_NAMES[role] || role;
+        const roleIcon = ROLE_ICONS[role] || 'bi-question-circle';
+        html += `
+            <div class="mb-4">
+                <h6 class="mb-3">
+                    <i class="bi ${roleIcon} text-primary"></i>
+                    ${roleName}
+                    <span class="badge bg-light text-dark">${media.audio.length + media.video.length} 个媒体流</span>
+                </h6>`;
+        media.audio.forEach(a => { html += _mediaItem(a, 'audio'); });
+        media.video.forEach(v => { html += _mediaItem(v, 'video'); });
+        html += '</div>';
+    }
+
+    if (manifest.unsupported && manifest.unsupported.length > 0) {
+        html += '<div class="alert alert-warning small mt-2"><strong>未能重建的流：</strong><ul class="mb-0">';
+        manifest.unsupported.forEach(u => {
+            html += `<li>${ROLE_NAMES[u.role] || u.role} (SSRC=${u.ssrc}) — ${u.codec}: ${u.reason}</li>`;
+        });
+        html += '</ul></div>';
+    }
+
+    container.innerHTML = html;
+}
+
+function _mediaItem(entry, kind) {
+    const dirName = DIR_NAMES[entry.direction] || entry.direction;
+    const dirBadge = DIR_BADGE[entry.direction] || 'bg-secondary';
+    const dur = entry.duration_ms ? (entry.duration_ms / 1000).toFixed(1) + 's' : '';
+
+    let meta = `<span class="badge ${dirBadge} me-1">${dirName}</span>
+                <span class="badge bg-dark me-1">${entry.codec || ''}</span>
+                <span class="text-muted small">SSRC: ${entry.ssrc}`;
+    if (dur) meta += ` · 时长 ${dur}`;
+    if (entry.total_packets) meta += ` · ${entry.total_packets} 包`;
+    if (entry.lost_packets) meta += ` · 丢 ${entry.lost_packets} 包`;
+    meta += '</span>';
+
+    let player;
+    if (kind === 'audio') {
+        player = `<audio controls preload="none" class="w-100 mt-1">
+                    <source src="${entry.url}" type="audio/wav">
+                    您的浏览器不支持音频播放。
+                  </audio>`;
+    } else {
+        player = `<video controls preload="metadata" class="w-100 mt-1" style="max-height: 300px;">
+                    <source src="${entry.url}" type="${entry.mp4_available ? 'video/mp4' : 'video/h264'}">
+                    您的浏览器不支持视频播放。
+                  </video>`;
+    }
+
+    return `
+        <div class="border rounded p-2 mb-2 bg-light">
+            <div>${meta}</div>
+            ${player}
+            <a href="${entry.url}" download class="btn btn-sm btn-outline-secondary mt-1">
+                <i class="bi bi-download"></i> 下载
+            </a>
+        </div>
+    `;
+}
+</script>
+{% endblock %}
