@@ -170,80 +170,79 @@ def _build_clock_summary(results: dict) -> dict:
 
 
 def _build_conclusion(results: dict) -> dict:
-    """生成结论。"""
+    """生成结论（所有面向用户的文案使用中文）。"""
     fs_delay = results.get('fs_delay', {})
     jitter = results.get('jitter', {})
     packet_loss = results.get('packet_loss', {})
-    
+
     issues = []
     ok_items = []
-    
-    # FS delay evaluation
+
+    # FS 内部延迟评估
     if fs_delay.get('count', 0) > 0:
         if fs_delay['mean'] < 20 and fs_delay['p95'] < 50:
-            ok_items.append('FS internal processing delay is healthy (< 20ms)')
+            ok_items.append('FS 内部处理延迟健康（均值 < 20ms）')
         elif fs_delay['mean'] < 50:
             issues.append({
                 'severity': 'warning',
-                'message': f'FS processing delay is elevated (mean={fs_delay["mean"]:.1f}ms)',
+                'message': f'FS 处理延迟偏高（均值 {fs_delay["mean"]:.1f}ms）',
             })
         else:
             issues.append({
                 'severity': 'critical',
-                'message': f'FS processing delay is HIGH (mean={fs_delay["mean"]:.1f}ms)',
+                'message': f'FS 处理延迟过高（均值 {fs_delay["mean"]:.1f}ms）',
             })
-        
+
         if fs_delay['outliers_50ms'] > 0:
             issues.append({
                 'severity': 'warning',
-                'message': f'{fs_delay["outliers_50ms"]} delay spikes > 50ms detected',
+                'message': f'检测到 {fs_delay["outliers_50ms"]} 次 > 50ms 的延迟尖峰',
             })
     else:
         issues.append({
             'severity': 'info',
-            'message': 'FS capture not available - cannot measure FS internal delay',
+            'message': '未捕获 FS 抓包——无法测量 FS 内部处理延迟',
         })
-    
-    # Jitter evaluation
+
+    # 抖动评估
     if jitter:
         for label, data in jitter.items():
             if data.get('std', 0) > 10:
                 issues.append({
                     'severity': 'warning',
-                    'message': f'{label}: high jitter (std={data["std"]:.1f}ms)',
+                    'message': f'{label}: 抖动偏大（标准差 {data["std"]:.1f}ms）',
                 })
             elif data.get('abnormal_count', 0) > 0:
                 issues.append({
                     'severity': 'info',
-                    'message': f'{label}: {data["abnormal_count"]} abnormal gaps detected',
+                    'message': f'{label}: 检测到 {data["abnormal_count"]} 处异常包间隔',
                 })
             else:
-                ok_items.append(f'{label}: clean (std={data.get("std", 0):.1f}ms)')
-    
-    # Packet loss evaluation
+                ok_items.append(f'{label}: 间隔稳定（标准差 {data.get("std", 0):.1f}ms）')
+
+    # 丢包评估
     if packet_loss:
         all_clean = all(d.get('is_clean', True) for d in packet_loss.values())
         if all_clean:
-            ok_items.append('No packet loss detected on any stream')
+            ok_items.append('所有流均未检测到丢包')
         else:
             for ssrc, data in packet_loss.items():
                 if not data.get('is_clean', True):
                     issues.append({
                         'severity': 'critical',
-                        'message': (f'{data.get("label", "")}: {data["total_lost"]} packets lost '
-                                    f'({data["loss_rate_pct"]:.2f}%)'),
+                        'message': (f'{data.get("label", "")}: 丢失 {data["total_lost"]} 包'
+                                    f'（丢包率 {data["loss_rate_pct"]:.2f}%）'),
                     })
-    
-    # Root cause analysis
+
+    # 根因分析
     root_cause = None
     if not issues:
-        root_cause = ('RTP-level analysis shows no significant issues. '
-                      'The delay may be in the application layer (jitter buffer, audio device, codec). '
-                      'Check endpoint audio configuration.')
+        root_cause = ('RTP 层面未发现明显问题。延迟可能来自应用层'
+                      '（抖动缓冲、音频设备、编码器缓冲），建议检查终端音频配置。')
     elif any(i['severity'] == 'critical' for i in issues):
-        root_cause = 'Critical issues detected at RTP level. Check FS configuration and network.'
+        root_cause = 'RTP 层面发现严重问题，请检查 FS 配置与网络状况。'
     else:
-        root_cause = 'Minor issues detected. Monitor and consider endpoint buffer tuning.'
+        root_cause = '发现轻微问题，建议持续观察，并考虑调整终端缓冲参数。'
     
     return {
         'issues': issues,

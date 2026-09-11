@@ -77,7 +77,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 showResults(data.results);
                 if (data.calls && data.calls.length) {
                     buildIpRoleMap(data.files || [], data.server_ip);
-                    renderCalls(data.calls);
+                    renderCalls(data.calls, data.capture_warning);
                 }
             } else {
                 document.getElementById('result-loading').innerHTML =
@@ -151,14 +151,17 @@ function showResults(results) {
         
         if (report.delay && report.delay.fs_internal && report.delay.fs_internal.available) {
             html += '<h6>FS 内部处理延迟</h6>';
-            html += '<table class="table table-sm table-bordered"><tr>';
             const d = report.delay.fs_internal;
-            for (const [k, v] of Object.entries(d)) {
-                if (k !== 'available' && k !== 'delays') {
-                    html += `<th>${k}</th><td>${typeof v === 'number' ? v.toFixed(2) : v}</td>`;
-                    if (Object.keys(d).indexOf(k) % 4 === 3) html += '</tr><tr>';
-                }
-            }
+            const cells = [
+                ['均值', d.mean], ['P50', d.p50], ['P95', d.p95], ['P99', d.p99],
+                ['最大', d.max], ['标准差', d.std], ['样本数', d.count],
+                ['尖峰 >50ms', d.outliers_50ms], ['尖峰 >100ms', d.outliers_100ms],
+            ];
+            html += '<table class="table table-sm table-bordered"><tr>';
+            cells.forEach(([k, v], i) => {
+                html += `<th>${k}</th><td>${typeof v === 'number' ? v.toFixed(2) : v}</td>`;
+                if (i % 4 === 3) html += '</tr><tr>';
+            });
             html += '</tr></table>';
         }
         
@@ -314,8 +317,10 @@ function _sipLadder(flow, call) {
             `<div class="sl-track" style="grid-template-columns:repeat(${n},1fr)">${inner}</div></div>`;
     });
     if (call) {
-        // 标线用「接通后媒体」区间（被叫应答后首包 → BYE 前末包）；无信令
-        // 时后端回退为整段媒体区间
+        // 标线锚定在信令行上，确保两条线之间不夹应答/挂断握手的其余指令：
+        // 开始线紧跟被叫应答的 200 OK 行（answer_time 由后端从该通话信令中
+        // 选出），结束线落在首条 BYE 行之前。RTP 首末包时间（talk_*，无信令
+        // 时后端回退为整段媒体）只用于标签显示，行锚定失败才按时间插。
         const sStr = call.talk_start_str || call.start_str;
         const eStr = call.talk_end_str || call.end_str;
         const dur = call.talk_duration_s ?? call.duration_s;
@@ -325,10 +330,30 @@ function _sipLadder(flow, call) {
             chips.push(`<span class="badge text-bg-light border"><i class="bi bi-music-note-beamed"></i> 音频 ${codecs.audio.join(' / ')}</span>`);
         if (codecs.video?.length)
             chips.push(`<span class="badge text-bg-light border"><i class="bi bi-camera-video"></i> 视频 ${codecs.video.join(' / ')}</span>`);
-        let si = sStr ? msgs.findIndex(m => m.time_str > sStr) : -1;
-        if (si === -1) si = rows.length;
-        let ei = eStr ? msgs.findIndex(m => m.time_str >= eStr) : -1;
-        if (ei === -1) ei = rows.length;
+        // 开始位置：answer_time 对应的 200 OK 行之后 → 首条 200(cseq INVITE) 行
+        // 之后 → 媒体开始时间之后，逐级兜底
+        let si = -1;
+        if (call.answer_time != null)
+            si = msgs.findIndex(m => m.time === call.answer_time) + 1;
+        if (si <= 0)
+            si = msgs.findIndex(m => m.method === '200' && m.cseq_method === 'INVITE') + 1;
+        if (si <= 0) {
+            si = sStr ? msgs.findIndex(m => m.time_str > sStr) : -1;
+            if (si === -1) si = rows.length;
+        }
+        // 多抓包时被叫 200 OK 可能以坐席副本的时钟排在 answer_time 行之后
+        // （应答握手尾巴），把锚点后移到握手结束（ACK/200-INVITE 连续段之后），
+        // 保证两条标线之间不出现任何信令行
+        while (si < msgs.length &&
+               (msgs[si].method === 'ACK' ||
+                (msgs[si].method === '200' && msgs[si].cseq_method === 'INVITE')))
+            si++;
+        // 结束位置：首条 BYE 行之前；无 BYE 再按媒体结束时间插
+        let ei = msgs.findIndex(m => m.method === 'BYE');
+        if (ei === -1) {
+            ei = eStr ? msgs.findIndex(m => m.time_str >= eStr) : -1;
+            if (ei === -1) ei = rows.length;
+        }
         si = Math.min(si, ei);
         if (eStr)
             rows.splice(ei, 0, `<div class="sl-marker sl-end"><span class="lb">` +
@@ -379,12 +404,31 @@ function _ipName(ip) {
     return ipRoleMap[ip] || ip;
 }
 
-function renderCalls(calls) {
+function _captureWarningHtml(w) {
+    // 纵向列表：每份抓包一行（总体时间段 + 每通通话时间段），与首页一致
+    const rows = (w.roles || []).map(r => {
+        const ov = r.overall || {};
+        const head = ov.count
+            ? `${r.display}：${ov.start} ~ ${ov.end}（${ov.count} 通）`
+            : `${r.display}：未检测到通话`;
+        const subs = (r.calls || []).map(c =>
+            `<li class="ms-4 text-muted">└ ${c.label}：${c.start} ~ ${c.end}</li>`).join('');
+        return `<li>${head}${subs ? `<ul class="list-unstyled mb-0">${subs}</ul>` : ''}</li>`;
+    }).join('');
+    return `
+        <div class="alert alert-warning mb-2 py-2 small">
+            <strong><i class="bi bi-exclamation-triangle me-1"></i>抓包一致性提醒</strong>
+            <div class="mt-1">${w.message}</div>
+            <ul class="list-unstyled mb-0 mt-2">${rows}</ul>
+        </div>`;
+}
+
+function renderCalls(calls, captureWarning) {
     const card = document.getElementById('calls-card');
     const container = document.getElementById('calls-container');
     card.classList.remove('d-none');
 
-    let html = '';
+    let html = captureWarning ? _captureWarningHtml(captureWarning) : '';
     calls.forEach(c => {
         const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
         const files = c.files.map(f => ROLE_NAMES[f] || f).join(' / ');

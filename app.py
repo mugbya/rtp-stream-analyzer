@@ -22,7 +22,7 @@ from analyzer.packet_loss import detect_all_losses
 from analyzer.charts import generate_analysis_chart
 from analyzer.reporter import generate_report
 from analyzer.media_extractor import generate_all_media, get_media_urls
-from analyzer.call_detector import detect_calls
+from analyzer.call_detector import detect_calls, check_capture_consistency
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -86,13 +86,24 @@ def upload_files():
 
     # 通话检测：将流按通话分组并评估每通的抓包完整性
     calls = detect_calls(rtp_captures, server_ip)
-    
+
+    # 服务器侧抓包：抓包点位于服务器上（其 IP 集合含 server_ip，通常是 FS 端）。
+    # 点对点直连提示需要它来区分"FS 抓不到这通电话"和"传错文件"。
+    server_roles = [r for r, rd in rtp_captures.items()
+                    if server_ip and server_ip in rd.get('ips', set())]
+
+    # 跨抓包一致性：各抓包之间是否共享同一通通话（不共享 → 很可能传错文件；
+    # 若是点对点直连通话则给出对应提示）
+    capture_warning = check_capture_consistency(calls, rtp_captures.keys(),
+                                                server_ip=server_ip,
+                                                server_roles=server_roles)
+
     # 分类流
     classified = classify_all_streams(all_streams)
-    
+
     # 识别可用的延迟方向
     available_directions = _detect_available_directions(files_info, server_ip, classified)
-    
+
     # 保存会话
     sessions[session_id] = {
         'files': files_info,
@@ -101,6 +112,7 @@ def upload_files():
         'classified': classified,
         'session_dir': session_dir,
         'calls': calls,
+        'capture_warning': capture_warning,
     }
 
     return jsonify({
@@ -111,6 +123,7 @@ def upload_files():
         'video_streams': len(classified.get('video', {})),
         'available_directions': available_directions,
         'calls': calls,
+        'capture_warning': capture_warning,
     })
 
 
@@ -318,6 +331,7 @@ def get_session(session_id):
         'audio_streams': len(session['classified'].get('audio', {})),
         'video_streams': len(session['classified'].get('video', {})),
         'calls': session.get('calls') or [],
+        'capture_warning': session.get('capture_warning'),
         'results': safe_results,
     })
 

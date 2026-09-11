@@ -157,16 +157,17 @@ function showDetectionResults(data) {
     detail += '</tbody></table>';
     document.getElementById('streams-detail').innerHTML = detail;
 
-    // 通话列表 + 完整性状态
-    renderCalls(data.calls || []);
+    // 通话列表 + 完整性状态 + 跨抓包一致性提醒
+    renderCalls(data.calls || [], data.capture_warning);
 }
 
 // ====== 通话检测展示 ======
-function renderCalls(calls) {
+function renderCalls(calls, captureWarning) {
     const container = document.getElementById('calls-detail');
 
     if (!calls.length) {
-        container.innerHTML = '<p class="text-muted small mb-0 mt-2">' +
+        container.innerHTML = (captureWarning ? _captureWarningHtml(captureWarning) : '') +
+            '<p class="text-muted small mb-0 mt-2">' +
             '未检测到通话（抓包中没有 RTP 媒体流）</p>';
         return;
     }
@@ -175,6 +176,7 @@ function renderCalls(calls) {
         <i class="bi bi-telephone text-primary"></i>
         检测到 <span class="badge bg-primary fs-6">${calls.length}</span> 通通话
     </h6>`;
+    if (captureWarning) html = _captureWarningHtml(captureWarning) + html;
 
     calls.forEach(c => {
         const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
@@ -213,6 +215,7 @@ function renderCalls(calls) {
                 <strong>${callLabel(c.call_id)}</strong>
                 <span class="text-muted small">${c.start_str} ~ ${c.end_str}（${c.duration_s}s）</span>
                 <span class="badge ${st.badge}"><i class="bi ${st.icon}"></i> ${st.label}</span>
+                ${c.is_p2p ? '<span class="badge bg-info text-dark"><i class="bi bi-arrow-left-right"></i> 点对点直连</span>' : ''}
                 <span class="badge bg-light text-dark">${c.stream_count} 条流</span>
                 <span class="badge bg-light text-dark">${media}</span>
                 <span class="text-muted small">${files}</span>
@@ -345,8 +348,10 @@ function _sipLadder(flow, call) {
             `<div class="sl-track" style="grid-template-columns:repeat(${n},1fr)">${inner}</div></div>`;
     });
     if (call) {
-        // 标线用「接通后媒体」区间（被叫应答后首包 → BYE 前末包）；无信令
-        // 时后端回退为整段媒体区间
+        // 标线锚定在信令行上，确保两条线之间不夹应答/挂断握手的其余指令：
+        // 开始线紧跟被叫应答的 200 OK 行（answer_time 由后端从该通话信令中
+        // 选出），结束线落在首条 BYE 行之前。RTP 首末包时间（talk_*，无信令
+        // 时后端回退为整段媒体）只用于标签显示，行锚定失败才按时间插。
         const sStr = call.talk_start_str || call.start_str;
         const eStr = call.talk_end_str || call.end_str;
         const dur = call.talk_duration_s ?? call.duration_s;
@@ -356,10 +361,30 @@ function _sipLadder(flow, call) {
             chips.push(`<span class="badge text-bg-light border"><i class="bi bi-music-note-beamed"></i> 音频 ${codecs.audio.join(' / ')}</span>`);
         if (codecs.video?.length)
             chips.push(`<span class="badge text-bg-light border"><i class="bi bi-camera-video"></i> 视频 ${codecs.video.join(' / ')}</span>`);
-        let si = sStr ? msgs.findIndex(m => m.time_str > sStr) : -1;
-        if (si === -1) si = rows.length;
-        let ei = eStr ? msgs.findIndex(m => m.time_str >= eStr) : -1;
-        if (ei === -1) ei = rows.length;
+        // 开始位置：answer_time 对应的 200 OK 行之后 → 首条 200(cseq INVITE) 行
+        // 之后 → 媒体开始时间之后，逐级兜底
+        let si = -1;
+        if (call.answer_time != null)
+            si = msgs.findIndex(m => m.time === call.answer_time) + 1;
+        if (si <= 0)
+            si = msgs.findIndex(m => m.method === '200' && m.cseq_method === 'INVITE') + 1;
+        if (si <= 0) {
+            si = sStr ? msgs.findIndex(m => m.time_str > sStr) : -1;
+            if (si === -1) si = rows.length;
+        }
+        // 多抓包时被叫 200 OK 可能以坐席副本的时钟排在 answer_time 行之后
+        // （应答握手尾巴），把锚点后移到握手结束（ACK/200-INVITE 连续段之后），
+        // 保证两条标线之间不出现任何信令行
+        while (si < msgs.length &&
+               (msgs[si].method === 'ACK' ||
+                (msgs[si].method === '200' && msgs[si].cseq_method === 'INVITE')))
+            si++;
+        // 结束位置：首条 BYE 行之前；无 BYE 再按媒体结束时间插
+        let ei = msgs.findIndex(m => m.method === 'BYE');
+        if (ei === -1) {
+            ei = eStr ? msgs.findIndex(m => m.time_str >= eStr) : -1;
+            if (ei === -1) ei = rows.length;
+        }
         si = Math.min(si, ei);
         if (eStr)
             rows.splice(ei, 0, `<div class="sl-marker sl-end"><span class="lb">` +
@@ -430,11 +455,35 @@ function showConfigPanel(data) {
     });
 
     // 通话选择（多通通话时显示）
-    renderCallSelector(data.calls || []);
+    renderCallSelector(data.calls || [], data.capture_warning);
+}
+
+// 跨抓包一致性提醒——纵向列表：每份抓包一行，先给总体时间段，再缩进列出
+// 每通通话的时间段。kind='p2p'（点对点直连）不是错误，用 info 样式区分于
+// kind='mismatch'（疑似传错文件）的警告样式
+function _captureWarningHtml(w) {
+    const rows = (w.roles || []).map(r => {
+        const ov = r.overall || {};
+        const head = ov.count
+            ? `${r.display}：${ov.start} ~ ${ov.end}（${ov.count} 通）`
+            : `${r.display}：未检测到通话`;
+        const subs = (r.calls || []).map(c =>
+            `<li class="ms-4 text-muted">└ ${c.label}：${c.start} ~ ${c.end}</li>`).join('');
+        return `<li>${head}${subs ? `<ul class="list-unstyled mb-0">${subs}</ul>` : ''}</li>`;
+    }).join('');
+    const p2p = w.kind === 'p2p';
+    const cls = p2p ? 'alert-info' : 'alert-warning';
+    const icon = p2p ? 'bi-info-circle' : 'bi-exclamation-triangle';
+    const title = p2p ? '点对点直连提示' : '抓包一致性提醒';
+    return `<div class="alert ${cls} w-100 mb-2 py-2 small">
+        <strong><i class="bi ${icon} me-1"></i>${title}</strong>
+        <div class="mt-1">${w.message}</div>
+        <ul class="list-unstyled mb-0 mt-2">${rows}</ul>
+    </div>`;
 }
 
 // ====== 通话选择器 ======
-function renderCallSelector(calls) {
+function renderCallSelector(calls, captureWarning) {
     const section = document.getElementById('call-select-section');
     const container = document.getElementById('call-options');
 
@@ -444,27 +493,40 @@ function renderCallSelector(calls) {
     }
     section.classList.remove('d-none');
 
-    // 默认选第一通完整通话；没有完整的就选第一通
-    let defaultIdx = calls.findIndex(c => c.completeness.status === 'complete');
-    if (defaultIdx < 0) defaultIdx = 0;
+    // 默认选覆盖抓包最多的一通（多端共有的通话最可能是想分析的），其次完整的
+    let defaultIdx = 0, bestScore = -1;
+    calls.forEach((c, idx) => {
+        const score = c.files.length * 2 + (c.completeness.status === 'complete' ? 1 : 0);
+        if (score > bestScore) { bestScore = score; defaultIdx = idx; }
+    });
 
-    let html = '';
+    let html = captureWarning ? _captureWarningHtml(captureWarning) : '';
     calls.forEach((c, idx) => {
         const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
         const checked = idx === defaultIdx ? 'checked' : '';
+        const p2pBadge = c.is_p2p
+            ? ' <span class="badge bg-info text-dark"><i class="bi bi-arrow-left-right"></i> 点对点直连</span>' : '';
         html += `
             <label class="direction-option">
                 <input type="radio" name="call-select" value="${c.call_id}" ${checked} style="display:none">
-                ${callLabel(c.call_id)} ${c.start_str}~${c.end_str}（${c.duration_s}s）
+                ${callLabel(c.call_id)} ${c.start_str}~${c.end_str}（${c.duration_s}s）${p2pBadge}
                 <span class="badge ${st.badge}">${st.label}</span>
             </label>`;
     });
-    html += `
-        <label class="direction-option">
-            <input type="radio" name="call-select" value="all" style="display:none">
-            全部通话（混合分析）
-            <span class="badge bg-danger">结果易失真</span>
-        </label>`;
+    // 抓包之间没有共同通话时，混合分析会把不同通话搅在一起，直接不给选
+    if (!captureWarning) {
+        html += `
+            <label class="direction-option">
+                <input type="radio" name="call-select" value="all" style="display:none">
+                全部通话（混合分析）
+                <span class="badge bg-danger">结果易失真</span>
+            </label>`;
+    } else {
+        const note = captureWarning.kind === 'p2p'
+            ? '存在点对点直连通话（分析它不会使用 FS 数据），请选择要分析的通话。'
+            : '抓包之间可能不是同一次通话，请以其中一通为准进行分析。';
+        html += `<div class="w-100 text-muted small">${note}</div>`;
+    }
 
     container.innerHTML = html;
 

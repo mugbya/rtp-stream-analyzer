@@ -283,8 +283,14 @@ def assess_call_completeness(call: dict, file_info: dict, server_ip: str = None)
 
 
 # Events whose timestamps differ by less than this across capture files are the
-# same signaling packet seen at two capture points (capture clocks differ by <1s)
-SIP_DUP_WINDOW_S = 3.0
+# same signaling packet seen at two capture points (capture clocks differ by <1s
+# but retransmissions can persist tens of seconds; same CSeq+method+src+dst is
+# definitionally one message of one transaction)
+SIP_DUP_WINDOW_S = 30.0
+# 同一条信令在多个抓包里都有副本时保留哪份：FS 端单一时钟、两侧腿都看得见，
+# 时序自洽，最优先；其次终端（主叫端）；最后坐席端。混用不同机器时钟的消息
+# 会因时钟偏差在时间线上排错序
+ROLE_PRIORITY = {'fs': 0, 'terminal': 1, 'seat': 2}
 # A Call-ID group attaches to a call when its first message falls within this
 # distance of the call's media range
 SIP_ASSOC_WINDOW_S = 15.0
@@ -326,8 +332,9 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
     all_events.sort(key=lambda e: e['time'])
     deduped = []
     for ev in all_events:
-        dup = False
-        for seen in reversed(deduped):
+        dup_idx = None
+        for i in reversed(range(len(deduped))):
+            seen = deduped[i]
             if ev['time'] - seen['time'] > SIP_DUP_WINDOW_S:
                 break
             # Same CSeq number => retransmission of the same message (seen at
@@ -336,10 +343,16 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             if (ev['call_id'] == seen['call_id'] and ev['method'] == seen['method']
                     and ev['cseq'] == seen['cseq']
                     and ev['src'] == seen['src'] and ev['dst'] == seen['dst']):
-                dup = True
+                dup_idx = i
                 break
-        if not dup:
+        if dup_idx is None:
             deduped.append(ev)
+        elif (ROLE_PRIORITY.get(ev['file'], 9)
+                < ROLE_PRIORITY.get(deduped[dup_idx]['file'], 9)):
+            # 同一条消息的多抓包副本：换成本次上传里优先级更高的那份，
+            # 保证整条时间线出自同一台机器的时钟
+            deduped[dup_idx] = ev
+    deduped.sort(key=lambda e: e['time'])
 
     # Group remaining messages by Call-ID
     by_call_id = defaultdict(list)
@@ -399,6 +412,7 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
         byes = [e['time'] for e in flow if e['method'] == 'BYE']
         call['bye_time'] = min(byes) if byes else None
         call['sip_flow'] = [{
+            'time': e['time'],
             'time_str': _fmt_time(e['time']),
             'method': e['method'],
             'cseq_method': e.get('cseq_method', ''),
@@ -422,6 +436,17 @@ def _sip_kind(method: str) -> str:
         if code < 300:
             return 'success'
     return 'error'
+
+
+def _is_direct_media(call: dict, server_ip: str | None) -> bool:
+    """通话媒体是否完全不经服务器转发（点对点直连）。
+
+    正常经服务器转发的通话，每条腿必有一端是服务器 IP；所有腿的端点都不含
+    服务器 IP，说明媒体在两个端点之间直连（终端直拨坐席 / 旁路媒体）。
+    """
+    if not server_ip:
+        return False
+    return all(server_ip not in leg['ips'] for leg in call['legs'])
 
 
 def detect_calls(captures: dict, server_ip: str = None) -> list:
@@ -496,12 +521,15 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
                 talk = (min(in_win), max(in_win))
         talk_dur = talk[1] - talk[0]
 
+        p2p = _is_direct_media(call, server_ip)
         results.append({
             'call_id': f'call_{idx + 1}',
             'start': call['start'],
             'start_str': _fmt_time(call['start']),
             'end_str': _fmt_time(call['end']),
             'duration_s': round(call['duration'], 1),
+            'answer_time': call.get('answer_time'),
+            'bye_time': call.get('bye_time'),
             'talk_start_str': _fmt_time(talk[0]),
             'talk_end_str': _fmt_time(talk[1]),
             'talk_duration_s': round(talk_dur, 1),
@@ -510,8 +538,114 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             'media_types': media_types,
             'codecs': codecs,
             'ssrcs': sorted(call['ssrcs']),
+            'is_p2p': p2p,
+            # 点对点直连时给出两端 IP，供提示文案直接展示（一眼确认）
+            'p2p_endpoints': sorted({ip for leg in call['legs']
+                                     for ip in leg['ips']}) if p2p else [],
             'completeness': completeness,
             'sip_flow': call.get('sip_flow', []),
             'sip_call_ids': sorted(call.get('sip_call_ids', set())),
         })
     return results
+
+
+# 上传角色 → 展示名（跨抓包一致性提示用）
+ROLE_DISPLAY = {'seat': '坐席端', 'fs': 'FS 端', 'terminal': '终端（主叫端）'}
+
+
+def check_capture_consistency(calls: list, roles, server_ip: str = None,
+                              server_roles=None) -> dict | None:
+    """检查多份抓包之间是否至少共享一通通话（传错文件检测）。
+
+    同一次通话的媒体流 SSRC 在每个经过的抓包点都相同，会被合并进同一通；
+    因此正常情况下坐席端 / FS 端 / 终端三份抓包至少共同覆盖一通通话。若某
+    两个角色之间找不到任何共同通话，说明这几个文件很可能不是同一次通话。
+
+    例外：点对点直连通话（媒体不经服务器转发，如终端直拨坐席）只会出现在
+    两个端点各自的抓包里，服务器抓包里天然没有。当所有"无共同通话"的角色
+    对都含服务器侧抓包、且其余角色之间存在共享的点对点通话时，说明不是传
+    错文件，提示改为点对点直连（kind='p2p'）：可直接选择该通话分析，服务
+    器抓包的数据不会参与。
+
+    Args:
+        calls: detect_calls 的结果列表（需含 is_p2p / p2p_endpoints）。
+        roles: 上传角色列表。
+        server_ip: 检测到的服务器 IP（点对点判据依赖它）。
+        server_roles: 抓包点位于服务器的角色（该抓包的 IP 集合含 server_ip），
+            缺省回退为 {'fs'}。
+
+    Returns:
+        None 表示一致；否则 {
+            'kind': 'p2p' | 'mismatch',
+            'message': 提示文本,
+            'roles': [{'role', 'display',
+                       'overall': {'start', 'end', 'count'},
+                       'calls': [{'label', 'start', 'end'}, ...]}, ...],
+            'pairs': [{'a', 'b'}, ...]（无共同通话的角色对），
+        }。roles 供前端渲染纵向列表：每份抓包一行（总体时间段 + 每通通话时间段）。
+    """
+    roles = list(dict.fromkeys(r for r in roles if r))
+    if len(roles) < 2 or not calls:
+        return None
+
+    role_calls = {r: [c for c in calls if r in c['files']] for r in roles}
+    pairs = []
+    for i, a in enumerate(roles):
+        for b in roles[i + 1:]:
+            if not any({a, b} <= set(c['files']) for c in calls):
+                pairs.append({'a': a, 'b': b})
+    if not pairs:
+        return None
+
+    server_side = {r for r in (server_roles or []) if r in roles}
+    if not server_side and 'fs' in roles:
+        server_side = {'fs'}
+
+    kind, message = 'mismatch', None
+    # 点对点解释成立的条件：每个失败角色对都含服务器侧抓包（服务器抓不到
+    # 这通电话），且非服务器角色之间确实共享着一通媒体直连的通话（两端都
+    # 抓到，说明是同一通，而不是各抓各的）
+    direct_calls = [c for c in calls
+                    if c.get('is_p2p') and len(c['files']) >= 2] if server_side else []
+    if direct_calls and all(server_side & {p['a'], p['b']} for p in pairs):
+        kind = 'p2p'
+        message = _p2p_message(direct_calls, pairs, role_calls,
+                               server_side, server_ip)
+
+    role_items = []
+    for r in roles:
+        cs = sorted(role_calls[r], key=lambda c: c['start'])
+        overall = ({'start': cs[0]['start_str'], 'end': cs[-1]['end_str'],
+                    'count': len(cs)} if cs else {'count': 0})
+        role_items.append({
+            'role': r,
+            'display': ROLE_DISPLAY.get(r, r),
+            'overall': overall,
+            'calls': [{'label': f"通话 {c['call_id'].split('_')[-1]}",
+                       'start': c['start_str'], 'end': c['end_str']} for c in cs],
+        })
+
+    if message is None:
+        total_pairs = len(roles) * (len(roles) - 1) // 2
+        scope = ('任意两端抓包之间都没有同一通通话' if len(pairs) == total_pairs
+                 else '部分抓包两两之间没有同一通通话')
+        message = (f'这几份抓包里可能不是同一次通话：{scope}。'
+                   '请确认上传的文件是否传错；如需继续，请选择其中一通通话单独分析。')
+    return {'kind': kind, 'message': message, 'roles': role_items, 'pairs': pairs}
+
+
+def _p2p_message(direct_calls: list, pairs: list, role_calls: dict,
+                 server_side: set, server_ip: str) -> str:
+    """点对点直连提示文案：给出直连两端 IP 与服务器 IP，方便一眼确认。"""
+    call = direct_calls[0]
+    sharers = '、'.join(ROLE_DISPLAY.get(r, r) for r in call['files']
+                        if r not in server_side)
+    endpoints = ' ↔ '.join(call.get('p2p_endpoints') or [])
+    servers = '、'.join(sorted({ROLE_DISPLAY.get(r, r) for r in server_side
+                                if any(r in (p['a'], p['b']) for p in pairs)}))
+    n = max(len(role_calls.get(r, [])) for r in server_side)
+    count = f'{len(direct_calls)} 通点对点直连通话' if len(direct_calls) > 1 else '点对点直连通话'
+    return (f'检测到{count}：{sharers}之间的通话媒体为端到端直连（{endpoints}），'
+            f'未经过 {servers}（{server_ip}），因此 {servers}的抓包里没有这通通话'
+            f'（其抓到的 {n} 通为该服务器同时段的其他通话）。'
+            f'文件没有传错，选择这通通话分析即可，分析不会使用 {servers}的数据。')

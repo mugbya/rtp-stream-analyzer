@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from analyzer.call_detector import (
     build_conversations, merge_conversations, group_calls,
-    assess_call_completeness, detect_calls,
+    assess_call_completeness, detect_calls, check_capture_consistency,
 )
 
 SERVER = '10.0.0.1'
@@ -359,6 +359,173 @@ def test_sip_from_to_parsing():
     print("PASS: SIP From/To device identity parsing")
 
 
+def test_capture_consistency_mismatch():
+    """Uploads with no shared call across captures -> consistency warning."""
+    seat_rd = make_rtp_data([
+        (0x1111, 5000, 6000, 100, 160, 0, SEAT, SERVER, 8, 0.02),
+        (0x1112, 6000, 5000, 100, 160, 0, SERVER, SEAT, 8, 0.02),
+    ], 90, 170)
+    term_rd = make_rtp_data([
+        (0x2221, 7000, 8000, 300, 360, 0, TERM, SERVER, 0, 0.02),
+        (0x2222, 8000, 7000, 300, 360, 0, SERVER, TERM, 0, 0.02),
+    ], 300, 380)
+    calls = detect_calls({'seat': seat_rd, 'terminal': term_rd}, SERVER)
+    assert len(calls) == 2, f"expected 2 disjoint calls, got {len(calls)}"
+    warning = check_capture_consistency(calls, ['seat', 'terminal'])
+    assert warning is not None, 'expected mismatch warning'
+    assert warning['kind'] == 'mismatch', warning
+    assert any(p['a'] == 'seat' and p['b'] == 'terminal'
+               for p in warning['pairs']), warning
+    # 纵向列表结构：每个角色一行——总体时间段 + 每通通话时间段
+    by_role = {r['role']: r for r in warning['roles']}
+    assert by_role['seat']['display'] == '坐席端'
+    assert by_role['seat']['overall'] == {'start': by_role['seat']['calls'][0]['start'],
+                                          'end': by_role['seat']['calls'][-1]['end'],
+                                          'count': 1}
+    assert len(by_role['seat']['calls']) == 1
+    assert len(by_role['terminal']['calls']) == 1
+    assert all(c['start'] and c['end'] and c['label'].startswith('通话')
+               for r in warning['roles'] for c in r['calls'])
+    print("PASS: mismatched captures -> consistency warning raised")
+
+    # Same call seen in both captures -> no warning
+    shared_rd = make_rtp_data([
+        (0x3331, 5000, 6000, 100, 160, 0, SEAT, SERVER, 8, 0.02),
+        (0x3332, 6000, 5000, 100, 160, 0, SERVER, SEAT, 8, 0.02),
+    ], 90, 170)
+    calls = detect_calls({'seat': shared_rd, 'fs': shared_rd}, SERVER)
+    assert len(calls) == 1 and set(calls[0]['files']) == {'fs', 'seat'}
+    assert check_capture_consistency(calls, ['seat', 'fs']) is None
+    print("PASS: shared call across captures -> no warning")
+
+    # Degenerate cases: single role or no calls -> no warning
+    assert check_capture_consistency(calls, ['seat']) is None
+    assert check_capture_consistency([], ['seat', 'fs']) is None
+    print("PASS: single role / empty calls -> no warning")
+
+
+def test_p2p_direct_call_hint():
+    """点对点直连（媒体不经 FS）：通话标记 is_p2p，一致性提示为 p2p 而非传错文件。
+
+    场景：坐席↔终端的通话媒体在两端之间直连（FS 抓包里没有这通通话的任何
+    RTP），FS 抓包里只有同时段经服务器转发的其他通话。此时"坐席/终端 与 FS
+    之间没有共同通话"不应报传错文件，而应提示点对点直连。
+    """
+    OTHER = '10.0.0.9'
+    direct_streams = [
+        (0x4411, 52375, 50192, 100, 160, 0, SEAT, TERM, 96, 0.02),
+        (0x4412, 50192, 52375, 100, 160, 0, TERM, SEAT, 96, 0.02),
+    ]
+    seat_rd = make_rtp_data(direct_streams, 90, 170)
+    term_rd = make_rtp_data(direct_streams, 95, 165)
+    fs_rd = make_rtp_data([
+        (0x5511, 7000, 8000, 100, 160, 0, OTHER, SERVER, 0, 0.02),
+        (0x5512, 8000, 7000, 100, 160, 0, SERVER, OTHER, 0, 0.02),
+    ], 90, 200)
+
+    calls = detect_calls({'seat': seat_rd, 'fs': fs_rd, 'terminal': term_rd}, SERVER)
+    p2p_calls = [c for c in calls if c['is_p2p']]
+    assert len(p2p_calls) == 1, f"expected 1 p2p call, got {len(p2p_calls)}"
+    assert set(p2p_calls[0]['files']) == {'seat', 'terminal'}, p2p_calls[0]['files']
+    assert p2p_calls[0]['p2p_endpoints'] == sorted([SEAT, TERM]), p2p_calls[0]
+    # 经服务器转发的其他通话不标 p2p
+    assert not any(c['is_p2p'] for c in calls if c not in p2p_calls)
+
+    warning = check_capture_consistency(calls, ['seat', 'fs', 'terminal'],
+                                        server_ip=SERVER, server_roles=['fs'])
+    assert warning is not None, 'expected p2p warning'
+    assert warning['kind'] == 'p2p', warning
+    assert '点对点' in warning['message'], warning['message']
+    # 不能再出现"疑似传错文件"的旧措辞
+    assert '是否传错' not in warning['message'], warning['message']
+    assert '可能不是同一次通话' not in warning['message'], warning['message']
+    # 提示里给出直连两端 IP 与服务器 IP，方便一眼确认
+    assert SEAT in warning['message'] and TERM in warning['message'], warning['message']
+    assert SERVER in warning['message'], warning['message']
+    # 纵向列表照常给出（FS 端的 1 通是其他通话）
+    by_role = {r['role']: r for r in warning['roles']}
+    assert len(by_role['fs']['calls']) == 1
+    print("PASS: p2p direct call -> is_p2p flag + p2p hint (not 'wrong file')")
+
+    # 反例：FS 侧抓包也参与了这通通话（正常转发）时 SSRC 会合并，不会走到
+    # 提示分支；这里验证"服务器侧抓包不缺位"时保持 mismatch——去掉 FS 抓包，
+    # 坐席/终端之间共享同一通，无警告
+    calls2 = detect_calls({'seat': seat_rd, 'terminal': term_rd}, SERVER)
+    assert check_capture_consistency(calls2, ['seat', 'terminal'],
+                                     server_ip=SERVER, server_roles=[]) is None
+    print("PASS: p2p call shared by both endpoint captures alone -> no warning")
+
+    # 反例 2：失败角色对含非服务器角色（seat 与 terminal 各抓各的不同通话）
+    # 时，即使存在 p2p 通话也不能用 p2p 解释
+    other_term_rd = make_rtp_data([
+        (0x6611, 9000, 9100, 300, 360, 0, TERM, OTHER, 0, 0.02),
+        (0x6612, 9100, 9000, 300, 360, 0, OTHER, TERM, 0, 0.02),
+    ], 300, 380)
+    calls3 = detect_calls({'seat': seat_rd, 'fs': fs_rd,
+                           'terminal': other_term_rd}, SERVER)
+    warning3 = check_capture_consistency(calls3, ['seat', 'fs', 'terminal'],
+                                         server_ip=SERVER, server_roles=['fs'])
+    assert warning3 is not None and warning3['kind'] == 'mismatch', warning3
+    print("PASS: failing pair without server-side role -> still mismatch")
+
+
+def test_sip_source_priority_and_retrans_dedupe():
+    """Same message captured by seat+fs keeps the FS copy (one clock, stable
+    order); a same-CSeq retransmission 15s later is still deduped (30s window)."""
+    from analyzer.call_detector import build_sip_flows
+
+    cid = 'prio-test@host'
+
+    def evs(skew, with_retrans):
+        base = [
+            {'time': 100.0, 'method': 'INVITE', 'reason': '', 'call_id': cid,
+             'cseq': 1, 'cseq_method': 'INVITE', 'src': TERM, 'dst': SERVER,
+             'sdp': {}, 'from': {}, 'to': {}},
+            {'time': 102.0, 'method': '100', 'reason': 'Trying', 'call_id': cid,
+             'cseq': 1, 'cseq_method': 'INVITE', 'src': SERVER, 'dst': TERM,
+             'sdp': {}, 'from': {}, 'to': {}},
+            {'time': 104.0, 'method': '200', 'reason': 'OK', 'call_id': cid,
+             'cseq': 1, 'cseq_method': 'INVITE', 'src': SEAT, 'dst': SERVER,
+             'sdp': {}, 'from': {}, 'to': {}},
+            {'time': 104.1, 'method': 'ACK', 'reason': '', 'call_id': cid,
+             'cseq': 1, 'cseq_method': 'ACK', 'src': TERM, 'dst': SERVER,
+             'sdp': {}, 'from': {}, 'to': {}},
+        ]
+        out = []
+        for e in base:
+            e2 = dict(e)
+            e2['time'] += skew
+            out.append(e2)
+        if with_retrans:
+            r = dict(base[2])
+            r['time'] = base[2]['time'] + skew + 15.0
+            out.append(r)
+        return out
+
+    calls = [{'start': 103.0, 'end': 120.0}]
+    captures = {
+        # seat clock runs ~0.8s behind FS; retransmission only in seat capture
+        'seat': {'sip_events': evs(0.8, True)},
+        'fs': {'sip_events': evs(0.0, False)},
+    }
+    build_sip_flows(calls, captures, server_ip=SERVER)
+    flow = calls[0]['sip_flow']
+    twos = [e for e in flow if e['method'] == '200' and e['cseq_method'] == 'INVITE']
+    assert len(twos) == 1, f"expected 1 answer 200 OK, got {len(twos)}: {twos}"
+    # kept copy must be the FS one (time 104.0), not the skewed seat copy 104.8
+    assert twos[0]['time'] == 104.0, twos[0]
+    assert calls[0]['answer_time'] == 104.0
+    print("PASS: SIP source priority (FS copy kept) + 15s retransmission deduped")
+
+    # Seat-only capture still works (priority falls back to the only copy)
+    calls = [{'start': 103.0, 'end': 120.0}]
+    build_sip_flows(calls, {'seat': {'sip_events': evs(0.8, True)}}, server_ip=SERVER)
+    flow = calls[0]['sip_flow']
+    twos = [e for e in flow if e['method'] == '200' and e['cseq_method'] == 'INVITE']
+    assert len(twos) == 1 and twos[0]['time'] == 104.8, twos
+    print("PASS: single-capture fallback keeps its own copy")
+
+
 if __name__ == '__main__':
     test_two_sequential_calls()
     test_port_reuse_same_ports()
@@ -372,4 +539,7 @@ if __name__ == '__main__':
     test_sip_from_to_parsing()
     test_sip_sdp_parsing()
     test_concurrent_calls_limitation()
+    test_capture_consistency_mismatch()
+    test_p2p_direct_call_hint()
+    test_sip_source_priority_and_retrans_dedupe()
     print("\n=== ALL CALL DETECTOR TESTS PASSED ===")
