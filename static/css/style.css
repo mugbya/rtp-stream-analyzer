@@ -133,3 +133,178 @@ body {
         font-size: 1.8rem;
     }
 }
+/* SIP 信令流程 — 时序阶梯图（左：主叫 / 中：服务器 / 右：被叫，点对点为左右两列） */
+.sip-flow {
+    max-height: 380px;
+    overflow-y: auto;
+}
+.sl-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #fff;
+    display: flex;
+    align-items: flex-end;
+    border-bottom: 2px solid #dee2e6;
+    padding-bottom: 4px;
+    margin-bottom: 4px;
+}
+.sl-gutter {
+    flex: 0 0 58px;
+}
+.sl-track {
+    flex: 1 1 auto;
+    position: relative;
+    display: grid;
+    min-width: 0;
+}
+.sl-p {
+    text-align: center;
+    min-width: 0;
+    padding: 0 4px;
+    overflow: hidden;
+}
+.sl-name {
+    font-weight: 600;
+    font-size: 0.78rem;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;   /* 长 SIP 标识（分机/显示名）省略显示，悬停看 title */
+}
+.sl-ip {
+    font-family: SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.66rem;
+    color: #6c757d;
+}
+.sl-role {
+    display: inline-block;
+    font-size: 0.66rem;
+    line-height: 1.5;
+    padding: 0 8px;
+    border-radius: 8px;
+}
+/* RTP 部分：协商编码标签 + 媒体开始/结束标线 */
+.sl-codecs {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin: 1px 0 3px 66px;   /* 时间线内、RTP 开始线下方，与标线标签对齐 */
+    font-size: 0.7rem;
+}
+.sl-marker {
+    position: relative;
+    z-index: 1;
+    height: 20px;
+    margin: 3px 0;
+}
+.sl-marker::before {
+    content: '';
+    position: absolute;
+    left: 58px;                 /* 与 .sl-lines 同起点（扣除时间列） */
+    right: 0;
+    top: 50%;
+    border-top: 2px solid;
+    opacity: .5;
+}
+.sl-marker .lb {
+    position: absolute;
+    left: 66px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: #fff;
+    padding: 0 6px;
+    font-size: 0.68rem;
+    white-space: nowrap;
+    border-radius: 4px;
+}
+.sl-marker.sl-start::before { border-color: #198754; }
+.sl-marker.sl-start .lb { color: #198754; }
+.sl-marker.sl-end::before { border-color: #868e96; }
+.sl-marker.sl-end .lb { color: #868e96; }
+.sl-body {
+    position: relative;
+}
+/* 生命线容器：左侧让出与 .sl-t/.sl-gutter 等宽的时间列，
+   使生命线的百分比定位与消息箭头所在的 .sl-track 完全同基准 */
+.sl-lines {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 58px;
+    right: 0;
+}
+.sl-line {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-left: 1px dashed #ced4da;
+}
+.sl-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    min-height: 26px;
+}
+.sl-row:hover {
+    background: #f1f7ff;
+}
+.sl-t {
+    flex: 0 0 58px;
+    font-family: SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.66rem;
+    color: #868e96;
+    text-align: right;
+    padding-right: 8px;
+}
+.sl-msg {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    color: #212529;
+}
+.sl-msg .ln {
+    flex: 1 1 0;
+    min-width: 5px;
+    height: 0;
+    border-top: 1.6px solid currentColor;
+    position: relative;
+}
+.sl-msg .ln.arr-r::after,
+.sl-msg .ln.arr-l::after {
+    content: '';
+    position: absolute;
+    top: -3.6px;
+    border: 3px solid transparent;
+}
+.sl-msg .ln.arr-r::after {
+    right: -1px;
+    border-left: 6px solid currentColor;
+    border-right: 0;
+}
+.sl-msg .ln.arr-l::after {
+    left: -1px;
+    border-right: 6px solid currentColor;
+    border-left: 0;
+}
+.sl-msg .lb {
+    padding: 0 5px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #fff;
+    line-height: 1.4;
+    z-index: 1;
+}
+.sl-msg.sl-self {
+    transform: translateX(-50%);
+    justify-content: center;
+}
+.sl-msg.sip-req { color: #0d6efd; }
+.sl-msg.sip-prov { color: #adb5bd; }
+.sl-msg.sip-ok { color: #198754; }
+.sl-msg.sip-err { color: #dc3545; }

@@ -84,6 +84,7 @@
                     </div>
                 </div>
                 <div id="streams-detail" class="small"></div>
+                <div id="calls-detail" class="mt-2"></div>
             </div>
         </div>
 
@@ -93,6 +94,15 @@
                 <h5 class="mb-0"><i class="bi bi-3-circle"></i> 选择分析参数</h5>
             </div>
             <div class="card-body">
+                <div id="call-select-section" class="d-none mb-3">
+                    <label class="form-label fw-bold">
+                        <i class="bi bi-telephone text-primary"></i> 选择通话
+                    </label>
+                    <div id="call-options" class="d-flex flex-wrap gap-2"></div>
+                    <small class="text-danger">
+                        多通通话混在一起分析会使延迟/抖动结果失真，建议选择具体通话
+                    </small>
+                </div>
                 <div class="row g-3">
                     <div class="col-md-6">
                         <label class="form-label fw-bold">延迟方向</label>

@@ -340,15 +340,19 @@ def convert_video_to_mp4(raw_path: str, output_path: str) -> dict:
 
 
 def generate_all_media(captures: dict, classified: dict, output_dir: str,
-                       server_ip: str = None, media_types: str = 'all') -> dict:
+                       server_ip: str = None, media_types: str = 'all',
+                       ssrc_filter=None, call_id: str = None) -> dict:
     """Generate audio and video files from all captures.
-    
+
     Args:
         captures: Dict of {role: rtp_data} from extract_rtp_packets (with include_payload=True).
         classified: Dict of {'audio': {ssrc: info}, 'video': {ssrc: info}}.
         output_dir: Base output directory (e.g., outputs/2026-09-11/<session_id>).
         server_ip: Detected server IP for direction identification.
         media_types: 'audio', 'video', or 'all'.
+        ssrc_filter: Optional set of SSRCs; only these streams are rebuilt
+            (used to limit media to one detected call).
+        call_id: Optional call identifier stamped into manifest entries.
         
     Returns:
         A media manifest dict:
@@ -363,6 +367,7 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
     video_dir = os.path.join(output_dir, 'video')
     
     manifest = {
+        'call_id': call_id,
         'audio': [],
         'video': [],
         'unsupported': [],
@@ -380,6 +385,8 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
         audio_streams = classified.get('audio', {})
         
         for ssrc in audio_streams:
+            if ssrc_filter is not None and ssrc not in ssrc_filter:
+                continue
             for role in roles:
                 if ssrc not in captures[role]['streams']:
                     continue
@@ -399,6 +406,7 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
                 
                 if audio_result['success']:
                     manifest['audio'].append({
+                        'call_id': call_id,
                         'role': role,
                         'direction': audio_result['direction'],
                         'ssrc': audio_result['ssrc'],
@@ -427,6 +435,8 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
         video_streams = classified.get('video', {})
         
         for ssrc in video_streams:
+            if ssrc_filter is not None and ssrc not in ssrc_filter:
+                continue
             for role in roles:
                 if ssrc not in captures[role]['streams']:
                     continue
@@ -450,6 +460,7 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
                     conv_result = convert_video_to_mp4(raw_path, mp4_path)
                     
                     video_entry = {
+                        'call_id': call_id,
                         'role': role,
                         'direction': video_result['direction'],
                         'ssrc': video_result['ssrc'],

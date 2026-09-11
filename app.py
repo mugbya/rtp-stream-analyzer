@@ -22,6 +22,7 @@ from analyzer.packet_loss import detect_all_losses
 from analyzer.charts import generate_analysis_chart
 from analyzer.reporter import generate_report
 from analyzer.media_extractor import generate_all_media, get_media_urls
+from analyzer.call_detector import detect_calls
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -51,35 +52,40 @@ def upload_files():
     files_info = []
     all_ips = set()
     all_streams = {}
-    
+    rtp_captures = {}  # role -> rtp_data（不含载荷，供通话检测使用）
+
     for key in request.files:
         file = request.files[key]
         if file.filename:
             filename = secure_filename(file.filename)
             filepath = os.path.join(session_dir, filename)
             file.save(filepath)
-            
+
             # 解析 RTP
             rtp_data = extract_rtp_packets(filepath)
-            
+            rtp_captures[key] = rtp_data
+
             # 收集流信息
             for ssrc, info in rtp_data['streams'].items():
                 all_streams[ssrc] = info
-            
+
             all_ips.update(rtp_data['ips'])
-            
+
             files_info.append({
                 'role': key,
                 'filename': filename,
                 'total_packets': rtp_data['total_count'],
-                'ips': sorted([ip for ip in rtp_data['ips'] 
+                'ips': sorted([ip for ip in rtp_data['ips']
                               if not ip.startswith('224.') and not ip.startswith('239.')
                               and ip not in ('0.0.0.0', '255.255.255.255')]),
                 'stream_count': len(rtp_data['streams']),
             })
-    
+
     # 自动检测服务器 IP
     server_ip = detect_server_ip(all_streams)
+
+    # 通话检测：将流按通话分组并评估每通的抓包完整性
+    calls = detect_calls(rtp_captures, server_ip)
     
     # 分类流
     classified = classify_all_streams(all_streams)
@@ -94,8 +100,9 @@ def upload_files():
         'streams': all_streams,
         'classified': classified,
         'session_dir': session_dir,
+        'calls': calls,
     }
-    
+
     return jsonify({
         'session_id': session_id,
         'files': files_info,
@@ -103,6 +110,7 @@ def upload_files():
         'audio_streams': len(classified.get('audio', {})),
         'video_streams': len(classified.get('video', {})),
         'available_directions': available_directions,
+        'calls': calls,
     })
 
 
@@ -113,16 +121,18 @@ def run_analysis():
     session_id = data.get('session_id')
     direction = data.get('direction', 'auto')
     media_type = data.get('media_type', 'audio')
-    
+    call_id = data.get('call_id')
+
     if session_id not in sessions:
         return jsonify({'error': 'Session not found'}), 404
-    
+
     session = sessions[session_id]
     session_dir = session['session_dir']
     files_info = session['files']
     all_streams = session['streams']
     classified = session['classified']
     server_ip = session.get('server_ip')
+    calls = session.get('calls') or []
     
     # 加载所有抓包数据（含 RTP 载荷，用于音视频重建）
     captures = {}
@@ -137,10 +147,26 @@ def run_analysis():
         target_streams = classified.get('video', {})
     else:
         target_streams = {**classified.get('audio', {}), **classified.get('video', {})}
-    
+
+    # 通话过滤：选中某通通话时，分析范围限定为该通话的流。
+    # 多通混杂会把不同通话的延迟/抖动拼在一起，导致结果失真。
+    selected_call = None
+    if call_id:
+        selected_call = next((c for c in calls if c['call_id'] == call_id), None)
+    elif len(calls) == 1:
+        # 只有一通通话时自动选中，行为与旧版一致
+        selected_call = calls[0]
+
+    call_ssrcs = None
+    if selected_call:
+        call_ssrcs = set(selected_call['ssrcs'])
+        target_streams = {s: info for s, info in target_streams.items()
+                          if s in call_ssrcs}
+
     results = {
         'direction': direction,
         'media_type': media_type,
+        'call_id': selected_call['call_id'] if selected_call else None,
         'num_captures': len(captures),
         'capture_roles': {fi['role']: fi['filename'] for fi in files_info},
         'ips_info': {fi['role']: {'ips': fi['ips'], 'stream_count': fi['stream_count']} 
@@ -233,19 +259,23 @@ def run_analysis():
     media_dir = os.path.join(app.config['OUTPUT_FOLDER'], output_date, session_id)
     media_types = media_type if media_type in ('audio', 'video') else 'all'
     media_manifest = generate_all_media(captures, classified, media_dir,
-                                        server_ip, media_types)
+                                        server_ip, media_types,
+                                        ssrc_filter=call_ssrcs,
+                                        call_id=selected_call['call_id'] if selected_call else None)
     media_manifest = get_media_urls(media_manifest, session_id, output_date)
     results['media_manifest'] = media_manifest
     results['media_dir'] = media_dir
-    
+
     # 保存结果到会话
     session['results'] = results
-    
+
     return jsonify({
         'success': True,
+        'call_id': selected_call['call_id'] if selected_call else None,
         'chart_url': results['chart_url'],
         'report': report,
         'media_manifest': {
+            'call_id': media_manifest.get('call_id'),
             'audio': media_manifest.get('audio', []),
             'video': media_manifest.get('video', []),
             'unsupported': media_manifest.get('unsupported', []),
@@ -287,6 +317,7 @@ def get_session(session_id):
         'server_ip': session['server_ip'],
         'audio_streams': len(session['classified'].get('audio', {})),
         'video_streams': len(session['classified'].get('video', {})),
+        'calls': session.get('calls') or [],
         'results': safe_results,
     })
 
