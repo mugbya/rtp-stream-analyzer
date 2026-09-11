@@ -327,6 +327,7 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
         for c in calls:
             c['sip_flow'] = []
             c['answer_time'] = c['bye_time'] = None
+            c['negotiated_codecs'] = {'audio': [], 'video': []}
         return
 
     all_events.sort(key=lambda e: e['time'])
@@ -411,6 +412,31 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
         call['answer_time'] = min(answers) if answers else None
         byes = [e['time'] for e in flow if e['method'] == 'BYE']
         call['bye_time'] = min(byes) if byes else None
+
+        # 协商编码（SDP offer/answer）：时间序第一条带 SDP 的消息是 offer，
+        # 其后第一条带 SDP 的消息是 answer（可能是 183 早释应答或 200 OK；
+        # 慢启动时 offer 在 200 OK、answer 在 ACK）。协商结果 = 双方列出编码
+        # 的交集，保持 offer 顺序；交集为空以 answer 为准（应答方决定，含
+        # 拒绝某路媒体）；无 answer 时只有主叫候选，谈不上协商。
+        # B2BUA 两条腿的信令合并在同一流程里，FS 自产 INVITE 的 SDP 用静态
+        # PT 不带 rtpmap，解析不出编码名——这种 SDP 对"协商了什么"没有信息
+        # 量，配对时跳过，避免 offer/answer 配错对。
+        sdp_msgs = [e for e in flow if e.get('sdp')
+                    and (e['sdp'].get('audio') or e['sdp'].get('video'))]
+        negotiated = {'audio': [], 'video': []}
+        if sdp_msgs:
+            offer = sdp_msgs[0]['sdp']
+            answer = sdp_msgs[1]['sdp'] if len(sdp_msgs) > 1 else None
+            for kind in ('audio', 'video'):
+                offered = offer.get(kind) or []
+                if answer is None:
+                    negotiated[kind] = offered
+                    continue
+                ans = answer.get(kind) or []
+                negotiated[kind] = [c for c in offered if c in ans] or ans
+        call['negotiated_codecs'] = negotiated
+        call['sdp_answered'] = len(sdp_msgs) >= 2
+
         call['sip_flow'] = [{
             'time': e['time'],
             'time_str': _fmt_time(e['time']),
@@ -422,6 +448,10 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             'to': e.get('to') or {},
             'label': e['method'] + (' ' + e['reason'] if e['reason'] else ''),
             'kind': _sip_kind(e['method']),
+            # 带 SDP 的消息（offer/answer）标注其列出的编码，供前端把协商
+            # 编码行插到应答行之后
+            'sdp_codecs': ({k: e['sdp'][k] for k in ('audio', 'video')
+                            if e['sdp'].get(k)} if e.get('sdp') else None),
         } for e in flow]
 
 
@@ -537,6 +567,8 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             'stream_count': len(call['ssrcs']),
             'media_types': media_types,
             'codecs': codecs,
+            'negotiated_codecs': call.get('negotiated_codecs') or {'audio': [], 'video': []},
+            'sdp_answered': call.get('sdp_answered', True),
             'ssrcs': sorted(call['ssrcs']),
             'is_p2p': p2p,
             # 点对点直连时给出两端 IP，供提示文案直接展示（一眼确认）

@@ -36,30 +36,50 @@ def _parse_sip_addr(value: str) -> dict:
     return out
 
 
+# RFC 3551 静态载荷：m= 行里这些 PT 不带 a=rtpmap 行，按此表解析名字
+STATIC_PT_NAMES = {
+    '0': 'PCMU', '3': 'GSM', '4': 'G723', '5': 'DVI4', '6': 'DVI4',
+    '7': 'LPC', '8': 'PCMA', '9': 'G722', '10': 'L16', '11': 'L16',
+    '12': 'QCELP', '13': 'CN', '14': 'MPA', '15': 'G728', '16': 'DVI4',
+    '17': 'DVI4', '18': 'G729', '25': 'CELB', '26': 'JPEG', '28': 'NV',
+    '31': 'H261', '32': 'MPV', '33': 'MP2T', '34': 'H263',
+}
+
+
 def _parse_sdp_codecs(body: str) -> dict:
     """Extract audio/video codec info from an SDP body.
 
     Returns {'audio': [names], 'video': [names], 'map': {'audio': {pt: name},
-    'video': {pt: name}}} — the lists are everything offered in rtpmap lines
-    (DTMF telephone-event excluded), the map resolves RTP payload types to
-    codec names so the actually-used codecs can be derived from stream PTs.
+    'video': {pt: name}}} — the lists follow the m= line payload order; names
+    come from a=rtpmap lines, falling back to the static payload table (dynamic
+    PTs without rtpmap have no name and are skipped). DTMF 事件流
+    （telephone-event / telephone）不是媒体编码，列表与映射都不收录。The map
+    resolves RTP payload types to codec names so the actually-used codecs can
+    be derived from stream PTs.
     """
     out = {'audio': [], 'video': [], 'map': {'audio': {}, 'video': {}}}
     media = None
+    order = {'audio': [], 'video': []}   # m= 行的 PT 顺序
+    named = {}                           # a=rtpmap 解析出的 pt -> 名字
     for line in body.replace('\r\n', '\n').split('\n'):
         if line.startswith('m='):
             parts = line.split()
             media = parts[0][2:] if len(parts) > 1 else None
+            if media in ('audio', 'video'):
+                order[media].extend(parts[3:])
         elif line.startswith('a=rtpmap:') and media in ('audio', 'video'):
             bits = line.split(':', 1)[1].split()
             if len(bits) >= 2:
-                pt = bits[0]
-                name = bits[1].split('/')[0].upper()
-                if name.startswith('TELEPHONE-'):
-                    continue    # DTMF 事件流（telephone-event/telephone-ev…），不是媒体编码
-                if name not in out[media]:
-                    out[media].append(name)
-                out['map'][media].setdefault(pt, name)
+                named[bits[0]] = bits[1].split('/')[0].upper()
+
+    for kind in ('audio', 'video'):
+        for pt in order[kind]:
+            name = named.get(pt) or STATIC_PT_NAMES.get(pt)
+            if not name or name.startswith('TELEPHONE'):
+                continue
+            if name not in out[kind]:
+                out[kind].append(name)
+            out['map'][kind].setdefault(pt, name)
     return out
 
 

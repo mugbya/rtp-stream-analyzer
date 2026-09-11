@@ -296,6 +296,13 @@ def test_back_to_back_calls_no_signaling_bleed():
     assert call_a['talk_end_str'] == datetime.fromtimestamp(110).strftime(fmt), call_a['talk_end_str']
     assert call_a['talk_duration_s'] == 6.0, call_a['talk_duration_s']
     assert call_b['talk_duration_s'] == 4.0, call_b['talk_duration_s']
+    # 协商编码 = offer(INVITE) 与 answer(200 OK) SDP 的交集
+    assert call_a['negotiated_codecs'] == {'audio': ['PCMU'], 'video': ['H264']}
+    assert call_b['negotiated_codecs'] == {'audio': ['PCMA'], 'video': []}
+    assert call_a['sdp_answered'] is True
+    # 带 SDP 的消息标注了各自列出的编码
+    inv_a = next(m for m in call_a['sip_flow'] if m['method'] == 'INVITE')
+    assert inv_a['sdp_codecs'] == {'audio': ['PCMU'], 'video': ['H264']}, inv_a
     print("PASS: back-to-back same-pair calls keep signaling and BYE separate")
 
 
@@ -323,6 +330,29 @@ def test_sip_sdp_parsing():
         'audio': ['PCMU', 'PCMA'], 'video': ['H264'],
         'map': {'audio': {'0': 'PCMU', '8': 'PCMA'}, 'video': {'96': 'H264'}},
     }, ev['sdp']
+
+    # 静态 PT（0/8）不带 rtpmap 时按静态表解析；裸 telephone（无 -event 后缀）
+    # 同样是 DTMF，排除；无 rtpmap 的动态 PT 没有名字，跳过
+    payload2 = ('INVITE sip:1003@10.0.0.1 SIP/2.0\r\n'
+                'From: <sip:1002@10.0.0.2>\r\nTo: <sip:1003@10.0.0.1>\r\n'
+                'Call-ID: sdp-cid2\r\nCSeq: 1 INVITE\r\n'
+                'Content-Type: application/sdp\r\nContent-Length: 999\r\n'
+                '\r\n'
+                'v=0\r\n'
+                'm=audio 16400 RTP/AVP 96 97 98 0 8 101 99 100\r\n'
+                'a=rtpmap:96 opus/48000/2\r\n'
+                'a=rtpmap:97 speex/16000\r\n'
+                'a=rtpmap:98 speex/8000\r\n'
+                'a=rtpmap:101 telephone-event/48000\r\n'
+                'a=rtpmap:99 telephone\r\n').encode()
+    ev3 = _parse_sip_event(payload2)
+    assert ev3 and ev3['sdp'] == {
+        'audio': ['OPUS', 'SPEEX', 'PCMU', 'PCMA'],
+        'video': [],
+        'map': {'audio': {'96': 'OPUS', '97': 'SPEEX', '98': 'SPEEX',
+                          '0': 'PCMU', '8': 'PCMA'},
+                'video': {}},
+    }, ev3['sdp']
 
     # No body / no SDP -> empty dict
     ev2 = _parse_sip_event(b'BYE sip:1002@10.0.0.1 SIP/2.0\r\n'
@@ -402,6 +432,88 @@ def test_capture_consistency_mismatch():
     assert check_capture_consistency(calls, ['seat']) is None
     assert check_capture_consistency([], ['seat', 'fs']) is None
     print("PASS: single role / empty calls -> no warning")
+
+
+def test_negotiated_codecs():
+    """协商编码 = SDP offer/answer 交集：应答子集胜出、answer 空表示拒绝该路
+    媒体、慢启动 offer 在 200 OK / answer 在 ACK、无应答只剩主叫候选。"""
+    from analyzer.call_detector import build_sip_flows
+
+    def sip(time, method, cid, cseq, src, dst, sdp=None, cseq_method=''):
+        return {'time': time, 'method': method, 'call_id': cid, 'cseq': cseq,
+                'cseq_method': cseq_method or method, 'src': src, 'dst': dst,
+                'reason': '', 'sdp': sdp or {}}
+
+    offer_all = {'audio': ['PCMU', 'PCMA', 'G722'], 'video': ['H264', 'H265'],
+                 'map': {'audio': {}, 'video': {}}}
+    ans_subset = {'audio': ['PCMA', 'G722'], 'video': ['H264'],
+                  'map': {'audio': {}, 'video': {}}}
+    ans_audio_only = {'audio': ['G722'], 'video': [],
+                      'map': {'audio': {}, 'video': {}}}
+
+    # 正常应答：183 早释媒体即 answer，交集保持 offer 顺序
+    calls = [{'start': 90, 'end': 200}]
+    build_sip_flows(calls, {'fs': {'sip_events': [
+        sip(95, 'INVITE', 'a', 1, SEAT, SERVER, sdp=offer_all),
+        sip(97, '183', 'a', 1, SERVER, SEAT, sdp=ans_subset),
+        sip(104, '200', 'a', 1, SERVER, SEAT, sdp=ans_subset, cseq_method='INVITE'),
+        sip(165, 'BYE', 'a', 2, SEAT, SERVER),
+    ]}}, server_ip=SERVER)
+    assert calls[0]['negotiated_codecs'] == {'audio': ['PCMA', 'G722'],
+                                             'video': ['H264']}, calls[0]
+    assert calls[0]['sdp_answered'] is True
+    print("PASS: negotiated = offer∩answer (183 early answer), offer order kept")
+
+    # 慢启动：offer 在 200 OK、answer 在 ACK；answer 拒绝视频 → 协商无视频，
+    # 音频交集为空时以 answer 为准
+    calls = [{'start': 290, 'end': 400}]
+    build_sip_flows(calls, {'fs': {'sip_events': [
+        sip(295, 'INVITE', 'b', 1, SEAT, SERVER),
+        sip(300, '200', 'b', 1, SERVER, SEAT, sdp=offer_all, cseq_method='INVITE'),
+        sip(301, 'ACK', 'b', 1, SEAT, SERVER, sdp=ans_audio_only),
+        sip(365, 'BYE', 'b', 2, SEAT, SERVER),
+    ]}}, server_ip=SERVER)
+    assert calls[0]['negotiated_codecs'] == {'audio': ['G722'], 'video': []}, \
+        calls[0]['negotiated_codecs']
+    print("PASS: slow-start offer in 200 OK / answer in ACK; declined video gone")
+
+    # 无应答（486 忙）：只有主叫候选，sdp_answered=False
+    calls = [{'start': 490, 'end': 600}]
+    build_sip_flows(calls, {'fs': {'sip_events': [
+        sip(495, 'INVITE', 'c', 1, SEAT, SERVER, sdp=offer_all),
+        sip(497, '486', 'c', 1, SERVER, SEAT),
+    ]}}, server_ip=SERVER)
+    assert calls[0]['negotiated_codecs'] == {'audio': ['PCMU', 'PCMA', 'G722'],
+                                             'video': ['H264', 'H265']}
+    assert calls[0]['sdp_answered'] is False
+    print("PASS: unanswered call keeps caller candidates, sdp_answered=False")
+
+    # 无任何 SDP：空协商结果
+    calls = [{'start': 690, 'end': 800}]
+    build_sip_flows(calls, {'fs': {'sip_events': [
+        sip(695, 'INVITE', 'd', 1, SEAT, SERVER),
+        sip(765, 'BYE', 'd', 2, SEAT, SERVER),
+    ]}}, server_ip=SERVER)
+    assert calls[0]['negotiated_codecs'] == {'audio': [], 'video': []}
+    print("PASS: no SDP at all -> empty negotiated codecs")
+
+    # B2BUA 两条腿信令合并在同一流程：FS 并行转发的 INVITE 其 SDP 用静态 PT
+    # 不带 rtpmap，解析不出编码名（audio/video 均为空列表）——配对时必须跳过
+    # 这条消息，用终端 offer × FS 应答（183）得出协商结果
+    calls = [{'start': 890, 'end': 1000}]
+    build_sip_flows(calls, {'fs': {'sip_events': [
+        sip(895, 'INVITE', 'e', 1, TERM, SERVER,
+            sdp={'audio': ['OPUS', 'SPEEX'], 'video': []}),
+        sip(895.5, 'INVITE', 'e', 20, SERVER, SEAT,
+            sdp={'audio': [], 'video': []}),
+        sip(897, '183', 'e', 1, SERVER, TERM,
+            sdp={'audio': ['PCMU'], 'video': ['H264']}),
+        sip(965, 'BYE', 'e', 2, TERM, SERVER),
+    ]}}, server_ip=SERVER)
+    assert calls[0]['negotiated_codecs'] == {'audio': ['PCMU'], 'video': ['H264']}, \
+        calls[0]['negotiated_codecs']
+    assert calls[0]['sdp_answered'] is True
+    print("PASS: B2BUA parallel INVITE with rtpmap-less SDP skipped in pairing")
 
 
 def test_p2p_direct_call_hint():
@@ -541,5 +653,6 @@ if __name__ == '__main__':
     test_concurrent_calls_limitation()
     test_capture_consistency_mismatch()
     test_p2p_direct_call_hint()
+    test_negotiated_codecs()
     test_sip_source_priority_and_retrans_dedupe()
     print("\n=== ALL CALL DETECTOR TESTS PASSED ===")

@@ -304,6 +304,27 @@ body {
     transform: translateX(-50%);
     justify-content: center;
 }
+/* SDP 行内编码标签：INVITE=支持、183/200=应答，弱化处理不抢信令方法名 */
+.sl-sdp {
+    margin-left: 3px;
+    padding: 0 4px;
+    font-size: 0.64rem;
+    font-weight: 400;
+    color: #495057;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    white-space: nowrap;
+}
+/* SDP 完整编码列表行：独立于消息行展示，不受消息框（信令线跨度）宽度限制 */
+.sl-sdplist {
+    position: relative;
+    z-index: 1;
+    margin: 0 0 3px 66px;   /* 时间线内，与 .sl-codecs 同缩进 */
+    font-size: 0.66rem;
+    color: #495057;
+    line-height: 1.6;
+}
 .sl-msg.sip-req { color: #0d6efd; }
 .sl-msg.sip-prov { color: #adb5bd; }
 .sl-msg.sip-ok { color: #198754; }

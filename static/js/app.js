@@ -199,9 +199,15 @@ function renderCalls(calls, captureWarning) {
         let flowHtml = '';
         if (flow.length) {
             const msgCount = _sipParties(flow).msgs.length;
+            // 摘要行直接给出双方协商的编码（SDP offer/answer 交集），不用展开
+            const neg = c.negotiated_codecs || {};
+            const negTxt = [
+                neg.audio?.length ? `音频 ${neg.audio.join('/')}` : '',
+                neg.video?.length ? `视频 ${neg.video.join('/')}` : '',
+            ].filter(Boolean).join('，');
             flowHtml = `<details class="mt-1">
                 <summary class="text-muted small" style="cursor:pointer">
-                    SIP 信令流程（${msgCount} 条消息）
+                    SIP 信令流程（${msgCount} 条消息${negTxt ? ` · 协商 ${negTxt}` : ''}）
                 </summary>
                 <div class="mt-2 p-2 border rounded bg-white">
                     <div class="sip-flow">${_sipLadder(flow, c)}</div>
@@ -296,6 +302,30 @@ function _sipParties(flow) {
     return { cols, server, caller, answerer, msgs };
 }
 
+// SDP 消息的线上小标记：INVITE 行标「支持」（主叫/re-INVITE 报的支持列表），
+// 其余（183/200/ACK）标「应答」（应答方从中选定/确认的列表）。完整编码列表
+// 由 _sdpListRow 在该消息行下方独立成行展示，不受信令线跨度裁剪；FS 自产
+// INVITE 的 SDP 用静态 PT 无 rtpmap、解析不出编码名，标记与列表都不显示
+function _sdpTags(m) {
+    const sc = m.sdp_codecs;
+    if (!sc || !(sc.audio?.length || sc.video?.length)) return '';
+    const tag = m.method === 'INVITE' ? '支持' : '应答';
+    return `<span class="sl-sdp" title="下方独立行列出该消息 SDP 的完整编码列表">` +
+        `<i class="bi bi-file-earmark-code"></i> ${tag}</span>`;
+}
+
+// SDP 完整编码列表行：挂在消息行下方独立成行，可完整换行
+function _sdpListRow(m) {
+    const sc = m.sdp_codecs;
+    if (!sc || !(sc.audio?.length || sc.video?.length)) return '';
+    const tag = m.method === 'INVITE' ? '支持' : '应答';
+    const parts = [];
+    if (sc.audio?.length) parts.push(`音频 ${sc.audio.join(' / ')}`);
+    if (sc.video?.length) parts.push(`视频 ${sc.video.join(' / ')}`);
+    return `<div class="sl-sdplist"><span class="sl-sdp">` +
+        `<i class="bi bi-file-earmark-code"></i> ${tag}</span> ${parts.join('，')}</div>`;
+}
+
 function _sipLadder(flow, call) {
     if (!flow || !flow.length) return '';
     const { cols, server, caller, answerer, msgs } = _sipParties(flow);
@@ -329,23 +359,31 @@ function _sipLadder(flow, call) {
     // RTP 部分：编码标签 + 媒体开始/结束标线，按媒体时间插入消息时间线——
     // 开始线落在媒体首包之后（紧贴 200 OK 应答一侧），结束线落在媒体末包
     // 之前（紧贴 BYE 挂断一侧）。time_str 是定宽 HH:MM:SS，可直接比较。
-    const rows = msgs.map(m => {
+    // 带 SDP 编码的消息在行下追加一条独立列表行；rowBefore/rowAfter 记录
+    // 每条消息的行区间，供标线/协商行按消息下标锚定。
+    const rows = [];
+    const rowBefore = {}, rowAfter = {};
+    msgs.forEach((m, i) => {
         const a = colOf(m.src), b = colOf(m.dst);
         const kindCls = SIP_KIND_CLASS[m.kind] || '';
         let inner;
         if (a === b) {
             inner = `<div class="sl-msg ${kindCls} sl-self" style="left:${pct((a + 0.5) / n)}">` +
-                `<span class="lb">${m.label}</span></div>`;
+                `<span class="lb">${m.label}${_sdpTags(m)}</span></div>`;
         } else {
             const lo = Math.min(a, b), hi = Math.max(a, b);
             const lSeg = a < b ? '<i class="ln"></i>' : '<i class="ln arr-l"></i>';
             const rSeg = a < b ? '<i class="ln arr-r"></i>' : '<i class="ln"></i>';
             inner = `<div class="sl-msg ${kindCls}" ` +
                 `style="left:${pct((lo + 0.5) / n)};width:${pct((hi - lo) / n)}">` +
-                `${lSeg}<span class="lb">${m.label}</span>${rSeg}</div>`;
+                `${lSeg}<span class="lb">${m.label}${_sdpTags(m)}</span>${rSeg}</div>`;
         }
-        return `<div class="sl-row"><span class="sl-t">${m.time_str}</span>` +
-            `<div class="sl-track" style="grid-template-columns:repeat(${n},1fr)">${inner}</div></div>`;
+        rowBefore[i] = rows.length;
+        rows.push(`<div class="sl-row"><span class="sl-t">${m.time_str}</span>` +
+            `<div class="sl-track" style="grid-template-columns:repeat(${n},1fr)">${inner}</div></div>`);
+        const list = _sdpListRow(m);
+        if (list) rows.push(list);
+        rowAfter[i] = rows.length;
     });
     if (call) {
         // 标线锚定在信令行上，确保两条线之间不夹应答/挂断握手的其余指令：
@@ -362,29 +400,30 @@ function _sipLadder(flow, call) {
         if (codecs.video?.length)
             chips.push(`<span class="badge text-bg-light border"><i class="bi bi-camera-video"></i> 视频 ${codecs.video.join(' / ')}</span>`);
         // 开始位置：answer_time 对应的 200 OK 行之后 → 首条 200(cseq INVITE) 行
-        // 之后 → 媒体开始时间之后，逐级兜底
-        let si = -1;
+        // 之后 → 媒体开始时间之后，逐级兜底。锚点先按消息下标算（mk/ek），
+        // 再经 rowBefore/rowAfter 换算成行下标（SDP 消息可能带列表子行）
+        let mk = -1;
         if (call.answer_time != null)
-            si = msgs.findIndex(m => m.time === call.answer_time) + 1;
-        if (si <= 0)
-            si = msgs.findIndex(m => m.method === '200' && m.cseq_method === 'INVITE') + 1;
-        if (si <= 0) {
-            si = sStr ? msgs.findIndex(m => m.time_str > sStr) : -1;
-            if (si === -1) si = rows.length;
+            mk = msgs.findIndex(m => m.time === call.answer_time) + 1;
+        if (mk <= 0)
+            mk = msgs.findIndex(m => m.method === '200' && m.cseq_method === 'INVITE') + 1;
+        if (mk <= 0) {
+            mk = sStr ? msgs.findIndex(m => m.time_str > sStr) : -1;
+            if (mk === -1) mk = msgs.length;
         }
         // 多抓包时被叫 200 OK 可能以坐席副本的时钟排在 answer_time 行之后
         // （应答握手尾巴），把锚点后移到握手结束（ACK/200-INVITE 连续段之后），
         // 保证两条标线之间不出现任何信令行
-        while (si < msgs.length &&
-               (msgs[si].method === 'ACK' ||
-                (msgs[si].method === '200' && msgs[si].cseq_method === 'INVITE')))
-            si++;
+        while (mk < msgs.length &&
+               (msgs[mk].method === 'ACK' ||
+                (msgs[mk].method === '200' && msgs[mk].cseq_method === 'INVITE')))
+            mk++;
         // 结束位置：首条 BYE 行之前；无 BYE 再按媒体结束时间插
-        let ei = msgs.findIndex(m => m.method === 'BYE');
-        if (ei === -1) {
-            ei = eStr ? msgs.findIndex(m => m.time_str >= eStr) : -1;
-            if (ei === -1) ei = rows.length;
-        }
+        let ek = msgs.findIndex(m => m.method === 'BYE');
+        if (ek === -1)
+            ek = eStr ? msgs.findIndex(m => m.time_str >= eStr) : -1;
+        let si = mk >= msgs.length ? rows.length : rowAfter[mk];
+        let ei = ek === -1 ? rows.length : rowBefore[ek];
         si = Math.min(si, ei);
         if (eStr)
             rows.splice(ei, 0, `<div class="sl-marker sl-end"><span class="lb">` +
@@ -394,6 +433,34 @@ function _sipLadder(flow, call) {
                 `<i class="bi bi-play-fill"></i> RTP 媒体开始 ${sStr}</span></div>`);
         if (chips.length)
             rows.splice(si + 1, 0, `<div class="sl-codecs">${chips.join('')}</div>`);
+        // 协商编码（SDP offer/answer 交集，后端算好）：插在 SDP 应答行之后，
+        // 即协商完成的时刻；SDP 行不在可见列里时退到媒体开始标线前。
+        // 注意本 splice 必须最后做：ni ≤ si，插在前不会打乱上面两行的锚点
+        const neg = call.negotiated_codecs || {};
+        const negChips = [];
+        if (neg.audio?.length)
+            negChips.push(`<span class="badge text-bg-light border"><i class="bi bi-music-note-beamed"></i> 音频 ${neg.audio.join(' / ')}</span>`);
+        if (neg.video?.length)
+            negChips.push(`<span class="badge text-bg-light border"><i class="bi bi-camera-video"></i> 视频 ${neg.video.join(' / ')}</span>`);
+        if (negChips.length) {
+            const sdpRows = [];
+            // 只认带编码名的 SDP 行：FS 自产 INVITE 的 SDP（无 rtpmap）在
+            // 后端配对时已被跳过，这里保持一致，协商行锚在其正主应答行
+            // （含列表子行）之后
+            msgs.forEach((m, i) => {
+                if (m.sdp_codecs &&
+                    (m.sdp_codecs.audio?.length || m.sdp_codecs.video?.length))
+                    sdpRows.push(rowAfter[i]);
+            });
+            let ni = sdpRows.length >= 2 ? sdpRows[1]
+                   : sdpRows.length === 1 ? sdpRows[0] : si;
+            ni = Math.min(ni, si);
+            const negLabel = call.sdp_answered === false
+                ? '主叫候选编码（未收到应答）' : '协商编码';
+            rows.splice(ni, 0, `<div class="sl-codecs">` +
+                `<span class="text-muted small me-1"><i class="bi bi-handshake"></i> ${negLabel}</span>` +
+                `${negChips.join('')}</div>`);
+        }
     }
     return html + rows.join('') + `</div>`;
 }
