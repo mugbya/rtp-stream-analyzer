@@ -162,6 +162,32 @@ function showDetectionResults(data) {
 }
 
 // ====== 通话检测展示 ======
+// FS 参与编解码判定的卡片徽章（后端 fs_media.verdict）：bypass 已由「点对点
+// 直连」徽章表达，unknown 数据不足不给徽章（阶梯图里有灰字说明）
+const FS_MEDIA_BADGES = {
+    transcode: '<span class="badge bg-danger"><i class="bi bi-shuffle"></i> FS 转码</span>',
+    same: '<span class="badge bg-success"><i class="bi bi-check2-circle"></i> FS 未转码</span>',
+};
+
+// 折叠标题里的协商编码摘要：优先按腿展示（主叫 … / 被叫 …），与阶梯图的
+// 两行协商行、FS 转码判定一一对应；旧会话数据没有 per-leg 字段时回退为
+// 单份 negotiated_codecs（主叫腿汇总）
+function _legNegotiationSummary(c) {
+    const fmt = leg => ['audio', 'video'].map(k =>
+        leg[k]?.length ? `${k === 'audio' ? '音频' : '视频'} ${leg[k].join('/')}` : ''
+    ).filter(Boolean).join('，');
+    const npl = c.negotiated_per_leg || {};
+    const parts = [];
+    for (const [role, name] of [['caller', '主叫'], ['callee', '被叫']]) {
+        if (!npl[role]) continue;
+        const t = fmt(npl[role]);
+        if (t) parts.push(`${name} ${t}`);
+    }
+    if (parts.length) return parts.join(' / ');
+    const t = fmt(c.negotiated_codecs || {});
+    return t ? `协商 ${t}` : '';
+}
+
 function renderCalls(calls, captureWarning) {
     const container = document.getElementById('calls-detail');
 
@@ -199,15 +225,13 @@ function renderCalls(calls, captureWarning) {
         let flowHtml = '';
         if (flow.length) {
             const msgCount = _sipParties(flow).msgs.length;
-            // 摘要行直接给出双方协商的编码（SDP offer/answer 交集），不用展开
-            const neg = c.negotiated_codecs || {};
-            const negTxt = [
-                neg.audio?.length ? `音频 ${neg.audio.join('/')}` : '',
-                neg.video?.length ? `视频 ${neg.video.join('/')}` : '',
-            ].filter(Boolean).join('，');
+            // 摘要行给出两腿各自协商的编码与 FS 媒体处理判定，不用展开
+            const negTxt = _legNegotiationSummary(c);
+            const fmShort = {transcode: 'FS 转码', same: 'FS 未转码',
+                             bypass: '媒体不经 FS'}[c.fs_media?.verdict] || '';
             flowHtml = `<details class="mt-1">
                 <summary class="text-muted small" style="cursor:pointer">
-                    SIP 信令流程（${msgCount} 条消息${negTxt ? ` · 协商 ${negTxt}` : ''}）
+                    SIP 信令流程（${msgCount} 条消息${negTxt ? ` · ${negTxt}` : ''}${fmShort ? ` · ${fmShort}` : ''}）
                 </summary>
                 <div class="mt-2 p-2 border rounded bg-white">
                     <div class="sip-flow">${_sipLadder(flow, c)}</div>
@@ -222,6 +246,7 @@ function renderCalls(calls, captureWarning) {
                 <span class="text-muted small">${c.start_str} ~ ${c.end_str}（${c.duration_s}s）</span>
                 <span class="badge ${st.badge}"><i class="bi ${st.icon}"></i> ${st.label}</span>
                 ${c.is_p2p ? '<span class="badge bg-info text-dark"><i class="bi bi-arrow-left-right"></i> 点对点直连</span>' : ''}
+                ${FS_MEDIA_BADGES[c.fs_media?.verdict] || ''}
                 <span class="badge bg-light text-dark">${c.stream_count} 条流</span>
                 <span class="badge bg-light text-dark">${media}</span>
                 <span class="text-muted small">${files}</span>
@@ -357,27 +382,35 @@ function _sipParties(flow) {
 }
 
 // SDP 消息的线上小标记：INVITE 行标「支持」（主叫/re-INVITE 报的支持列表），
-// 其余（183/200/ACK）标「应答」（应答方从中选定/确认的列表）。完整编码列表
-// 由 _sdpListRow 在该消息行下方独立成行展示，不受信令线跨度裁剪；FS 自产
-// INVITE 的 SDP 用静态 PT 无 rtpmap、解析不出编码名，标记与列表都不显示
+// 带 SDP 的 1xx（如 183 早释）标「早期应答」（先建早媒体的那次应答），200 OK
+// 标「最终应答」（正式接通的应答）——一条腿两次应答是正常流程，标签区分开
+// 免得误读为重复；ACK 等 SDP 仍标「应答」（慢启动时 200 OK 带 offer、ACK 里
+// 才是 answer）。完整编码列表由 _sdpListRow 在该消息行下方独立成行展示，
+// 不受信令线跨度裁剪；FS 自产 INVITE 的 SDP 用静态 PT 无 rtpmap、解析不出
+// 编码名，标记与列表都不显示
+function _sdpTag(m) {
+    if (m.method === 'INVITE') return '支持';
+    if (m.kind === 'provisional') return '早期应答';
+    if (m.kind === 'success') return '最终应答';
+    return '应答';
+}
+
 function _sdpTags(m) {
     const sc = m.sdp_codecs;
     if (!sc || !(sc.audio?.length || sc.video?.length)) return '';
-    const tag = m.method === 'INVITE' ? '支持' : '应答';
     return `<span class="sl-sdp" title="下方独立行列出该消息 SDP 的完整编码列表">` +
-        `<i class="bi bi-file-earmark-code"></i> ${tag}</span>`;
+        `<i class="bi bi-file-earmark-code"></i> ${_sdpTag(m)}</span>`;
 }
 
 // SDP 完整编码列表行：挂在消息行下方独立成行，可完整换行
 function _sdpListRow(m) {
     const sc = m.sdp_codecs;
     if (!sc || !(sc.audio?.length || sc.video?.length)) return '';
-    const tag = m.method === 'INVITE' ? '支持' : '应答';
     const parts = [];
     if (sc.audio?.length) parts.push(`音频 ${sc.audio.join(' / ')}`);
     if (sc.video?.length) parts.push(`视频 ${sc.video.join(' / ')}`);
     return `<div class="sl-sdplist"><span class="sl-sdp">` +
-        `<i class="bi bi-file-earmark-code"></i> ${tag}</span> ${parts.join('，')}</div>`;
+        `<i class="bi bi-file-earmark-code"></i> ${_sdpTag(m)}</span> ${parts.join('，')}</div>`;
 }
 
 function _sipLadder(flow, call) {
@@ -487,34 +520,83 @@ function _sipLadder(flow, call) {
                 `<i class="bi bi-play-fill"></i> RTP 媒体开始 ${sStr}</span></div>`);
         if (chips.length)
             rows.splice(si + 1, 0, `<div class="sl-codecs">${chips.join('')}</div>`);
-        // 协商编码（SDP offer/answer 交集，后端算好）：插在 SDP 应答行之后，
-        // 即协商完成的时刻；SDP 行不在可见列里时退到媒体开始标线前。
-        // 注意本 splice 必须最后做：ni ≤ si，插在前不会打乱上面两行的锚点
-        const neg = call.negotiated_codecs || {};
-        const negChips = [];
-        if (neg.audio?.length)
-            negChips.push(`<span class="badge text-bg-light border"><i class="bi bi-music-note-beamed"></i> 音频 ${neg.audio.join(' / ')}</span>`);
-        if (neg.video?.length)
-            negChips.push(`<span class="badge text-bg-light border"><i class="bi bi-camera-video"></i> 视频 ${neg.video.join(' / ')}</span>`);
-        if (negChips.length) {
-            const sdpRows = [];
-            // 只认带编码名的 SDP 行：FS 自产 INVITE 的 SDP（无 rtpmap）在
-            // 后端配对时已被跳过，这里保持一致，协商行锚在其正主应答行
-            // （含列表子行）之后
-            msgs.forEach((m, i) => {
-                if (m.sdp_codecs &&
-                    (m.sdp_codecs.audio?.length || m.sdp_codecs.video?.length))
-                    sdpRows.push(rowAfter[i]);
-            });
-            let ni = sdpRows.length >= 2 ? sdpRows[1]
-                   : sdpRows.length === 1 ? sdpRows[0] : si;
-            ni = Math.min(ni, si);
-            const negLabel = call.sdp_answered === false
-                ? '主叫候选编码（未收到应答）' : '协商编码';
-            rows.splice(ni, 0, `<div class="sl-codecs">` +
-                `<span class="text-muted small me-1"><i class="bi bi-handshake"></i> ${negLabel}</span>` +
-                `${negChips.join('')}</div>`);
+        // 两腿协商编码（后端按 Call-ID 配对好）：主叫侧、被叫侧各一行，先
+        // 摆出每条腿各定了什么编码，再接下面的 FS 转码判定行——判定本身就是
+        // 对比这两行，展示顺序与判定依据一致。旧会话数据没有 per-leg 字段时
+        // 回退为单行主叫腿汇总。
+        // 只认带编码名的 SDP 行：FS 自产 INVITE 的 SDP（无 rtpmap）在
+        // 后端配对时已被跳过，这里保持一致，协商行锚在其正主应答行
+        // （含列表子行）之后
+        // 只认带编码名的 SDP 行：FS 自产 INVITE 的 SDP（无 rtpmap）在
+        // 后端配对时已被跳过，这里保持一致。同时按腿（call_id）记住每条腿
+        // 最后一条 SDP 行的行号——该腿的协商行锚在这行（= 该腿应答行）之后，
+        // 即协商完成的时刻，不早于该腿的应答出现在图上
+        const sdpRows = [];
+        const legAnchors = {};
+        msgs.forEach((m, i) => {
+            if (m.sdp_codecs &&
+                (m.sdp_codecs.audio?.length || m.sdp_codecs.video?.length)) {
+                sdpRows.push(rowAfter[i]);
+                if (m.call_id) legAnchors[m.call_id] = rowAfter[i];
+            }
+        });
+        // 旧会话数据（协商行无 call_id）的兜底锚点：第二条 SDP 行之后
+        let ni = sdpRows.length >= 2 ? sdpRows[1]
+               : sdpRows.length === 1 ? sdpRows[0] : si;
+        ni = Math.min(ni, si);
+        const fmtLegChips = leg => {
+            const chips = [];
+            if (leg.audio?.length)
+                chips.push(`<span class="badge text-bg-light border"><i class="bi bi-music-note-beamed"></i> 音频 ${leg.audio.join(' / ')}</span>`);
+            if (leg.video?.length)
+                chips.push(`<span class="badge text-bg-light border"><i class="bi bi-camera-video"></i> 视频 ${leg.video.join(' / ')}</span>`);
+            return chips;
+        };
+        // 待插入行列表 {anchor, prio, html}：统一按锚点从大到小 splice（大
+        // 锚点先插不会影响更小的锚点位置）。同锚点时 prio 大的先插、最终排
+        // 在后面——判定行因此排在同位置的协商行之后
+        const inserts = [];
+        const npl = call.negotiated_per_leg || {};
+        [['caller', '主叫', 'bi-telephone-outbound'],
+         ['callee', '被叫', 'bi-telephone-inbound']].forEach(([key, name, icon]) => {
+            const leg = npl[key];
+            if (!leg) return;
+            const chips = fmtLegChips(leg);
+            if (!chips.length) return;
+            const label = leg.answered === false
+                ? `${name}候选编码（未收到应答）` : `${name}侧协商`;
+            const anchor = (leg.call_id && legAnchors[leg.call_id] != null)
+                ? Math.min(legAnchors[leg.call_id], si) : ni;
+            inserts.push({anchor, prio: 0, html:
+                `<span class="text-muted small me-1"><i class="bi ${icon}"></i> ${label}</span>${chips.join('')}`});
+        });
+        if (!inserts.length) {
+            const chips = fmtLegChips(call.negotiated_codecs || {});
+            if (chips.length) {
+                const negLabel = call.sdp_answered === false
+                    ? '主叫候选编码（未收到应答）' : '协商编码';
+                inserts.push({anchor: ni, prio: 0, html:
+                    `<span class="text-muted small me-1"><i class="bi bi-handshake"></i> ${negLabel}</span>${chips.join('')}`});
+            }
         }
+        // FS 是否参与编解码（后端对比两腿协商编码 + 媒体路径判定）：固定在
+        // RTP 媒体开始标线之前——两腿协商全部结束、呼叫接通之后才有结论，
+        // 转码结论着色强调；unknown 也如实展示（灰字）
+        const fm = call.fs_media;
+        if (fm && fm.verdict) {
+            const meta = {
+                transcode: {cls: 'bg-danger', label: 'FS 参与转码'},
+                same: {cls: 'bg-success', label: 'FS 未转码'},
+                bypass: {cls: 'bg-info text-dark', label: '媒体不经 FS'},
+                unknown: {cls: 'bg-light text-dark', label: '无法判定'},
+            }[fm.verdict] || {cls: 'bg-light text-dark', label: 'FS 媒体处理'};
+            inserts.push({anchor: si, prio: 1, html:
+                `<span class="badge ${meta.cls} me-1"><i class="bi bi-cpu"></i> ${meta.label}</span>` +
+                `<span class="small${fm.verdict === 'unknown' ? ' text-muted' : ''}">${_esc(fm.text || '')}</span>`});
+        }
+        inserts.sort((a, b) => (b.anchor - a.anchor) || ((b.prio || 0) - (a.prio || 0)));
+        for (const it of inserts)
+            rows.splice(it.anchor, 0, `<div class="sl-codecs">${it.html}</div>`);
     }
     return html + rows.join('') + `</div>`;
 }
@@ -627,10 +709,11 @@ function renderCallSelector(calls, captureWarning) {
         const checked = idx === defaultIdx ? 'checked' : '';
         const p2pBadge = c.is_p2p
             ? ' <span class="badge bg-info text-dark"><i class="bi bi-arrow-left-right"></i> 点对点直连</span>' : '';
+        const fmBadge = FS_MEDIA_BADGES[c.fs_media?.verdict] || '';
         html += `
             <label class="direction-option">
                 <input type="radio" name="call-select" value="${c.call_id}" ${checked} style="display:none">
-                ${callLabel(c.call_id)} ${c.start_str}~${c.end_str}（${c.duration_s}s）${p2pBadge}
+                ${callLabel(c.call_id)} ${c.start_str}~${c.end_str}（${c.duration_s}s）${p2pBadge}${fmBadge}
                 <span class="badge ${st.badge}">${st.label}</span>
             </label>`;
     });

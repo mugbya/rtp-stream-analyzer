@@ -45,22 +45,34 @@ STATIC_PT_NAMES = {
     '31': 'H261', '32': 'MPV', '33': 'MP2T', '34': 'H263',
 }
 
+# 静态音频载荷的时钟率（RFC 3551）；静态视频载荷统一 90000。FS 自产 INVITE
+# 的 SDP 常用静态 PT 不带 rtpmap，补上时钟率才能与对端 rtpmap 精确对比
+STATIC_PT_CLOCK = {
+    '0': 8000, '3': 8000, '4': 8000, '5': 8000, '6': 16000, '7': 8000,
+    '8': 8000, '9': 8000, '10': 44100, '11': 22050, '12': 8000, '13': 8000,
+    '14': 90000, '15': 8000, '16': 11025, '17': 22050, '18': 8000,
+}
+
 
 def _parse_sdp_codecs(body: str) -> dict:
     """Extract audio/video codec info from an SDP body.
 
     Returns {'audio': [names], 'video': [names], 'map': {'audio': {pt: name},
-    'video': {pt: name}}} — the lists follow the m= line payload order; names
-    come from a=rtpmap lines, falling back to the static payload table (dynamic
-    PTs without rtpmap have no name and are skipped). DTMF 事件流
+    'video': {pt: name}}, 'full': {'audio': [{'name', 'rate'}],
+    'video': [...]}} — the lists follow the m= line payload order; names come
+    from a=rtpmap lines, falling back to the static payload table (dynamic PTs
+    without rtpmap have no name and are skipped). DTMF 事件流
     （telephone-event / telephone）不是媒体编码，列表与映射都不收录。The map
     resolves RTP payload types to codec names so the actually-used codecs can
-    be derived from stream PTs.
+    be derived from stream PTs. 'full' 保留时钟率（编码身份），供按腿对比
+    协商结果时区分同名字不同时钟率的编码（如 OPUS/48000 vs OPUS/16000）。
     """
-    out = {'audio': [], 'video': [], 'map': {'audio': {}, 'video': {}}}
+    out = {'audio': [], 'video': [], 'map': {'audio': {}, 'video': {}},
+           'full': {'audio': [], 'video': []}}
     media = None
     order = {'audio': [], 'video': []}   # m= 行的 PT 顺序
     named = {}                           # a=rtpmap 解析出的 pt -> 名字
+    rates = {}                           # a=rtpmap 解析出的 pt -> 时钟率
     for line in body.replace('\r\n', '\n').split('\n'):
         if line.startswith('m='):
             parts = line.split()
@@ -71,6 +83,9 @@ def _parse_sdp_codecs(body: str) -> dict:
             bits = line.split(':', 1)[1].split()
             if len(bits) >= 2:
                 named[bits[0]] = bits[1].split('/')[0].upper()
+                clock = bits[1].split('/')
+                if len(clock) > 1 and clock[1].isdigit():
+                    rates[bits[0]] = int(clock[1])
 
     for kind in ('audio', 'video'):
         for pt in order[kind]:
@@ -80,6 +95,12 @@ def _parse_sdp_codecs(body: str) -> dict:
             if name not in out[kind]:
                 out[kind].append(name)
             out['map'][kind].setdefault(pt, name)
+            rate = rates.get(pt)
+            if rate is None and pt in STATIC_PT_NAMES:
+                rate = STATIC_PT_CLOCK.get(pt, 90000 if kind == 'video' else 8000)
+            ident = {'name': name, 'rate': rate}
+            if ident not in out['full'][kind]:
+                out['full'][kind].append(ident)
     return out
 
 

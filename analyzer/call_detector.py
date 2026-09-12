@@ -335,6 +335,8 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             c['sip_flow'] = []
             c['answer_time'] = c['bye_time'] = None
             c['negotiated_codecs'] = {'audio': [], 'video': []}
+            c['negotiated_per_leg'] = {}
+            c['leg_codecs'] = {}
             c['sdp_endpoints'] = set()
             c['sdp_endpoints_by_cid'] = {}
             c['sdp_dialog_ranges'] = {}
@@ -460,29 +462,68 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
         byes = [e['time'] for e in flow if e['method'] == 'BYE']
         call['bye_time'] = min(byes) if byes else None
 
-        # 协商编码（SDP offer/answer）：时间序第一条带 SDP 的消息是 offer，
-        # 其后第一条带 SDP 的消息是 answer（可能是 183 早释应答或 200 OK；
-        # 慢启动时 offer 在 200 OK、answer 在 ACK）。协商结果 = 双方列出编码
-        # 的交集，保持 offer 顺序；交集为空以 answer 为准（应答方决定，含
-        # 拒绝某路媒体）；无 answer 时只有主叫候选，谈不上协商。
-        # B2BUA 两条腿的信令合并在同一流程里，FS 自产 INVITE 的 SDP 用静态
-        # PT 不带 rtpmap，解析不出编码名——这种 SDP 对"协商了什么"没有信息
-        # 量，配对时跳过，避免 offer/answer 配错对。
-        sdp_msgs = [e for e in flow if e.get('sdp')
-                    and (e['sdp'].get('audio') or e['sdp'].get('video'))]
-        negotiated = {'audio': [], 'video': []}
-        if sdp_msgs:
-            offer = sdp_msgs[0]['sdp']
-            answer = sdp_msgs[1]['sdp'] if len(sdp_msgs) > 1 else None
+        # —— 每条腿（Call-ID）的 SDP offer/answer 配对 ——
+        # B2BUA 一通电话两条腿各一个 Call-ID，两条腿的 INVITE 各自带 SDP（都
+        # 是 offer），跨腿配对会把两条腿的 offer 错配成 offer/answer，所以按
+        # Call-ID 分组后各自独立配对：每组第一条带编码名的 SDP 是 offer，其后
+        # 第一条是 answer（183 早释应答或 200 OK；慢启动时 offer 在 200 OK、
+        # answer 在 ACK）。FS 自产 INVITE 的 SDP 若解析不出编码名（audio/video
+        # 均空）对"协商了什么"没有信息量，配对时跳过。
+        # 腿角色：INVITE 发自服务器的是被叫腿（FS→被叫），发往服务器的是主叫
+        # 腿；服务器 INVITE 不可见时退回「流程首条 INVITE 所在 Call-ID 是主
+        # 叫腿」——B2BUA 的被叫腿 INVITE 必然晚于主叫腿。
+        first_inv_cid = next((e['call_id'] for e in flow
+                              if e['method'] == 'INVITE'), None)
+        leg_codecs = {}
+        for cid in call['sip_call_ids']:
+            sdp_msgs = [e for e in by_call_id[cid]
+                        if e.get('sdp')
+                        and (e['sdp'].get('audio') or e['sdp'].get('video'))]
+            if not sdp_msgs:
+                continue
+            negotiated, answered = _negotiate_leg(sdp_msgs)
+            inv = next((e for e in by_call_id[cid] if e['method'] == 'INVITE'),
+                       None)
+            if inv is None:
+                role = 'callee'   # 无 INVITE 副本的对话框按被叫腿处理
+            elif server_ip and inv['src'] == server_ip:
+                role = 'callee'
+            elif server_ip and inv['dst'] == server_ip:
+                role = 'caller'
+            else:
+                role = 'caller' if cid == first_inv_cid else 'callee'
+            leg_codecs[cid] = {'role': role, 'answered': answered, **negotiated}
+        call['leg_codecs'] = leg_codecs
+        # 展示用协商编码按腿拆开（主叫侧/被叫侧各一份）：前端先分别摆出两
+        # 条腿各协商定了什么编码，再接 fs_media 的转码判定——判定本身就是
+        # 对比这两份结果，展示顺序与判定依据一致。每份带 answered 标志，
+        # 只有 offer 没等到 answer 的腿如实标为"候选"。
+        negotiated_per_leg = {}
+        shown = None
+        for role in ('caller', 'callee'):
+            leg = _pick_leg(leg_codecs, role)
+            if leg is None:
+                continue
+            leg_cid = next((cid for cid, l in leg_codecs.items() if l is leg),
+                           None)
+            names = {}
             for kind in ('audio', 'video'):
-                offered = offer.get(kind) or []
-                if answer is None:
-                    negotiated[kind] = offered
-                    continue
-                ans = answer.get(kind) or []
-                negotiated[kind] = [c for c in offered if c in ans] or ans
-        call['negotiated_codecs'] = negotiated
-        call['sdp_answered'] = len(sdp_msgs) >= 2
+                names[kind] = list(dict.fromkeys(
+                    c['name'] for c in leg[kind]))
+            # call_id 供前端把该腿的协商行锚到这条腿自己的应答消息行之后
+            negotiated_per_leg[role] = {**names, 'answered': leg['answered'],
+                                        'call_id': leg_cid}
+            if shown is None:
+                shown = leg
+        call['negotiated_per_leg'] = negotiated_per_leg
+        # 旧汇总字段：主叫腿协商结果（无主叫腿 SDP 时退回任一腿），保持
+        # 向后兼容；两腿差异由 fs_media 判定单独给出
+        fallback = (negotiated_per_leg.get('caller')
+                    or negotiated_per_leg.get('callee')
+                    or {'audio': [], 'video': []})
+        call['negotiated_codecs'] = {'audio': list(fallback['audio']),
+                                     'video': list(fallback['video'])}
+        call['sdp_answered'] = shown['answered'] if shown else False
 
         call['sip_flow'] = [{
             'time': e['time'],
@@ -491,6 +532,8 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             'cseq_method': e.get('cseq_method', ''),
             'src': e['src'],
             'dst': e['dst'],
+            # 所属腿（Call-ID）：前端按腿把协商行锚到该腿应答行之后
+            'call_id': e.get('call_id'),
             'from': e.get('from') or {},
             'to': e.get('to') or {},
             'label': e['method'] + (' ' + e['reason'] if e['reason'] else ''),
@@ -515,12 +558,98 @@ def _sip_kind(method: str) -> str:
     return 'error'
 
 
-def _call_party_ips(flow: list, server_ip: str = None) -> set:
-    """从信令流程识别主叫/被叫的 IP（口径与 media_extractor.extract_call_parties
+def _sdp_codec_idents(sdp: dict, kind: str) -> list:
+    """SDP 消息里某路媒体的编码身份列表（{'name', 'rate'}，m= 行顺序）。
+
+    'full' 由 SDP 解析生成；手工构造/旧格式的 SDP 只有名字列表时回退——
+    时钟率未知，两腿对比时按名字相等处理。
+    """
+    full = (sdp.get('full') or {}).get(kind)
+    if full:
+        return [{'name': c['name'], 'rate': c.get('rate')} for c in full]
+    return [{'name': n, 'rate': None} for n in sdp.get(kind) or []]
+
+
+def _codec_match(a: dict, b: dict) -> bool:
+    """两编码是否视为同一种：名字相同，且任一方未报时钟率或时钟率一致。
+
+    时钟率不同（如 OPUS/48000 vs OPUS/16000）是不同的编码格式，FS 必须转码。
+    """
+    if a['name'] != b['name']:
+        return False
+    ra, rb = a.get('rate'), b.get('rate')
+    return ra is None or rb is None or ra == rb
+
+
+def _negotiate_leg(sdp_msgs: list) -> tuple:
+    """一个 Call-ID（= B2BUA 的一条腿）内的 offer/answer 配对。
+
+    返回 ({'audio': [编码身份], 'video': [编码身份]}, 是否收到应答)。
+    协商结果 = 双方列出编码的交集（保持 offer 顺序）；交集为空以 answer 为
+    准（应答方决定，含拒绝某路媒体）；无 answer 时只有候选，谈不上协商。
+    """
+    offer = sdp_msgs[0]['sdp']
+    answer = sdp_msgs[1]['sdp'] if len(sdp_msgs) > 1 else None
+    negotiated = {}
+    for kind in ('audio', 'video'):
+        offered = _sdp_codec_idents(offer, kind)
+        if answer is None:
+            negotiated[kind] = offered
+            continue
+        ans = _sdp_codec_idents(answer, kind)
+        negotiated[kind] = [c for c in offered
+                            if any(_codec_match(c, a) for a in ans)] or ans
+    return negotiated, answer is not None
+
+
+def _pick_leg(leg_codecs: dict, role: str) -> dict | None:
+    """取该角色、带编码数据的腿；有多条时（并发振铃的分叉目标各占一条被叫
+    腿）优先真正应答的那条，分叉目标未应答的 offer 只代表候选。"""
+    cands = [l for l in leg_codecs.values()
+             if l.get('role') == role and (l.get('audio') or l.get('video'))]
+    if not cands:
+        return None
+    answered = [l for l in cands if l.get('answered')]
+    return (answered or cands)[0]
+
+
+def _fmt_ident(c: dict) -> str:
+    return c['name'] + (f"/{c['rate']}" if c.get('rate') else '')
+
+
+def _compare_leg_codecs(caller: dict, callee: dict) -> dict | None:
+    """对比两腿协商编码，判定 FS 是否参与转码。无可比数据返回 None。"""
+    diff_parts, same_parts = [], []
+    for kind in ('audio', 'video'):
+        la, lb = caller.get(kind) or [], callee.get(kind) or []
+        if not la or not lb:
+            continue   # 该路媒体单侧无候选（被应答方拒绝或没抓到），跳过
+        common = [c for c in la if any(_codec_match(c, x) for x in lb)]
+        label = '音频' if kind == 'audio' else '视频'
+        if common:
+            same_parts.append(
+                f"{label} {'/'.join(_fmt_ident(c) for c in common)}")
+        else:
+            diff_parts.append(
+                f"{label}：主叫侧 {'/'.join(_fmt_ident(c) for c in la)}，"
+                f"被叫侧 {'/'.join(_fmt_ident(c) for c in lb)}")
+    if not diff_parts and not same_parts:
+        return None
+    if diff_parts:
+        return {'verdict': 'transcode',
+                'text': '两腿协商编码不同（' + '；'.join(diff_parts) +
+                        '），FS 必然参与转码'}
+    return {'verdict': 'same',
+            'text': '两腿协商编码相同（' + '；'.join(same_parts) +
+                    '），FS 无需转码'}
+
+
+def _call_party_pair(flow: list, server_ip: str = None) -> tuple:
+    """从信令流程识别主叫/被叫 IP（口径与 media_extractor.extract_call_parties
     一致，只取 IP）：主叫 = 第一个非服务器侧 INVITE 的源（回退首个请求），
-    被叫 = INVITE 事务 200 OK 的非服务器发送方。"""
+    被叫 = INVITE 事务 200 OK 的非服务器发送方。识别不出返回 None。"""
     if not flow:
-        return set()
+        return None, None
     inv = next((m for m in flow if m['method'] == 'INVITE'
                 and m.get('src') != server_ip), None)
     if inv is None:
@@ -531,8 +660,13 @@ def _call_party_ips(flow: list, server_ip: str = None) -> set:
     ok = next((m for m in flow if m['method'] == '200'
                and m.get('cseq_method') == 'INVITE'
                and m.get('src') != server_ip), None)
-    return {ip for ip in (inv.get('src') if inv else None,
-                          ok.get('src') if ok else None) if ip}
+    return (inv.get('src') if inv else None,
+            ok.get('src') if ok else None)
+
+
+def _call_party_ips(flow: list, server_ip: str = None) -> set:
+    """主叫/被叫 IP 集合（供无 SDP 宣告时的兜底腿过滤）。"""
+    return {ip for ip in _call_party_pair(flow, server_ip) if ip}
 
 
 def _rebuild_call(call: dict) -> None:
@@ -752,6 +886,73 @@ def _is_direct_media(call: dict, server_ip: str | None) -> bool:
     return all(server_ip not in leg['ips'] for leg in call['legs'])
 
 
+def _leg_pt_sides(call: dict, server_ip: str = None) -> dict:
+    """无（完整）腿 SDP 时的兜底：按媒体路径把通话的腿分到主叫/被叫两侧，
+    收集每侧实际使用的音频编码名（RTP 流真实出现的 PT 反查：动态 PT 用全
+    流程 SDP rtpmap，静态 PT 用内置表并去掉括号说明，保持与 SDP 名可互比）。
+
+    腿的归侧依据非服务器端点 IP：只与主叫 IP 通信的腿是主叫侧，只与被叫 IP
+    通信的是被叫侧；两端直连的腿（p2p）与识别不出的腿不归侧。主被叫 IP 缺
+    一或重合（信令只见到单侧）时返回空，表示不可比。
+    """
+    caller_ip, callee_ip = _call_party_pair(call.get('sip_flow') or [], server_ip)
+    if not caller_ip or not callee_ip or caller_ip == callee_ip:
+        return {}
+    sdp_map = (call.get('sdp_codecs') or {}).get('map') or {}
+    sides = {'caller': set(), 'callee': set()}
+    for leg in call['legs']:
+        others = set(leg['ips']) - ({server_ip} if server_ip else set())
+        side = ('caller' if others == {caller_ip}
+                else 'callee' if others == {callee_ip} else None)
+        if side is None:
+            continue
+        for st in leg['streams'].values():
+            name = ((sdp_map.get('audio') or {}).get(str(st['pt']))
+                    or PT_NAMES.get(st['pt'], '').split(' (')[0])
+            if name:
+                sides[side].add(name)
+    return {k: v for k, v in sides.items() if v}
+
+
+def _fs_media_verdict(call: dict, is_p2p: bool, server_ip: str = None) -> dict:
+    """判定「FS 参与编解码了吗」，供 SIP 流程展示。
+
+    - bypass：媒体不经 FS（点对点直连 / FS bypass media），FS 不在媒体路径，
+      未参与编解码；
+    - transcode：两腿协商编码不同，FS 作为 B2BUA 必然解码再编码（转码）；
+    - same：两腿编码相同，FS 即使在媒体路径也没有编码格式转换发生（是否
+      透传/重打包不影响该结论）；
+    - unknown：数据不足——只见到一条腿的协商编码、无 SDP 且 RTP PT 反查也
+      不可比（如动态 PT 无 rtpmap）。
+
+    SDP 对比不可行时用每条腿实际使用的音频 PT 反查编码名兜底（结论标注
+    推断来源）。
+    """
+    if is_p2p:
+        return {'verdict': 'bypass',
+                'text': '媒体在两端之间直连（点对点 / bypass media），'
+                        'FS 不在媒体路径，未参与编解码'}
+    caller = _pick_leg(call.get('leg_codecs') or {}, 'caller')
+    callee = _pick_leg(call.get('leg_codecs') or {}, 'callee')
+    if caller and callee:
+        res = _compare_leg_codecs(caller, callee)
+        if res:
+            return res
+    sides = _leg_pt_sides(call, server_ip)
+    if sides.get('caller') and sides.get('callee'):
+        a = sorted(sides['caller'])
+        b = sorted(sides['callee'])
+        if a == b:
+            return {'verdict': 'same',
+                    'text': f"两腿实际使用的编码相同（{'、'.join(a)}），"
+                            'FS 无需转码（依 RTP 载荷类型推断）'}
+        return {'verdict': 'transcode',
+                'text': f"主叫侧使用 {'、'.join(a)}，被叫侧使用 {'、'.join(b)}，"
+                        'FS 参与转码（依 RTP 载荷类型推断）'}
+    return {'verdict': 'unknown',
+            'text': '未能同时看到两条腿的协商编码或实际编码，无法判定'}
+
+
 def detect_calls(captures: dict, server_ip: str = None) -> list:
     """Detect calls across all uploaded captures.
 
@@ -846,6 +1047,8 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             'media_types': media_types,
             'codecs': codecs,
             'negotiated_codecs': call.get('negotiated_codecs') or {'audio': [], 'video': []},
+            'negotiated_per_leg': call.get('negotiated_per_leg') or {},
+            'fs_media': _fs_media_verdict(call, p2p, server_ip),
             'sdp_answered': call.get('sdp_answered', True),
             'ssrcs': sorted(call['ssrcs']),
             'is_p2p': p2p,

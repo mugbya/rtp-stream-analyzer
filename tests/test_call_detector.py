@@ -329,6 +329,10 @@ def test_sip_sdp_parsing():
     assert ev and ev['sdp'] == {
         'audio': ['PCMU', 'PCMA'], 'video': ['H264'],
         'map': {'audio': {'0': 'PCMU', '8': 'PCMA'}, 'video': {'96': 'H264'}},
+        # full：编码身份（名字+时钟率），供两腿协商结果对比
+        'full': {'audio': [{'name': 'PCMU', 'rate': 8000},
+                           {'name': 'PCMA', 'rate': 8000}],
+                 'video': [{'name': 'H264', 'rate': 90000}]},
         # 无 c= 行则没有宣告端点
         'endpoints': [],
     }, ev['sdp']
@@ -375,6 +379,13 @@ def test_sip_sdp_parsing():
         'map': {'audio': {'96': 'OPUS', '97': 'SPEEX', '98': 'SPEEX',
                           '0': 'PCMU', '8': 'PCMA'},
                 'video': {}},
+        # 静态 PT（0/8）无 rtpmap 时按 RFC 3551 补时钟率
+        'full': {'audio': [{'name': 'OPUS', 'rate': 48000},
+                           {'name': 'SPEEX', 'rate': 16000},
+                           {'name': 'SPEEX', 'rate': 8000},
+                           {'name': 'PCMU', 'rate': 8000},
+                           {'name': 'PCMA', 'rate': 8000}],
+                 'video': []},
         'endpoints': [],
     }, ev3['sdp']
 
@@ -851,6 +862,193 @@ def test_sequential_b2bua_calls_split_with_bridge_streams():
           "no INVITE after BYE")
 
 
+def make_sdp(audio=None, video=None):
+    """构造带编码身份（full）的 SDP dict，模拟 _parse_sdp_codecs 输出。
+
+    元素为 'PCMU'（仅名字，时钟率未知）或 ('OPUS', 48000)（名字+时钟率）。
+    """
+    def ident(item):
+        return {'name': item[0], 'rate': item[1]} if isinstance(item, tuple) \
+            else {'name': item, 'rate': None}
+
+    audio, video = audio or [], video or []
+    return {
+        'audio': [i['name'] for i in map(ident, audio)],
+        'video': [i['name'] for i in map(ident, video)],
+        'map': {'audio': {}, 'video': {}},
+        'full': {'audio': list(map(ident, audio)),
+                 'video': list(map(ident, video))},
+    }
+
+
+def make_sip_event(time, method, cid, cseq, src, dst, sdp=None,
+                   cseq_method=None):
+    return {'time': time, 'method': method, 'reason': '', 'call_id': cid,
+            'cseq': cseq, 'cseq_method': cseq_method or method,
+            'src': src, 'dst': dst, 'from': {}, 'to': {}, 'sdp': sdp or {}}
+
+
+def test_fs_media_transcode_between_legs():
+    """FS 是否参与编解码：B2BUA 两腿协商编码不同 → transcode（必然转码）。
+
+    A 腿（主叫↔FS）协商 PCMU、B 腿（FS↔被叫）协商 G729，媒体又经 FS 转发，
+    FS 必须解码再编码。协商编码行展示主叫腿结果，不被被叫腿 offer 污染。
+    """
+    events = [
+        make_sip_event(95, 'INVITE', 'a', 1, SEAT, SERVER,
+                       sdp=make_sdp(audio=['PCMU'])),
+        make_sip_event(98, '200', 'a', 1, SERVER, SEAT,
+                       sdp=make_sdp(audio=['PCMU']), cseq_method='INVITE'),
+        make_sip_event(96, 'INVITE', 'b', 1, SERVER, TERM,
+                       sdp=make_sdp(audio=['G729'])),
+        make_sip_event(100, '200', 'b', 1, TERM, SERVER,
+                       sdp=make_sdp(audio=['G729']), cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, SEAT, SERVER),
+    ]
+    rd = make_rtp_data([
+        (0x1111, 5000, 6000, 100, 160, 0, SEAT, SERVER, 0, 0.02),
+        (0x1112, 6000, 5000, 100, 160, 0, SERVER, SEAT, 0, 0.02),
+        (0x1113, 7000, 8000, 100, 160, 0, TERM, SERVER, 18, 0.02),
+        (0x1114, 8000, 7000, 100, 160, 0, SERVER, TERM, 18, 0.02),
+    ], 90, 200, sip_events=events)
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 1
+    fm = calls[0]['fs_media']
+    assert fm['verdict'] == 'transcode', fm
+    assert 'PCMU' in fm['text'] and 'G729' in fm['text'], fm
+    assert calls[0]['negotiated_codecs'] == {'audio': ['PCMU'], 'video': []}
+    # per-leg 协商结果两条腿都导出（主叫侧/被叫侧各一份，前端分两行展示，
+    # call_id 供前端把该腿协商行锚到该腿应答行之后）
+    npl = calls[0]['negotiated_per_leg']
+    assert npl['caller'] == {'audio': ['PCMU'], 'video': [], 'answered': True,
+                             'call_id': 'a'}, npl
+    assert npl['callee'] == {'audio': ['G729'], 'video': [], 'answered': True,
+                             'call_id': 'b'}, npl
+    # 每条信令消息也带 call_id（前端按腿锚定用）
+    assert all(m.get('call_id') in ('a', 'b') for m in calls[0]['sip_flow'])
+    print("PASS: FS transcode detected (leg A PCMU vs leg B G729)")
+
+
+def test_fs_media_same_codec():
+    """两腿协商编码相同 → same（FS 在媒体路径但无需转码）。"""
+    events = [
+        make_sip_event(95, 'INVITE', 'a', 1, SEAT, SERVER,
+                       sdp=make_sdp(audio=['PCMA'])),
+        make_sip_event(98, '200', 'a', 1, SERVER, SEAT,
+                       sdp=make_sdp(audio=['PCMA']), cseq_method='INVITE'),
+        make_sip_event(96, 'INVITE', 'b', 1, SERVER, TERM,
+                       sdp=make_sdp(audio=['PCMA'])),
+        make_sip_event(100, '200', 'b', 1, TERM, SERVER,
+                       sdp=make_sdp(audio=['PCMA']), cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, SEAT, SERVER),
+    ]
+    rd = make_rtp_data([
+        (0x1111, 5000, 6000, 100, 160, 0, SEAT, SERVER, 8, 0.02),
+        (0x1112, 6000, 5000, 100, 160, 0, SERVER, SEAT, 8, 0.02),
+        (0x1113, 7000, 8000, 100, 160, 0, TERM, SERVER, 8, 0.02),
+        (0x1114, 8000, 7000, 100, 160, 0, SERVER, TERM, 8, 0.02),
+    ], 90, 200, sip_events=events)
+    calls = detect_calls({'fs': rd}, SERVER)
+    fm = calls[0]['fs_media']
+    assert fm['verdict'] == 'same', fm
+    assert 'PCMA' in fm['text'], fm
+    npl = calls[0]['negotiated_per_leg']
+    assert npl['caller']['audio'] == ['PCMA'] and npl['callee']['audio'] == ['PCMA'], npl
+    print("PASS: same codec on both legs -> FS no transcode")
+
+
+def test_fs_media_bypass():
+    """媒体不经 FS（点对点/bypass media）→ FS 不在媒体路径，未参与编解码。"""
+    events = [
+        make_sip_event(95, 'INVITE', 'a', 1, SEAT, TERM,
+                       sdp=make_sdp(audio=['PCMU'])),
+        make_sip_event(98, '200', 'a', 1, TERM, SEAT,
+                       sdp=make_sdp(audio=['PCMU']), cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, SEAT, TERM),
+    ]
+    direct = [
+        (0x1111, 52375, 50192, 100, 160, 0, SEAT, TERM, 0, 0.02),
+        (0x1112, 50192, 52375, 100, 160, 0, TERM, SEAT, 0, 0.02),
+    ]
+    calls = detect_calls({'seat': make_rtp_data(direct, 90, 200, sip_events=events),
+                          'terminal': make_rtp_data(direct, 90, 200)},
+                         SERVER)
+    assert calls[0]['is_p2p']
+    fm = calls[0]['fs_media']
+    assert fm['verdict'] == 'bypass', fm
+    print("PASS: direct media -> FS not in media path")
+
+
+def test_fs_media_unknown_single_leg():
+    """只抓到一条腿的协商编码（无被叫侧信令）→ 如实标注无法判定。"""
+    events = [
+        make_sip_event(95, 'INVITE', 'a', 1, SEAT, SERVER,
+                       sdp=make_sdp(audio=['PCMA'])),
+        make_sip_event(98, '200', 'a', 1, SERVER, SEAT,
+                       sdp=make_sdp(audio=['PCMA']), cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, SEAT, SERVER),
+    ]
+    rd = make_rtp_data([
+        (0x1111, 5000, 6000, 100, 160, 0, SEAT, SERVER, 8, 0.02),
+        (0x1112, 6000, 5000, 100, 160, 0, SERVER, SEAT, 8, 0.02),
+    ], 90, 200, sip_events=events)
+    calls = detect_calls({'seat': rd}, SERVER)
+    fm = calls[0]['fs_media']
+    assert fm['verdict'] == 'unknown', fm
+    # 只有主叫腿有 SDP：per-leg 只有 caller 一份，被叫侧缺失
+    npl = calls[0]['negotiated_per_leg']
+    assert 'caller' in npl and 'callee' not in npl, npl
+    print("PASS: single-leg SDP -> verdict unknown (honest)")
+
+
+def test_fs_media_clock_rate_mismatch():
+    """同名字不同时钟率（OPUS/48000 vs OPUS/16000）是不同编码 → transcode；
+    一侧时钟率未知时按名字相等视为同种编码 → same。"""
+    base = [
+        make_sip_event(95, 'INVITE', 'a', 1, SEAT, SERVER,
+                       sdp=make_sdp(audio=[('OPUS', 48000)])),
+        make_sip_event(98, '200', 'a', 1, SERVER, SEAT,
+                       sdp=make_sdp(audio=[('OPUS', 48000)]),
+                       cseq_method='INVITE'),
+        make_sip_event(96, 'INVITE', 'b', 1, SERVER, TERM,
+                       sdp=make_sdp(audio=[('OPUS', 16000)])),
+        make_sip_event(100, '200', 'b', 1, TERM, SERVER,
+                       sdp=make_sdp(audio=[('OPUS', 16000)]),
+                       cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, SEAT, SERVER),
+    ]
+    rd = make_rtp_data([
+        (0x1111, 5000, 6000, 100, 160, 0, SEAT, SERVER, 96, 0.02),
+        (0x1112, 6000, 5000, 100, 160, 0, SERVER, SEAT, 96, 0.02),
+        (0x1113, 7000, 8000, 100, 160, 0, TERM, SERVER, 96, 0.02),
+        (0x1114, 8000, 7000, 100, 160, 0, SERVER, TERM, 96, 0.02),
+    ], 90, 200, sip_events=base)
+    calls = detect_calls({'fs': rd}, SERVER)
+    fm = calls[0]['fs_media']
+    assert fm['verdict'] == 'transcode', fm
+    assert '48000' in fm['text'] and '16000' in fm['text'], fm
+    print("PASS: clock-rate mismatch (OPUS 48k vs 16k) -> transcode")
+
+    # 被叫腿 SDP 无时钟率（旧格式/FS 自产静态 PT）：名字相同即不判转码
+    events = [base[0], base[1],
+              make_sip_event(96, 'INVITE', 'b', 1, SERVER, TERM,
+                             sdp=make_sdp(audio=['OPUS'])),
+              make_sip_event(100, '200', 'b', 1, TERM, SERVER,
+                             sdp=make_sdp(audio=['OPUS']),
+                             cseq_method='INVITE'),
+              base[4]]
+    rd2 = make_rtp_data([
+        (0x1111, 5000, 6000, 100, 160, 0, SEAT, SERVER, 96, 0.02),
+        (0x1112, 6000, 5000, 100, 160, 0, SERVER, SEAT, 96, 0.02),
+        (0x1113, 7000, 8000, 100, 160, 0, TERM, SERVER, 96, 0.02),
+        (0x1114, 8000, 7000, 100, 160, 0, SERVER, TERM, 96, 0.02),
+    ], 90, 200, sip_events=events)
+    calls = detect_calls({'fs': rd2}, SERVER)
+    fm = calls[0]['fs_media']
+    assert fm['verdict'] == 'same', fm
+    print("PASS: unknown rate on one side falls back to name match -> same")
+
+
 if __name__ == '__main__':
     test_two_sequential_calls()
     test_port_reuse_same_ports()
@@ -872,4 +1070,9 @@ if __name__ == '__main__':
     test_foreign_stream_evicted_from_call()
     test_party_filter_without_sdp()
     test_sequential_b2bua_calls_split_with_bridge_streams()
+    test_fs_media_transcode_between_legs()
+    test_fs_media_same_codec()
+    test_fs_media_bypass()
+    test_fs_media_unknown_single_leg()
+    test_fs_media_clock_rate_mismatch()
     print("\n=== ALL CALL DETECTOR TESTS PASSED ===")
