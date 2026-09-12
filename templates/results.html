@@ -175,7 +175,20 @@ function showResults(results) {
             if (report.conclusion.issues && report.conclusion.issues.length > 0) {
                 html += '<ul class="list-group mb-3">';
                 report.conclusion.issues.forEach(i => {
-                    html += `<li class="list-group-item list-group-item-${i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'info'}">${i.message}</li>`;
+                    const sev = i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'info';
+                    const streamData = i.stream && report.timestamp_continuity &&
+                        report.timestamp_continuity.streams[i.stream];
+                    const hasEvents = !!(streamData && streamData.events && streamData.events.length);
+                    html += `<li class="list-group-item list-group-item-${sev}">`;
+                    if (hasEvents) {
+                        html += `<div class="issue-clickable" onclick="toggleIssueDetail(this)" title="点击展开/收起逐包明细">` +
+                                `<i class="bi bi-chevron-right issue-chevron"></i>${_esc(i.message)}</div>`;
+                    } else {
+                        html += _esc(i.message);
+                    }
+                    if (i.explain) html += `<div class="issue-explain">${_esc(i.explain).replace(/\n/g, '<br>')}</div>`;
+                    if (hasEvents) html += `<div class="issue-detail d-none">${renderTsEventTable(streamData)}</div>`;
+                    html += '</li>';
                 });
                 html += '</ul>';
             }
@@ -188,6 +201,60 @@ function showResults(results) {
     if (results.media_manifest) {
         showMedia(results.media_manifest);
     }
+}
+
+// ====== 时间戳异常逐包明细（点击 issue 展开"前后相关内容"）======
+// 现象的直白名称（kind 来自 ts_continuity 检测器）
+const TS_KIND_TXT = {
+    ts_jump: '声音断开',
+    ts_backward: '时间倒退',
+    reorder: '包晚到(乱序)',
+    duplicate: '声音重复',
+};
+
+// 切换某条 issue 的逐包明细展开/收起，箭头随之转向
+function toggleIssueDetail(headEl) {
+    const li = headEl.closest('li');
+    const detail = li.querySelector('.issue-detail');
+    if (!detail) return;
+    detail.classList.toggle('d-none');
+    const chevron = headEl.querySelector('.issue-chevron');
+    if (chevron) chevron.classList.toggle('open');
+}
+
+function renderTsEventTable(streamData) {
+    // 时间戳增量换算成毫秒（音频流有时钟率；视频等 frame 模式只有 ts 单位）。
+    // 发送端中途重置时间戳基准时增量会是天文数字，直接罗列没有意义，按幅度归为
+    // "大幅跳变/倒退"
+    const rate = streamData.clock_rate;
+    const deltaTxt = ev => {
+        if (ev.ts_delta === undefined || ev.ts_delta === null) return '—';
+        if (!rate) return `${ev.ts_delta} (ts)`;
+        const ms = ev.ts_delta / rate * 1000;
+        if (Math.abs(ms) >= 60000) return ms > 0 ? '大幅跳变' : '大幅倒退';
+        return `${ms.toFixed(0)}ms`;
+    };
+    const gapTxt = ev => (ev.media_gap_ms === null || ev.media_gap_ms === undefined)
+        ? '—' : `${ev.media_gap_ms}ms`;
+    let rows = '';
+    streamData.events.forEach(ev => {
+        rows += `<tr>` +
+            `<td class="text-nowrap">${ev.time_str}</td>` +
+            `<td>${TS_KIND_TXT[ev.kind] || ev.kind}</td>` +
+            `<td class="text-nowrap">#${ev.prev_seq ?? '—'} / ${ev.prev_ts ?? '—'}</td>` +
+            `<td class="text-nowrap">#${ev.seq} / ${ev.ts ?? '—'}</td>` +
+            `<td>${deltaTxt(ev)}</td>` +
+            `<td>${gapTxt(ev)}</td>` +
+            `</tr>`;
+    });
+    const truncated = streamData.event_count > streamData.events.length
+        ? `<div class="text-muted small mb-1">仅列出前 ${streamData.events.length} 处（本流共 ${streamData.event_count} 处），完整计数见上方文字。</div>`
+        : '';
+    return `${truncated}` +
+        `<div class="table-responsive"><table class="table table-sm table-bordered issue-table mb-0">` +
+        `<thead><tr><th>时间</th><th>现象</th><th>前一个包 seq / 时间戳</th>` +
+        `<th>本包 seq / 时间戳</th><th>时间戳增量</th><th>缺失声音</th></tr></thead>` +
+        `<tbody>${rows}</tbody></table></div>`;
 }
 
 // ====== 音视频回放展示 ======

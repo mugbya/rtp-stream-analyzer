@@ -170,6 +170,8 @@ def _build_ts_summary(results: dict) -> dict:
         streams[label] = {
             'is_continuous': data.get('is_continuous', True),
             'packet_count': data.get('packet_count', 0),
+            'pt': data.get('pt'),
+            'clock_rate': data.get('clock_rate'),
             'mode': data.get('mode'),
             'packet_duration_ms': data.get('packet_duration_ms'),
             'event_count': data.get('event_count', 0),
@@ -179,20 +181,77 @@ def _build_ts_summary(results: dict) -> dict:
             'duplicate_count': data.get('duplicate_count', 0),
             'wrap_count': data.get('wrap_count', 0),
             'total_media_gap_ms': data.get('total_media_gap_ms', 0),
-            # 事件明细带可读时间（最多 20 条，完整计数见上面各字段）
+            # 事件明细带可读时间与前后包信息（最多 20 条，完整计数见上面各字段）
             'events': [
                 {
                     'time_str': datetime.fromtimestamp(ev['time']).strftime('%H:%M:%S'),
                     'kind': ev['kind'],
                     'seq': ev['seq'],
+                    'ts': ev.get('ts'),
+                    'prev_seq': ev.get('prev_seq'),
+                    'prev_ts': ev.get('prev_ts'),
                     'ts_delta': ev['ts_delta'],
                     'media_gap_ms': ev['media_gap_ms'],
+                    'arrival_gap_ms': ev.get('arrival_gap_ms'),
                 }
                 for ev in (data.get('events') or [])[:20]
             ],
         }
 
     return {'streams': streams}
+
+
+# 抓包文件角色 → 展示名（issue 文案用；stream 键仍保留原始 label）
+ROLE_LABELS = {
+    'fs': 'FS 服务器端', 'FS': 'FS 服务器端',
+    'seat': '坐席端', '坐席': '坐席端', 'zuoxi': '坐席端',
+    'terminal': '终端 / 主叫端', '终端': '终端 / 主叫端',
+    'caller': '终端 / 主叫端', '主叫': '终端 / 主叫端',
+}
+
+
+def _pretty_label(label: str) -> str:
+    """把 "role (SSRC=0x…)" 的角色前缀换成中文展示名。"""
+    role, sep, rest = label.partition(' (')
+    return f'{ROLE_LABELS.get(role, role)} ({rest}' if sep else label
+
+
+def _gap_human(gap_ms: float) -> str:
+    """把累计媒体时间缺口换成人类可读的单位。"""
+    if gap_ms >= 60000:
+        return f'{gap_ms / 60000:.1f} 分钟'
+    if gap_ms >= 1000:
+        return f'{gap_ms / 1000:.1f} 秒'
+    return f'{gap_ms:.0f} 毫秒'
+
+
+def _ts_explain(data: dict, gap_ms: float) -> str:
+    """生成时间戳异常的直白解释（分现象说明 + 影响评估）。
+
+    面向非专业用户：RTP 时间戳是发送端给每包声音盖的"媒体时钟"标记，
+    正常随包一路增大；异常即位置对不上。
+    """
+    lines = ['发送端给每一包声音都盖了一个"时间戳"，标记这段声音在整通'
+             '电话里的位置，正常情况下它随包一路增大。异常就是它的位置对不上：']
+    if data.get('jump_count', 0):
+        lines.append('・声音内容突然断开：相邻两包之间少了一段声音。如果对方正'
+                     '处于静音（没说话），这是"静音抑制"的正常省流量做法；如果'
+                     '发生在有人说话时，说明发送端丢了一段声音。')
+    if data.get('backward_count', 0):
+        lines.append('・声音时间往回走：包到达的先后顺序没乱，但时间戳却倒退'
+                     '——通常是发送端（终端或服务器）时钟异常，可能表现为'
+                     '卡顿、杂音。')
+    if data.get('reorder_count', 0):
+        lines.append('・数据包晚到/乱序：网络把包的先后顺序打乱了，播放端一般'
+                     '能自动恢复，通常无需处理。')
+    if data.get('duplicate_count', 0):
+        lines.append('・同一时刻声音重复：同一段声音被发了两遍（或发送端时钟停'
+                     '了一下），可能是发送端故障或冗余重传。')
+    if gap_ms >= 1:
+        lines.append(f'影响评估：整通电话累计缺少约 {_gap_human(gap_ms)}的声音内容。')
+    else:
+        lines.append('影响评估：声音内容本身没有缺失。')
+    return '\n'.join(lines)
 
 
 def _build_clock_summary(results: dict) -> dict:
@@ -276,7 +335,9 @@ def _build_conclusion(results: dict) -> dict:
                                     f'个乱序包（未计入丢包）'),
                     })
 
-    # 时间戳连续性评估
+    # 时间戳连续性评估。文案面向非专业用户（"RTP 时间戳"直说成"声音时间
+    # 轴"）；issue 附带 stream（对应 timestamp_continuity.streams 的键）与
+    # explain（逐现象的直白解释），前端据此渲染可点击的逐包前后对照
     ts_continuity = results.get('ts_continuity') or {}
     for label, data in ts_continuity.items():
         n = data.get('event_count', 0)
@@ -284,28 +345,33 @@ def _build_conclusion(results: dict) -> dict:
             continue
         parts = []
         if data.get('jump_count', 0):
-            parts.append(f"时间戳跳变 {data['jump_count']} 次")
+            parts.append(f"声音内容突然断开 {data['jump_count']} 处")
         if data.get('backward_count', 0):
-            parts.append(f"时间戳倒退 {data['backward_count']} 次（seq 顺序未变，发送端异常）")
+            parts.append(f"声音时间往回走 {data['backward_count']} 处"
+                         f"（发送端时钟异常）")
         if data.get('reorder_count', 0):
-            parts.append(f"乱序倒退 {data['reorder_count']} 次")
+            parts.append(f"数据包晚到/乱序 {data['reorder_count']} 处")
         if data.get('duplicate_count', 0):
-            parts.append(f"时间戳重复 {data['duplicate_count']} 次")
+            parts.append(f"同一时刻声音重复 {data['duplicate_count']} 处")
         gap = data.get('total_media_gap_ms') or 0
-        if gap >= 60000:
-            gap_txt = f'，累计缺少 {gap / 60000:.1f} 分钟媒体时间'
-        elif gap >= 1000:
-            gap_txt = f'，累计缺少 {gap / 1000:.1f} 秒媒体时间'
-        elif gap >= 1:
-            gap_txt = f'，累计缺少 {gap:.0f}ms 媒体时间'
+        if gap >= 1:
+            gap_part = f'累计缺少约 {_gap_human(gap)}的声音内容，'
+            impact = ('人耳基本听不出来' if gap < 50
+                      else '可能有轻微卡顿感' if gap < 300
+                      else '可能出现明显断音、吞字')
         else:
-            gap_txt = ''
+            gap_part = ''
+            impact = ('虽然声音内容没有缺失，但时间倒退/重复若频繁出现，'
+                      '可能引起卡顿或杂音')
         issues.append({
             'severity': 'critical' if data.get('backward_count', 0) else 'warning',
-            'message': f'{label}: RTP 时间戳不连续（{"、".join(parts)}）{gap_txt}',
+            'message': (f'{_pretty_label(label)}: 这条流的声音时间轴异常：'
+                        f'{"、".join(parts)}，{gap_part}{impact}'),
+            'stream': label,
+            'explain': _ts_explain(data, gap),
         })
     if ts_continuity and all(d.get('event_count', 0) == 0 for d in ts_continuity.values()):
-        ok_items.append('所有流 RTP 时间戳连续（无跳变/倒退/重复）')
+        ok_items.append('所有流的声音时间轴连续（无断开/倒退/重复）')
 
     # 根因分析
     root_cause = None

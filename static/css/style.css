@@ -329,3 +329,28 @@ body {
 .sl-msg.sip-prov { color: #adb5bd; }
 .sl-msg.sip-ok { color: #198754; }
 .sl-msg.sip-err { color: #dc3545; }
+
+/* ====== 报告 issue：可点击展开逐包明细 ====== */
+/* issue 标题行：可点击（有明细时），箭头指示可展开 */
+.issue-clickable {
+    cursor: pointer;
+    user-select: none;
+}
+.issue-clickable:hover { text-decoration: underline; }
+.issue-chevron {
+    display: inline-block;
+    margin-right: 0.35rem;
+    transition: transform 0.15s ease;
+    font-size: 0.8em;
+}
+.issue-chevron.open { transform: rotate(90deg); }
+/* 直白解释文字：默认展示，弱化样式 */
+.issue-explain {
+    margin-top: 0.4rem;
+    font-size: 0.85em;
+    color: #5c636a;
+    line-height: 1.7;
+}
+/* 逐包明细表 */
+.issue-table { font-size: 0.82em; }
+.issue-table th { white-space: nowrap; }

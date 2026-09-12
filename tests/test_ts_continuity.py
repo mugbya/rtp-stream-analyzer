@@ -209,7 +209,7 @@ def test_video_frame_mode():
 
 
 def test_report_marks_ts_anomaly():
-    """报告：时间戳异常进 issues（含缺失媒体时间），小节带事件明细。"""
+    """报告：时间戳异常进 issues（直白文案 + 可点击明细所需字段）。"""
     label = 'fs (SSRC=0x00001234)'
     results = {
         'ts_continuity': {
@@ -218,17 +218,28 @@ def test_report_marks_ts_anomaly():
                 'event_count': 2, 'jump_count': 1, 'backward_count': 1,
                 'reorder_count': 0, 'duplicate_count': 0, 'wrap_count': 0,
                 'total_media_gap_ms': 1000.0, 'packet_duration_ms': 20.0,
-                'packet_count': 100,
+                'packet_count': 100, 'clock_rate': 8000,
                 'events': [{'time': 100.0, 'kind': 'ts_jump', 'seq': 150,
-                            'ts_delta': 8160, 'media_gap_ms': 1000.0}],
+                            'ts': 52160, 'prev_seq': 149, 'prev_ts': 44000,
+                            'ts_delta': 8160, 'media_gap_ms': 1000.0,
+                            'arrival_gap_ms': 20.1}],
             },
         },
     }
     report = generate_report(results)
     sec = report['timestamp_continuity']['streams'][label]
     assert sec['event_count'] == 2 and sec['events'][0]['time_str'] == '08:01:40'
+    assert sec['clock_rate'] == 8000
+    ev = sec['events'][0]
+    assert ev['seq'] == 150 and ev['prev_seq'] == 149 and ev['prev_ts'] == 44000
+    assert ev['ts'] == 52160 and ev['arrival_gap_ms'] == 20.1
     msgs = ' '.join(i['message'] for i in report['conclusion']['issues'])
-    assert '时间戳不连续' in msgs and '1.0 秒媒体时间' in msgs, msgs
+    assert '声音时间轴异常' in msgs and '1.0 秒' in msgs, msgs
+    assert 'FS 服务器端' in msgs, msgs  # 角色前缀换成中文展示名
+    ts_issues = [i for i in report['conclusion']['issues'] if i.get('stream')]
+    assert len(ts_issues) == 1
+    assert ts_issues[0]['stream'] == label
+    assert '影响评估' in ts_issues[0]['explain'] and '静音抑制' in ts_issues[0]['explain']
     assert report['conclusion']['overall'] in ('warning', 'critical')
     print("PASS: report marks ts anomaly in issues + timestamp_continuity section")
 

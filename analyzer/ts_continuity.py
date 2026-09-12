@@ -58,7 +58,8 @@ def check_ts_continuity(packets: dict, ssrc: int) -> dict:
             'duplicate_count': int,     # ts 重复（增量 0）
             'total_media_gap_ms': float,  # 跳变累计缺少的媒体时间
             'media_gaps_ms': [(time, gap_ms), ...],
-            'events': [{'time', 'kind', 'seq', 'ts_delta', 'media_gap_ms'}, ...],
+            'events': [{'time', 'kind', 'seq', 'ts', 'prev_seq', 'prev_ts',
+                        'ts_delta', 'media_gap_ms', 'arrival_gap_ms'}, ...],
         }
     """
     pkts = get_stream_packets(packets, ssrc)
@@ -142,8 +143,14 @@ def check_ts_continuity(packets: dict, ssrc: int) -> dict:
                     'time': t,
                     'kind': event[0],
                     'seq': seq,
+                    'ts': ts,
+                    # 异常处前后的包信息：供报告展示"前后相关内容"（点击展开
+                    # 逐包对照），让用户看到是哪两个包之间出了问题
+                    'prev_seq': prev_seq,
+                    'prev_ts': prev_ts,
                     'ts_delta': event[1],
                     'media_gap_ms': event[2],
+                    'arrival_gap_ms': round((t - float(pkts[i - 1][0])) * 1000, 1),
                 })
 
     result['total_media_gap_ms'] = round(result['total_media_gap_ms'], 1)
