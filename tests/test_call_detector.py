@@ -329,7 +329,30 @@ def test_sip_sdp_parsing():
     assert ev and ev['sdp'] == {
         'audio': ['PCMU', 'PCMA'], 'video': ['H264'],
         'map': {'audio': {'0': 'PCMU', '8': 'PCMA'}, 'video': {'96': 'H264'}},
+        # 无 c= 行则没有宣告端点
+        'endpoints': [],
     }, ev['sdp']
+
+    # 媒体端点：会话级 c= 为默认连接地址，媒体级 c=（紧跟其 m= 之后）覆盖；
+    # 端口 0（拒绝该路媒体）与 0.0.0.0 连接地址（hold）不宣告
+    payload_hold = ('INVITE sip:1003@10.0.0.1 SIP/2.0\r\n'
+                    'Call-ID: sdp-cid3\r\nCSeq: 1 INVITE\r\n'
+                    'Content-Type: application/sdp\r\nContent-Length: 999\r\n'
+                    '\r\n'
+                    'v=0\r\n'
+                    'c=IN IP4 10.0.0.2\r\n'
+                    'm=audio 16400 RTP/AVP 0\r\n'
+                    'm=video 0 RTP/AVP 96\r\n'
+                    'm=video 16404 RTP/AVP 96\r\n'
+                    'c=IN IP4 10.0.0.9\r\n'
+                    'm=audio 16406 RTP/AVP 8\r\n'
+                    'c=IN IP4 0.0.0.0\r\n'
+                    'm=video 16408 RTP/AVP 96\r\n').encode()
+    ev4 = _parse_sip_event(payload_hold)
+    assert ev4['sdp']['endpoints'] == [
+        {'kind': 'audio', 'addr': '10.0.0.2', 'port': 16400},
+        {'kind': 'video', 'addr': '10.0.0.9', 'port': 16404},
+    ], ev4['sdp']['endpoints']
 
     # 静态 PT（0/8）不带 rtpmap 时按静态表解析；裸 telephone（无 -event 后缀）
     # 同样是 DTMF，排除；无 rtpmap 的动态 PT 没有名字，跳过
@@ -352,6 +375,7 @@ def test_sip_sdp_parsing():
         'map': {'audio': {'96': 'OPUS', '97': 'SPEEX', '98': 'SPEEX',
                           '0': 'PCMU', '8': 'PCMA'},
                 'video': {}},
+        'endpoints': [],
     }, ev3['sdp']
 
     # No body / no SDP -> empty dict
@@ -638,6 +662,195 @@ def test_sip_source_priority_and_retrans_dedupe():
     print("PASS: single-capture fallback keeps its own copy")
 
 
+def _sdp(endpoints, audio='PCMU'):
+    """带宣告端点的 SDP 事件体（endpoints: [(addr, port), ...]）。"""
+    return {'audio': [audio] if audio else [], 'video': [],
+            'map': {'audio': {'0': audio} if audio else {}, 'video': {}},
+            'endpoints': [{'kind': 'audio', 'addr': a, 'port': p}
+                          for a, p in endpoints]}
+
+
+def _b2bua_sip_events(cid, term_port, fs_port, seat_port, t_inv, t_bye,
+                      with_sdp=True, answerer=SEAT, caller=TERM):
+    """B2BUA 一通通话的信令：终端→FS 的 INVITE + FS→坐席的 INVITE，
+    两条 200 OK 各自宣告本侧媒体地址，最后 BYE。"""
+    other = {'fs_side': (SERVER, fs_port), 'term_side': (caller, term_port),
+             'seat_side': (SEAT, seat_port)}
+    evs = [
+        {'time': t_inv, 'method': 'INVITE', 'call_id': cid, 'cseq': 1,
+         'cseq_method': 'INVITE', 'src': caller, 'dst': SERVER,
+         'sdp': _sdp([other['term_side']]) if with_sdp else {}},
+        {'time': t_inv + 0.5, 'method': 'INVITE', 'call_id': cid, 'cseq': 20,
+         'cseq_method': 'INVITE', 'src': SERVER, 'dst': answerer,
+         'sdp': _sdp([other['fs_side']]) if with_sdp else {}},
+        {'time': t_inv + 4, 'method': '200', 'call_id': cid, 'cseq': 1,
+         'cseq_method': 'INVITE', 'src': answerer, 'dst': SERVER,
+         'sdp': _sdp([other['seat_side']]) if with_sdp else {}},
+        {'time': t_inv + 4.5, 'method': '200', 'call_id': cid, 'cseq': 20,
+         'cseq_method': 'INVITE', 'src': SERVER, 'dst': TERM,
+         'sdp': _sdp([other['fs_side']]) if with_sdp else {}},
+        {'time': t_bye, 'method': 'BYE', 'call_id': cid, 'cseq': 30,
+         'cseq_method': 'BYE', 'src': TERM, 'dst': SERVER},
+    ]
+    return evs
+
+
+def test_concurrent_calls_split_by_sdp():
+    """两通并发的通话经同一 FS（时间重叠聚类并成一通）：SDP 宣告端点把
+    它们拆回两通，各自 4 条流、各自的信令流程——不再出现 9 条流。"""
+    other = '10.0.0.9'
+    streams = [
+        # 通话 A：终端↔FS、坐席↔FS（各上下行）
+        (0xAA11, 7080, 34576, 100, 160, 0, TERM, SERVER, 0, 0.02),
+        (0xAA12, 34576, 7080, 100, 160, 0, SERVER, TERM, 0, 0.02),
+        (0xAA13, 6000, 34580, 100, 160, 0, SEAT, SERVER, 8, 0.02),
+        (0xAA14, 34580, 6000, 100, 160, 0, SERVER, SEAT, 8, 0.02),
+        # 通话 B：另一对端点（IP 既非 A 的主被叫），完全并发
+        (0xBB11, 7180, 34600, 100, 160, 0, other, SERVER, 0, 0.02),
+        (0xBB12, 34600, 7180, 100, 160, 0, SERVER, other, 0, 0.02),
+        (0xBB13, 6100, 34610, 100, 160, 0, SEAT, SERVER, 8, 0.02),
+        (0xBB14, 34610, 6100, 100, 160, 0, SERVER, SEAT, 8, 0.02),
+    ]
+    sip = (_b2bua_sip_events('a', 7080, 34576, 6000, 95, 165)
+           + _b2bua_sip_events('b', 7180, 34600, 6100, 95, 165,
+                               answerer=other))
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 2, f"expected 2 calls, got {len(calls)}"
+    a = next(c for c in calls if c['sip_call_ids'] == ['a'])
+    b = next(c for c in calls if c['sip_call_ids'] == ['b'])
+    assert set(a['ssrcs']) == {0xAA11, 0xAA12, 0xAA13, 0xAA14}, a['ssrcs']
+    assert set(b['ssrcs']) == {0xBB11, 0xBB12, 0xBB13, 0xBB14}, b['ssrcs']
+    assert a['stream_count'] == 4 and b['stream_count'] == 4
+    # 各通的信令流程只含自己的消息（B 的主叫是 other）
+    assert all(m['src'] in (TERM, SERVER, SEAT) for m in a['sip_flow'])
+    assert any(m['src'] == other for m in b['sip_flow'])
+    assert all(c['completeness']['status'] == 'complete' for c in calls)
+    print("PASS: concurrent calls through one FS split by SDP endpoints")
+
+
+def test_foreign_stream_evicted_from_call():
+    """通话 A 之外混入一条无信令的他人媒体流（回放里多出的第 9 条流）：
+    按通话 A 自己的 SDP 宣告剔出，单独成通可选分析。"""
+    other = '10.0.0.9'
+    streams = [
+        (0xAA11, 7080, 34576, 100, 160, 0, TERM, SERVER, 0, 0.02),
+        (0xAA12, 34576, 7080, 100, 160, 0, SERVER, TERM, 0, 0.02),
+        (0xAA13, 6000, 34580, 100, 160, 0, SEAT, SERVER, 8, 0.02),
+        (0xAA14, 34580, 6000, 100, 160, 0, SERVER, SEAT, 8, 0.02),
+        # 他人通话仅剩的一条腿（不完整的那一通），时间与 A 重叠
+        (0xBB11, 7180, 34600, 110, 150, 0, other, SERVER, 0, 0.02),
+    ]
+    rd = make_rtp_data(streams, 90, 200,
+                       sip_events=_b2bua_sip_events('a', 7080, 34576, 6000,
+                                                    95, 165))
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 2, f"expected A + evicted foreign call, got {len(calls)}"
+    a = next(c for c in calls if c['sip_call_ids'] == ['a'])
+    stray = next(c for c in calls if c['sip_call_ids'] != ['a'])
+    assert set(a['ssrcs']) == {0xAA11, 0xAA12, 0xAA13, 0xAA14}, a['ssrcs']
+    assert set(stray['ssrcs']) == {0xBB11}, stray['ssrcs']
+    assert stray['sip_flow'] == []
+    print("PASS: foreign un-signaled stream evicted into its own call")
+
+
+def test_party_filter_without_sdp():
+    """信令无 SDP 时退回主叫/被叫 IP 过滤：经 FS 转发、对端既非主叫也非
+    被叫的他人流被剔出通话。"""
+    other = '10.0.0.9'
+    streams = [
+        (0xAA11, 7080, 34576, 100, 160, 0, TERM, SERVER, 0, 0.02),
+        (0xAA12, 34576, 7080, 100, 160, 0, SERVER, TERM, 0, 0.02),
+        (0xAA13, 6000, 34580, 100, 160, 0, SEAT, SERVER, 8, 0.02),
+        (0xAA14, 34580, 6000, 100, 160, 0, SERVER, SEAT, 8, 0.02),
+        (0xBB11, 9000, 34600, 100, 160, 0, other, SERVER, 0, 0.02),
+        (0xBB12, 34600, 9000, 100, 160, 0, SERVER, other, 0, 0.02),
+    ]
+    sip = [
+        {'time': 95, 'method': 'INVITE', 'call_id': 'a', 'cseq': 1,
+         'cseq_method': 'INVITE', 'src': TERM, 'dst': SERVER},
+        {'time': 104, 'method': '200', 'call_id': 'a', 'cseq': 1,
+         'cseq_method': 'INVITE', 'src': SEAT, 'dst': SERVER},
+        {'time': 165, 'method': 'BYE', 'call_id': 'a', 'cseq': 30,
+         'cseq_method': 'BYE', 'src': TERM, 'dst': SERVER},
+    ]
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 2, f"expected A + evicted other-endpoint call, got {len(calls)}"
+    a = next(c for c in calls if c['sip_call_ids'] == ['a'])
+    stray = next(c for c in calls if c['sip_call_ids'] != ['a'])
+    assert set(a['ssrcs']) == {0xAA11, 0xAA12, 0xAA13, 0xAA14}, a['ssrcs']
+    assert set(stray['ssrcs']) == {0xBB11, 0xBB12}, stray['ssrcs']
+    print("PASS: caller/callee IP filter evicts other-endpoint streams (no SDP)")
+
+
+def _b2bua_relay_events(cid_a, cid_b, caller, term_port, fs_a_ports, seat_port,
+                        fs_b_ports, t_inv, t_bye):
+    """真实 B2BUA 的两腿信令：A 腿（主叫↔FS）与 B 腿（FS↔被叫）是两个
+    Call-ID，各自只宣告本侧端点——FS 的中继端口宣告在对应腿的 SDP 里。"""
+    return [
+        {'time': t_inv, 'method': 'INVITE', 'call_id': cid_a, 'cseq': 1,
+         'cseq_method': 'INVITE', 'src': caller, 'dst': SERVER,
+         'sdp': _sdp([(caller, term_port)])},
+        {'time': t_inv + 1, 'method': '200', 'call_id': cid_a, 'cseq': 1,
+         'cseq_method': 'INVITE', 'src': SERVER, 'dst': caller,
+         'sdp': _sdp([(SERVER, fs_a_ports[0]), (SERVER, fs_a_ports[1])])},
+        {'time': t_inv + 1, 'method': 'INVITE', 'call_id': cid_b, 'cseq': 1,
+         'cseq_method': 'INVITE', 'src': SERVER, 'dst': SEAT,
+         'sdp': _sdp([(SERVER, fs_b_ports[0]), (SERVER, fs_b_ports[1])])},
+        {'time': t_inv + 5, 'method': '200', 'call_id': cid_b, 'cseq': 1,
+         'cseq_method': 'INVITE', 'src': SEAT, 'dst': SERVER,
+         'sdp': _sdp([(SEAT, seat_port)])},
+        {'time': t_bye, 'method': 'BYE', 'call_id': cid_a, 'cseq': 2,
+         'cseq_method': 'BYE', 'src': caller, 'dst': SERVER},
+        {'time': t_bye + 0.5, 'method': 'BYE', 'call_id': cid_b, 'cseq': 2,
+         'cseq_method': 'BYE', 'src': SERVER, 'dst': SEAT},
+    ]
+
+
+def test_sequential_b2bua_calls_split_with_bridge_streams():
+    """先后两通 B2BUA 电话被一条横跨两通的 FS 录音流桥接并成一通：录音流共
+    享 FS IP 且与两通都时间重叠，BYE 后面跟着下一通的 INVITE。半呼叫配对
+    （A/B 腿媒体并发、端点 ≤2）拆回两通，各通信令到自己的 BYE 为止。"""
+    term2 = '10.0.0.4'
+    streams = [
+        # 通话 1（105-155）：终端 1 ↔ FS、坐席 ↔ FS
+        (0xAA11, 7080, 34576, 105, 155, 0, TERM, SERVER, 0, 0.02),
+        (0xAA12, 34578, 7080, 105, 155, 0, SERVER, TERM, 0, 0.02),
+        (0xAA13, 6000, 34580, 108, 152, 8, SEAT, SERVER, 0, 0.02),
+        (0xAA14, 34582, 6000, 108, 152, 8, SERVER, SEAT, 0, 0.02),
+        # 通话 2（175-235）：终端 2 ↔ FS、坐席（复用 6000 端口）↔ FS
+        (0xBB11, 7084, 34600, 175, 235, 0, term2, SERVER, 0, 0.02),
+        (0xBB12, 34602, 7084, 175, 235, 0, SERVER, term2, 0, 0.02),
+        (0xBB13, 6000, 34604, 178, 232, 8, SEAT, SERVER, 0, 0.02),
+        (0xBB14, 34606, 6000, 178, 232, 8, SERVER, SEAT, 0, 0.02),
+        # 桥接流：FS → 录音/等待音服务器，横跨两通电话
+        (0xCC11, 40000, 50000, 95, 265, 0, SERVER, '10.0.0.5', 0, 0.02),
+        (0xCC12, 40002, 50002, 95, 265, 0, SERVER, '10.0.0.5', 0, 0.02),
+    ]
+    sip = (_b2bua_relay_events('a1', 'a2', TERM, 7080, (34576, 34578), 6000,
+                               (34580, 34582), 95, 160)
+           + _b2bua_relay_events('b1', 'b2', term2, 7084, (34600, 34602), 6000,
+                                 (34604, 34606), 170, 240))
+    rd = make_rtp_data(streams, 90, 300, sip_events=sip)
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 3, f"expected 2 calls + bridge call, got {len(calls)}"
+    c1 = next(c for c in calls if 'a1' in (c.get('sip_call_ids') or []))
+    c2 = next(c for c in calls if 'b1' in (c.get('sip_call_ids') or []))
+    bridge = next(c for c in calls if not (c.get('sip_call_ids') or []))
+    assert set(c1['ssrcs']) == {0xAA11, 0xAA12, 0xAA13, 0xAA14}, c1['ssrcs']
+    assert set(c2['ssrcs']) == {0xBB11, 0xBB12, 0xBB13, 0xBB14}, c2['ssrcs']
+    assert set(bridge['ssrcs']) == {0xCC11, 0xCC12}
+    # 关键回归点：每通的信令到自己的 BYE 为止，BYE 之后没有另一通的 INVITE
+    for c in (c1, c2):
+        flow = c['sip_flow']
+        first_bye = next(i for i, m in enumerate(flow) if m['method'] == 'BYE')
+        assert all(m['method'] != 'INVITE' for m in flow[first_bye:]), \
+            [m['method'] for m in flow[first_bye:]]
+    print("PASS: sequential B2BUA calls bridged by a recording stream split; "
+          "no INVITE after BYE")
+
+
 if __name__ == '__main__':
     test_two_sequential_calls()
     test_port_reuse_same_ports()
@@ -655,4 +868,8 @@ if __name__ == '__main__':
     test_p2p_direct_call_hint()
     test_negotiated_codecs()
     test_sip_source_priority_and_retrans_dedupe()
+    test_concurrent_calls_split_by_sdp()
+    test_foreign_stream_evicted_from_call()
+    test_party_filter_without_sdp()
+    test_sequential_b2bua_calls_split_with_bridge_streams()
     print("\n=== ALL CALL DETECTOR TESTS PASSED ===")

@@ -19,6 +19,9 @@
         </div>
 
         <div id="result-content" class="d-none">
+            <!-- 多通通话切换提示（检测到 ≥2 通时显示） -->
+            <div id="call-switch-banner" class="d-none mb-4"></div>
+
             <!-- 摘要卡片 -->
             <div class="row g-3 mb-4" id="summary-cards"></div>
 
@@ -78,6 +81,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (data.calls && data.calls.length) {
                     buildIpRoleMap(data.files || [], data.server_ip);
                     renderCalls(data.calls, data.capture_warning);
+                    renderCallSwitcher(data.calls, data.results.call_id, data.results);
                 }
             } else {
                 document.getElementById('result-loading').innerHTML =
@@ -484,6 +488,65 @@ function _captureWarningHtml(w) {
         </div>`;
 }
 
+// ====== 多通通话切换 ======
+// 抓包里检测到多通通话时在顶部提示：结果页只分析了其中一通（或混在一起），
+// 可切换到其他通话重新分析（POST /api/analyze 后刷新页面）
+let switchingCall = false;
+
+function renderCallSwitcher(calls, currentCallId, results) {
+    if (!calls || calls.length < 2) return;
+    const banner = document.getElementById('call-switch-banner');
+    const mediaType = results.media_type || 'audio';
+    const direction = results.direction || 'auto';
+    const curTxt = currentCallId
+        ? `当前分析的是<strong>${callLabel(currentCallId)}</strong>，可切换到其他通话：`
+        : '当前展示的是所有通话混在一起的结果，建议选择具体通话分析：';
+    const btns = calls.map(c => {
+        const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
+        const cur = c.call_id === currentCallId;
+        const cls = cur ? 'btn-primary' : 'btn-outline-primary';
+        const dis = cur || switchingCall ? 'disabled' : '';
+        const title = `${c.start_str} ~ ${c.end_str} · ${c.stream_count} 条流`;
+        return `<button type="button" class="btn btn-sm ${cls}" ${dis}
+                    onclick="switchCall('${c.call_id}', '${mediaType}', '${direction}')"
+                    title="${title}">
+                    <i class="bi bi-telephone"></i> ${callLabel(c.call_id)}
+                    <span class="badge ${st.badge} ms-1"><i class="bi ${st.icon}"></i> ${st.label}</span>
+                    <span class="ms-1 small">${title}</span>
+                </button>`;
+    }).join('');
+    banner.classList.remove('d-none');
+    banner.innerHTML = `
+        <div class="alert alert-info mb-0">
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                <strong><i class="bi bi-collection me-1"></i>检测到 ${calls.length} 通通话</strong>
+                <span class="small">${curTxt}</span>
+            </div>
+            <div class="d-flex flex-wrap gap-2 mt-2">${btns}</div>
+        </div>`;
+}
+
+function switchCall(callId, mediaType, direction) {
+    if (switchingCall) return;
+    switchingCall = true;
+    fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            session_id: SESSION_ID,
+            direction: direction,
+            media_type: mediaType,
+            call_id: callId,
+        }),
+    })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(() => location.reload())
+        .catch(err => {
+            switchingCall = false;
+            alert('切换通话失败：' + err.message);
+        });
+}
+
 function renderCalls(calls, captureWarning) {
     const card = document.getElementById('calls-card');
     const container = document.getElementById('calls-container');
@@ -569,6 +632,14 @@ function showMedia(manifest) {
             <span class="text-muted small">以下媒体流均来自该通话</span>
         </div>`;
     }
+    // 通话拓扑：先一句话说清每条腿谁到谁（主叫 ↔ FS ↔ 被叫），细节在每条流开头标注
+    const parties = manifest.parties || [];
+    if (parties.length) {
+        html += `<div class="mb-3 small d-flex flex-wrap align-items-center gap-1">` +
+            `<i class="bi bi-diagram-3 text-primary"></i>` +
+            parties.map(_partyChainHtml).join('<span class="text-muted mx-1">；</span>') +
+            `<span class="text-muted ms-1">—— 每条媒体流的收发双方标注在各流开头</span></div>`;
+    }
     for (const [role, media] of Object.entries(byRole)) {
         const roleName = ROLE_NAMES[role] || role;
         const roleIcon = ROLE_ICONS[role] || 'bi-question-circle';
@@ -587,7 +658,8 @@ function showMedia(manifest) {
     if (manifest.unsupported && manifest.unsupported.length > 0) {
         html += '<div class="alert alert-warning small mt-2"><strong>未能重建的流：</strong><ul class="mb-0">';
         manifest.unsupported.forEach(u => {
-            html += `<li>${ROLE_NAMES[u.role] || u.role} (SSRC=${u.ssrc}) — ${u.codec}: ${u.reason}</li>`;
+            const flow = u.flow ? `（${_esc(u.flow.from.label)} → ${_esc(u.flow.to.label)}）` : '';
+            html += `<li>${ROLE_NAMES[u.role] || u.role} (SSRC=${u.ssrc})${flow} — ${u.codec}: ${u.reason}</li>`;
         });
         html += '</ul></div>';
     }
@@ -595,13 +667,35 @@ function showMedia(manifest) {
     container.innerHTML = html;
 }
 
+// 通话拓扑链：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），来自后端 SIP 信令识别
+function _partyChainHtml(p) {
+    const seg = s => s ? `<strong>${_esc(s.label || '')}</strong>` +
+        (s.ip ? `<span class="text-muted ms-1">${s.ip}</span>` : '') : '';
+    let html = seg(p.caller);
+    html += ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` +
+        `<span class="badge bg-dark">FS</span>` +
+        (p.server_ip ? `<span class="text-muted ms-1">${p.server_ip}</span>` : '');
+    if (p.answerer) {
+        html += ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` + seg(p.answerer);
+    }
+    return html;
+}
+
 function _mediaItem(entry, kind) {
     const dirName = DIR_NAMES[entry.direction] || entry.direction;
     const dirBadge = DIR_BADGE[entry.direction] || 'bg-secondary';
     const dur = entry.duration_ms ? (entry.duration_ms / 1000).toFixed(1) + 's' : '';
 
-    let meta = `<span class="badge ${dirBadge} me-1">${dirName}</span>
-                <span class="badge bg-dark me-1">${entry.codec || ''}</span>
+    // 谁到谁：发送方 → 接收方（SIP 识别的主叫/被叫身份，无信令时为角色名或 IP）
+    let head = `<span class="badge ${dirBadge} me-1">${dirName}</span>`;
+    if (entry.flow) {
+        const side = s => `<strong>${_esc(s.label || '')}</strong>` +
+            (s.ip && s.label !== s.ip ? `<span class="text-muted small ms-1">${s.ip}</span>` : '');
+        head += side(entry.flow.from) +
+            ` <i class="bi bi-arrow-right text-muted mx-1"></i> ` + side(entry.flow.to) + ' ';
+    }
+
+    let meta = `<span class="badge bg-dark me-1">${entry.codec || ''}</span>
                 <span class="text-muted small">SSRC: ${entry.ssrc}`;
     if (dur) meta += ` · 时长 ${dur}`;
     if (entry.total_packets) meta += ` · ${entry.total_packets} 包`;
@@ -623,7 +717,8 @@ function _mediaItem(entry, kind) {
 
     return `
         <div class="border rounded p-2 mb-2 bg-light">
-            <div>${meta}</div>
+            <div>${head}</div>
+            <div class="mt-1">${meta}</div>
             ${player}
             <a href="${entry.url}" download class="btn btn-sm btn-outline-secondary mt-1">
                 <i class="bi bi-download"></i> 下载

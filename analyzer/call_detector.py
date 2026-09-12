@@ -8,7 +8,13 @@ Concepts:
   typically has several legs: at the FS capture the seat leg + terminal leg,
   and each side carries separate audio and video legs.
 - call: a group of legs belonging to the same phone call, clustered by time
-  overlap + shared IP.
+  overlap + shared IP. Concurrent/interleaved calls through the same server
+  cluster into one group, so each call's own signaling is used to split them
+  again (refine_calls): a leg belongs to a call only when one of its endpoint
+  ip:port pairs was announced in that call's SDP (c=/m= lines), or — without
+  SDP — touches the caller/answerer IP the flow identifies. Legs evicted this
+  way re-cluster into their own calls (typically a second call with missing
+  signaling), which become selectable analysis targets like any other.
 
 Completeness signals (in priority order):
 1. SIP signaling: INVITE before media start -> head captured; BYE after media
@@ -147,7 +153,8 @@ def group_calls(conversations: list) -> list:
     Legs belong to the same call when their time ranges overlap strongly and
     they share at least one IP (opposite legs share the server IP; same-side
     audio/video legs share the endpoint IP). Sequential calls never overlap,
-    so they stay separate. Concurrent calls can be mis-grouped (known limit).
+    so they stay separate. Concurrent calls sharing the server IP get merged
+    here — refine_calls splits them again using each call's own signaling.
     """
     n = len(conversations)
     parent = list(range(n))
@@ -328,6 +335,10 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             c['sip_flow'] = []
             c['answer_time'] = c['bye_time'] = None
             c['negotiated_codecs'] = {'audio': [], 'video': []}
+            c['sdp_endpoints'] = set()
+            c['sdp_endpoints_by_cid'] = {}
+            c['sdp_dialog_ranges'] = {}
+            c['party_ips'] = set()
         return
 
     all_events.sort(key=lambda e: e['time'])
@@ -362,11 +373,18 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
 
     # Each Call-ID group belongs to exactly one call: among calls whose
     # association window covers the group's first message, pick the one with
-    # the largest overlap between group span and call media range (ties broken
-    # by distance of the group start from the media range).
+    # the most SDP-announced media endpoints matching the call's actual media
+    # legs (so concurrent calls that overlap in time still get their own
+    # dialogs), then the largest overlap between group span and call media
+    # range (ties broken by distance of the group start from the media range).
     attach = {}
     for cid, evs in by_call_id.items():
         g0, g1 = evs[0]['time'], evs[-1]['time']
+        announced = set()
+        for e in evs:
+            for ep in (e.get('sdp') or {}).get('endpoints') or []:
+                if ep.get('addr') and ep.get('port'):
+                    announced.add((ep['addr'], ep['port']))
         best_idx, best_key = None, None
         for idx, call in enumerate(calls):
             lo = call['start'] - SIP_ASSOC_WINDOW_S
@@ -375,7 +393,13 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
                 continue
             overlap = max(0.0, min(g1, call['end']) - max(g0, call['start']))
             dist = max(0.0, call['start'] - g0) + max(0.0, g0 - call['end'])
-            key = (-overlap, dist)
+            hits = 0
+            if announced:
+                leg_pairs = set()
+                for leg in call['legs']:
+                    leg_pairs |= {(ip, p) for ip, p in leg['endpoints']}
+                hits = len(announced & leg_pairs)
+            key = (-hits, -overlap, dist)
             if best_key is None or key < best_key:
                 best_idx, best_key = idx, key
         if best_idx is not None:
@@ -385,6 +409,29 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
         flow = [e for cid, i in attach.items() if i == idx for e in by_call_id[cid]]
         flow.sort(key=lambda e: e['time'])
         call['sip_call_ids'] = {cid for cid, i in attach.items() if i == idx}
+        # 本通话信令里宣告的媒体端点（SDP c=/m= 行的 ip:port），按 Call-ID 分组：
+        # 精确圈定本通话的 RTP 流，供 refine_calls 把误并入的其他通话腿剔除/
+        # 拆分。B2BUA 一通电话的 A/B 腿是两个 Call-ID，分组保留这一结构
+        by_cid_eps = {}
+        by_cid_range = {}
+        for cid in call['sip_call_ids']:
+            eps = set()
+            for e in by_call_id[cid]:
+                for ep in (e.get('sdp') or {}).get('endpoints') or []:
+                    if ep.get('addr') and ep.get('port'):
+                        eps.add((ep['addr'], ep['port']))
+            times = [e['time'] for e in by_call_id[cid] if e.get('time') is not None]
+            if eps:
+                by_cid_eps[cid] = eps
+            if times:
+                by_cid_range[cid] = (min(times), max(times))
+        call['sdp_endpoints_by_cid'] = by_cid_eps
+        # 每个 Call-ID 的信令时间范围：媒体只可能落在 INVITE 之后、BYE之前，
+        # 供 refine_calls 的强匹配排除「端口复用」造成的跨通话误命中
+        call['sdp_dialog_ranges'] = by_cid_range
+        call['sdp_endpoints'] = set().union(*by_cid_eps.values()) if by_cid_eps else set()
+        # 主叫/被叫 IP（无 SDP 宣告时的兜底过滤依据）
+        call['party_ips'] = _call_party_ips(flow, server_ip)
         # 本通话会话里的 SDP：rtpmap 列出的编码 + PT→编码名映射（用于把
         # RTP 流实际使用的动态 PT 解析成编码名）
         sdp_codecs = {'audio': [], 'video': [], 'map': {'audio': {}, 'video': {}}}
@@ -468,6 +515,232 @@ def _sip_kind(method: str) -> str:
     return 'error'
 
 
+def _call_party_ips(flow: list, server_ip: str = None) -> set:
+    """从信令流程识别主叫/被叫的 IP（口径与 media_extractor.extract_call_parties
+    一致，只取 IP）：主叫 = 第一个非服务器侧 INVITE 的源（回退首个请求），
+    被叫 = INVITE 事务 200 OK 的非服务器发送方。"""
+    if not flow:
+        return set()
+    inv = next((m for m in flow if m['method'] == 'INVITE'
+                and m.get('src') != server_ip), None)
+    if inv is None:
+        inv = next((m for m in flow if m.get('kind') == 'request'
+                    or not m['method'].isdigit()), None)
+    if inv is None:
+        inv = flow[0]
+    ok = next((m for m in flow if m['method'] == '200'
+               and m.get('cseq_method') == 'INVITE'
+               and m.get('src') != server_ip), None)
+    return {ip for ip in (inv.get('src') if inv else None,
+                          ok.get('src') if ok else None) if ip}
+
+
+def _rebuild_call(call: dict) -> None:
+    """腿集合变动后重算通话的时间范围 / SSRC / 抓包文件集合。"""
+    legs = call['legs']
+    call['start'] = min(l['start'] for l in legs)
+    call['end'] = max(l['end'] for l in legs)
+    call['duration'] = call['end'] - call['start']
+    call['ssrcs'] = set().union(*[l['ssrc_set'] for l in legs]) if legs else set()
+    call['files'] = set().union(*[l['files'] for l in legs]) if legs else set()
+
+
+def _make_call(legs: list) -> dict:
+    """用一组腿构造与 group_calls 输出同构的通话对象。"""
+    call = {'legs': list(legs)}
+    _rebuild_call(call)
+    return call
+
+
+def _legs_time_overlap(legs_a: list, legs_b: list) -> float:
+    """两组腿媒体时间的重叠秒数（取成对重叠的最大值）。"""
+    best = 0.0
+    for a in legs_a:
+        for b in legs_b:
+            ov = min(a['end'], b['end']) - max(a['start'], b['start'])
+            if ov > best:
+                best = ov
+    return best
+
+
+def _split_call_by_sdp(call: dict, by_cid: dict, server_ip: str = None,
+                       ranges: dict = None):
+    """按各 Call-ID 的 SDP 宣告端点拆分/净化一通误合并的通话。
+
+    返回 {'kept': [...], 'orphans': [...], 'new_calls': [[legs], ...]}。
+
+    流端点 (ip,port) 命中某 Call-ID 宣告集合、且媒体时间落在该对话框信令
+    时间范围内的（强匹配）归属该信令组——先后两通电话复用媒体端口时，两通
+    的对话框会宣告相同的 (ip,port)，靠时间范围排除跨通话误命中；仅非服务
+    器 IP 命中的（弱匹配，如同通话后来才协商出的新媒体端口——服务器 IP 被
+    所有经转发的流共享，不算数）留在通话内；两者都不命中的是其他通话的流，
+    剔出。强匹配信令组能按共享 Call-ID 合并（如同通话 re-INVITE 前后的宣
+    告）。
+
+    B2BUA 一通电话的 A/B 腿各是一个 Call-ID，经服务器转发时各自只宣告一端
+    （半呼叫形状）。同一通话的 A/B 腿媒体并发，而先后两通电话的腿不重叠——
+    据此把「腿时间重叠、且合并后非服务器端点不超过两端」的半形状组合并成完
+    整呼叫单元（并发通话各自的端点对不上，冒出的第 3 个端点会挡住合并）。
+    合并后存在 ≥2 个完整单元时按单元拆成多通——经同一服务器的先后/并发通话
+    会因时间重叠或共享 IP 聚成一通，靠这一步拆回。
+    """
+    legs = call['legs']
+    announced_ips = {ip for eps in by_cid.values() for ip, _p in eps}
+    announced_ips -= {server_ip}
+
+    strong, weak, foreign = {}, [], []
+    ranges = ranges or {}
+    for leg in legs:
+        pairs = {(ip, p) for ip, p in leg['endpoints']}
+        sig = frozenset()
+        for cid, eps in by_cid.items():
+            if not eps & pairs:
+                continue
+            rng = ranges.get(cid)
+            if rng and (leg['start'] > rng[1] or rng[0] > leg['end']):
+                continue   # 媒体时间在该对话框之外：端口复用的另一通话
+            sig |= {cid}
+        if sig:
+            strong.setdefault(sig, []).append(leg)
+        elif set(leg['ips']) & announced_ips:
+            weak.append(leg)
+        else:
+            foreign.append(leg)
+
+    if not strong:
+        return None
+
+    # 合并共享 Call-ID 的签名组（传递闭包），单元携带各自的腿
+    units = []
+    for sig, ls in strong.items():
+        merged = [u for u in units if u['cids'] & sig]
+        rest = [u for u in units if not (u['cids'] & sig)]
+        cids, ulegs = set(sig), list(ls)
+        for u in merged:
+            cids |= u['cids']
+            ulegs.extend(u['legs'])
+        units = rest + [{'cids': cids, 'legs': ulegs}]
+
+    def unit_ips(u) -> set:
+        return {ip for cid in u['cids'] for ip, _p in by_cid[cid]} - {server_ip}
+
+    # 半形状单元按腿时间重叠并成完整呼叫单元；并起来会冒出第 3 个非服务器
+    # 端点的不并（那是另一通电话的端点）
+    fulls = [u for u in units if len(unit_ips(u)) >= 2]
+    partials = [u for u in units if len(unit_ips(u)) < 2]
+    changed = True
+    while changed:
+        changed = False
+        for i, u1 in enumerate(partials):
+            for u2 in partials[i + 1:]:
+                if len(unit_ips(u1) | unit_ips(u2)) > 2:
+                    continue
+                if _legs_time_overlap(u1['legs'], u2['legs']) <= 0:
+                    continue
+                u1['cids'] |= u2['cids']
+                u1['legs'] = u1['legs'] + u2['legs']
+                partials.remove(u2)
+                changed = True
+                break
+            if changed:
+                break
+    fulls += [u for u in partials if len(unit_ips(u)) >= 2]
+    # 仍不成形的散单元（同通话后来的 re-INVITE / 新媒体端口信令）：腿并进
+    # 时间重叠最多的完整单元；与谁都不重叠的腿剔出
+    for u in [p for p in partials if len(unit_ips(p)) < 2]:
+        target = max(fulls, key=lambda f: _legs_time_overlap(f['legs'], u['legs']),
+                     default=None)
+        if target and _legs_time_overlap(target['legs'], u['legs']) > 0:
+            target['legs'] = target['legs'] + u['legs']
+        else:
+            foreign.extend(u['legs'])
+
+    if len(fulls) < 2:
+        return {'kept': [l for ls in strong.values() for l in ls] + weak,
+                'orphans': foreign, 'new_calls': []}
+
+    # 拆成多通：第一单元留在原通话对象，其余单元作为新通话返回；弱匹配腿按
+    # 宣告 IP + 时间重叠归入单元，归不进任何单元的剔出
+    orphan = list(foreign)
+    for leg in weak:
+        lips = set(leg['ips']) - {server_ip}
+        target, best_ov = None, 0.0
+        for u in fulls:
+            if not lips & unit_ips(u):
+                continue
+            ov = _legs_time_overlap(u['legs'], [leg])
+            if ov > best_ov:
+                target, best_ov = u, ov
+        if target:
+            target['legs'].append(leg)
+        else:
+            orphan.append(leg)
+    return {'kept': fulls[0]['legs'],
+            'orphans': orphan,
+            'new_calls': [u['legs'] for u in fulls[1:]]}
+
+
+def _split_call_by_parties(call: dict, server_ip: str = None):
+    """无 SDP 宣告时的兜底：按信令识别的主叫/被叫 IP 剔除无关腿。
+
+    经服务器转发的腿要求对端 IP 是主叫或被叫（否则任何经过服务器的他人通
+    话都能蹭进来）；不经服务器的腿（点对点直连）要求两端至少一端命中。"""
+    parties = call.get('party_ips') or set()
+    if not parties:
+        return None
+
+    def ok(leg):
+        ips = set(leg['ips'])
+        if server_ip and server_ip in ips:
+            others = ips - {server_ip}
+            return bool(others & parties) if others else True
+        return bool(ips & parties)
+
+    kept = [l for l in call['legs'] if ok(l)]
+    orphans = [l for l in call['legs'] if not ok(l)]
+    if not kept or not orphans:
+        return None   # 无可剔，或全部被剔（判定不可信，如信令 IP≠媒体 IP）
+    return {'kept': kept, 'orphans': orphans, 'new_calls': []}
+
+
+def refine_calls(calls: list, server_ip: str = None) -> list:
+    """按每通通话自己的信令剔除误并入的他人通话腿，拆开被合并的通话（就地）。
+
+    group_calls 以「时间重叠 + 共享 IP」聚类，经同一服务器的并发/交错通话会
+    并成一通——媒体回放里随之混入其他通话的流（流条数超出单通话上限，出现
+    既非主叫也非被叫的端点）。每通通话自己的信令能精确圈定它的媒体：优先用
+    SDP 宣告端点（_split_call_by_sdp），无 SDP 时退回主叫/被叫 IP
+    （_split_call_by_parties）。
+
+    被剔出的腿与拆分出的腿重新聚类成新的通话（通常是缺信令/信令不全的另一
+    通，照样可选来分析）；之后 detect_calls 会重跑一次信令关联（按 SDP 端点
+    命中数优先），让各通拿到自己的 Call-ID 流程。
+    """
+    orphans = []
+    new_calls = []
+    for call in calls:
+        by_cid = call.get('sdp_endpoints_by_cid') or {}
+        if by_cid:
+            split = _split_call_by_sdp(call, by_cid, server_ip,
+                                       call.get('sdp_dialog_ranges'))
+        else:
+            split = _split_call_by_parties(call, server_ip)
+        if not split:
+            continue
+        call['legs'] = split['kept']
+        orphans.extend(split['orphans'])
+        new_calls.extend(split['new_calls'])
+    for legs in new_calls:
+        calls.append(_make_call(legs))
+    if orphans:
+        for c in group_calls(orphans):
+            calls.append(c)
+    for call in calls:
+        if call['legs']:
+            _rebuild_call(call)
+    return calls
+
+
 def _is_direct_media(call: dict, server_ip: str | None) -> bool:
     """通话媒体是否完全不经服务器转发（点对点直连）。
 
@@ -503,6 +776,11 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
 
     merged = merge_conversations(all_convs)
     raw_calls = group_calls(merged)
+    build_sip_flows(raw_calls, captures, server_ip)
+    # 并发/交错通话会被时间重叠聚类并成一通：按每通自己的信令（SDP 宣告端点，
+    # 无 SDP 时主被叫 IP）剔出误并入的腿并重聚类
+    refine_calls(raw_calls, server_ip)
+    # 拆分出的新通话也要拿到自己的信令流程/Call-ID，重跑一次关联
     build_sip_flows(raw_calls, captures, server_ip)
 
     results = []

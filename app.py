@@ -19,9 +19,10 @@ from analyzer.delay_analyzer import (
 )
 from analyzer.jitter_analyzer import calc_inter_packet_gaps, compare_jitter
 from analyzer.packet_loss import detect_all_losses
+from analyzer.ts_continuity import check_ts_continuity
 from analyzer.charts import generate_analysis_chart
 from analyzer.reporter import generate_report
-from analyzer.media_extractor import generate_all_media, get_media_urls
+from analyzer.media_extractor import generate_all_media, get_media_urls, describe_media_parties
 from analyzer.call_detector import detect_calls, check_capture_consistency
 
 app = Flask(__name__)
@@ -210,7 +211,22 @@ def run_analysis():
             loss_results.update(detect_all_losses(cap['packets'], ssrcs, labels))
     
     results['packet_loss'] = loss_results
-    
+
+    # === 时间戳连续性 ===
+    # 检查每条流的 RTP 时间戳是否单调连续（跳变/倒退/重复），异常会在
+    # 报告里标注；实测的每包时长也用于音频重建
+    ts_results = {}
+    for role, cap in captures.items():
+        for ssrc in target_streams:
+            if ssrc in cap['streams']:
+                label = f"{role} (SSRC=0x{ssrc:08x})"
+                ts_result = check_ts_continuity(cap['packets'], ssrc)
+                if ts_result['packet_count'] > 0:
+                    ts_result['label'] = label
+                    ts_results[label] = ts_result
+
+    results['ts_continuity'] = ts_results
+
     # === FS 内部延迟 ===
     fs_delay = None
     if 'fs' in captures or 'FS' in captures:
@@ -276,6 +292,8 @@ def run_analysis():
                                         ssrc_filter=call_ssrcs,
                                         call_id=selected_call['call_id'] if selected_call else None)
     media_manifest = get_media_urls(media_manifest, session_id, output_date)
+    # 给每条媒体流标注收发双方（谁到谁），并在清单汇总通话拓扑（主叫↔FS↔被叫）
+    describe_media_parties(media_manifest, captures, calls, server_ip, files_info)
     results['media_manifest'] = media_manifest
     results['media_dir'] = media_dir
 
@@ -289,6 +307,7 @@ def run_analysis():
         'report': report,
         'media_manifest': {
             'call_id': media_manifest.get('call_id'),
+            'parties': media_manifest.get('parties', []),
             'audio': media_manifest.get('audio', []),
             'video': media_manifest.get('video', []),
             'unsupported': media_manifest.get('unsupported', []),
@@ -298,6 +317,7 @@ def run_analysis():
             'fs_delay_p95': fs_delay.get('p95', 0) if fs_delay else 0,
             'jitter_streams': len(jitter_results),
             'packet_loss_clean': all(d.get('is_clean', True) for d in loss_results.values()),
+            'ts_clean': all(d.get('event_count', 0) == 0 for d in ts_results.values()),
             'clock_warning': clock_info.get('warning'),
             'overall': report['conclusion']['overall'],
         },
@@ -319,6 +339,7 @@ def get_session(session_id):
         safe_results = {
             'direction': results.get('direction'),
             'media_type': results.get('media_type'),
+            'call_id': results.get('call_id'),
             'chart_url': results.get('chart_url'),
             'report': results.get('report'),
             'summary': _build_summary(results),
@@ -347,6 +368,8 @@ def _build_summary(results):
         'fs_delay_p95': fs_delay.get('p95', 0),
         'jitter_streams': len(results.get('jitter') or {}),
         'packet_loss_clean': all(d.get('is_clean', True) for d in loss_results.values()),
+        'ts_clean': all(d.get('event_count', 0) == 0
+                        for d in (results.get('ts_continuity') or {}).values()),
         'clock_warning': (results.get('clock_info') or {}).get('warning'),
         'overall': conclusion.get('overall'),
     }

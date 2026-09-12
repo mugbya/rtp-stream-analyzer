@@ -682,6 +682,9 @@ async function runAnalysis() {
     summaryHtml += _summaryCard('丢包状态',
                                 summary.packet_loss_clean ? '✓ 无丢包' : '✗ 有丢包',
                                 '', summary.packet_loss_clean ? 'success' : 'danger');
+    summaryHtml += _summaryCard('时间戳',
+                                summary.ts_clean === false ? '⚠ 异常' : '✓ 连续',
+                                '', summary.ts_clean === false ? 'warning' : 'success');
     summaryHtml += _summaryCard('综合评估',
                                 summary.overall === 'healthy' ? '✓ 健康' :
                                 summary.overall === 'warning' ? '⚠ 注意' : '✗ 异常',
@@ -760,6 +763,14 @@ function showMedia(manifest) {
             <span class="text-muted small">以下媒体流均来自该通话</span>
         </div>`;
     }
+    // 通话拓扑：先一句话说清每条腿谁到谁（主叫 ↔ FS ↔ 被叫），细节在每条流开头标注
+    const parties = manifest.parties || [];
+    if (parties.length) {
+        html += `<div class="mb-3 small d-flex flex-wrap align-items-center gap-1">` +
+            `<i class="bi bi-diagram-3 text-primary"></i>` +
+            parties.map(_partyChainHtml).join('<span class="text-muted mx-1">；</span>') +
+            `<span class="text-muted ms-1">—— 每条媒体流的收发双方标注在各流开头</span></div>`;
+    }
     for (const [role, media] of Object.entries(byRole)) {
         const roleName = ROLE_NAMES[role] || role;
         const roleIcon = ROLE_ICONS[role] || 'bi-question-circle';
@@ -786,7 +797,8 @@ function showMedia(manifest) {
     if (manifest.unsupported && manifest.unsupported.length > 0) {
         html += '<div class="alert alert-warning small mt-2"><strong>未能重建的流：</strong><ul class="mb-0">';
         manifest.unsupported.forEach(u => {
-            html += `<li>${ROLE_NAMES[u.role] || u.role} (SSRC=${u.ssrc}) — ${u.codec}: ${u.reason}</li>`;
+            const flow = u.flow ? `（${_esc(u.flow.from.label)} → ${_esc(u.flow.to.label)}）` : '';
+            html += `<li>${ROLE_NAMES[u.role] || u.role} (SSRC=${u.ssrc})${flow} — ${u.codec}: ${u.reason}</li>`;
         });
         html += '</ul></div>';
     }
@@ -794,17 +806,43 @@ function showMedia(manifest) {
     container.innerHTML = html;
 }
 
+// 通话拓扑链：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），来自后端 SIP 信令识别
+function _partyChainHtml(p) {
+    const seg = s => s ? `<strong>${_esc(s.label || '')}</strong>` +
+        (s.ip ? `<span class="text-muted ms-1">${s.ip}</span>` : '') : '';
+    let html = seg(p.caller);
+    html += ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` +
+        `<span class="badge bg-dark">FS</span>` +
+        (p.server_ip ? `<span class="text-muted ms-1">${p.server_ip}</span>` : '');
+    if (p.answerer) {
+        html += ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` + seg(p.answerer);
+    }
+    return html;
+}
+
 function _mediaItem(entry, kind) {
     const dirName = DIR_NAMES[entry.direction] || entry.direction;
     const dirBadge = DIR_BADGE[entry.direction] || 'bg-secondary';
     const dur = entry.duration_ms ? (entry.duration_ms / 1000).toFixed(1) + 's' : '';
 
-    let meta = `<span class="badge ${dirBadge} me-1">${dirName}</span>
-                <span class="badge bg-dark me-1">${entry.codec || ''}</span>
+    // 谁到谁：发送方 → 接收方（SIP 识别的主叫/被叫身份，无信令时为角色名或 IP）
+    let head = `<span class="badge ${dirBadge} me-1">${dirName}</span>`;
+    if (entry.flow) {
+        const side = s => `<strong>${_esc(s.label || '')}</strong>` +
+            (s.ip && s.label !== s.ip ? `<span class="text-muted small ms-1">${s.ip}</span>` : '');
+        head += side(entry.flow.from) +
+            ` <i class="bi bi-arrow-right text-muted mx-1"></i> ` + side(entry.flow.to) + ' ';
+    }
+
+    let meta = `<span class="badge bg-dark me-1">${entry.codec || ''}</span>
                 <span class="text-muted small">SSRC: ${entry.ssrc}`;
     if (dur) meta += ` · 时长 ${dur}`;
     if (entry.total_packets) meta += ` · ${entry.total_packets} 包`;
     if (entry.lost_packets) meta += ` · 丢 ${entry.lost_packets} 包`;
+    if (entry.packet_duration_ms && entry.packet_duration_ms !== 20) {
+        meta += ` · 每包 ${entry.packet_duration_ms}ms`;
+    }
+    if (entry.ts_gap_filled) meta += ` · 时间戳跳变补静音 ${entry.ts_gap_filled} 处`;
     meta += '</span>';
 
     let player;
@@ -822,7 +860,8 @@ function _mediaItem(entry, kind) {
 
     return `
         <div class="border rounded p-2 mb-2 bg-light">
-            <div>${meta}</div>
+            <div>${head}</div>
+            <div class="mt-1">${meta}</div>
             ${player}
             <a href="${entry.url}" download class="btn btn-sm btn-outline-secondary mt-1">
                 <i class="bi bi-download"></i> 下载

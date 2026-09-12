@@ -83,6 +83,40 @@ def _parse_sdp_codecs(body: str) -> dict:
     return out
 
 
+def _parse_sdp_endpoints(body: str) -> list:
+    """Extract the media endpoints (kind, addr, port) announced in an SDP body.
+
+    Each m= line is a media the *sender* will receive at the connection
+    address — the session-level c= line, overridden by a media-level c= line.
+    These (addr, port) pairs identify exactly which RTP streams belong to the
+    signaling dialog, so mis-grouped streams can be filtered per call. A port
+    of 0 (rejected media) or a 0.0.0.0/hold connection announces nothing.
+    """
+    endpoints = []
+    conn = None      # current connection address (session-level until overridden)
+    kind = None      # current m= media kind
+    port = None      # current m= port
+    for line in body.replace('\r\n', '\n').split('\n'):
+        if line.startswith('c='):
+            parts = line.split()
+            if len(parts) >= 3:
+                addr = parts[2].split('/')[0]
+                # 0.0.0.0 = hold/placeholder：紧随的 m= 行不宣告端点
+                conn = addr if addr and addr != '0.0.0.0' else None
+        elif line.startswith('m='):
+            if kind and conn and port:
+                endpoints.append({'kind': kind, 'addr': conn, 'port': port})
+            parts = line.split()
+            kind = parts[0][2:] if len(parts) > 1 else None
+            port = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            if kind not in ('audio', 'video'):
+                kind = None
+                port = None
+    if kind and conn and port:
+        endpoints.append({'kind': kind, 'addr': conn, 'port': port})
+    return endpoints
+
+
 def _parse_sip_event(payload: bytes):
     """Best-effort SIP message parsing.
 
@@ -141,9 +175,12 @@ def _parse_sip_event(payload: bytes):
     elif cseq_method and cseq_method not in SIP_METHODS_OF_INTEREST:
         # response: keep only when it belongs to a dialog method
         return None
-    # SDP body (offers in INVITE/200 OK) -> negotiated codec names
+    # SDP body (offers in INVITE/200 OK) -> negotiated codec names + announced
+    # media endpoints (which ip:port pairs exchange RTP in this dialog)
     body = text.split('\r\n\r\n', 1)[1] if '\r\n\r\n' in text else ''
     sdp = _parse_sdp_codecs(body) if body else {}
+    if body:
+        sdp['endpoints'] = _parse_sdp_endpoints(body)
     return {'method': method, 'reason': reason, 'call_id': call_id,
             'cseq': cseq_num, 'cseq_method': cseq_method,
             'from': from_hdr, 'to': to_hdr, 'sdp': sdp}

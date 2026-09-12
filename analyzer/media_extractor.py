@@ -12,6 +12,7 @@ from datetime import datetime
 from collections import defaultdict
 
 from analyzer.stream_classifier import AUDIO_PT, VIDEO_PT_RANGE, get_pt_name, identify_direction
+from analyzer.ts_continuity import signed32
 
 # Audio codec constants
 PT_PCMU = 0    # G.711 μ-law
@@ -78,6 +79,10 @@ def reconstruct_audio(packets: dict, ssrc: int, output_path: str, server_ip: str
         'total_packets': 0,
         'lost_packets': 0,
         'silence_filled': 0,
+        'samples_per_packet': G711_SAMPLES_PER_PACKET,
+        'packet_duration_ms': 20.0,
+        'ts_gap_filled': 0,
+        'ts_extra_silence_ms': 0.0,
         'success': False,
         'direction': 'unknown',
         'error': None,
@@ -114,20 +119,47 @@ def reconstruct_audio(packets: dict, ssrc: int, output_path: str, server_ip: str
     # Sort by sequence number
     sorted_seqs = sorted(stream_pkts.keys())
     result['total_packets'] = len(sorted_seqs)
-    
+
+    # 每包媒体时长以 RTP 时间戳实测为准（设备包化不一定是 20ms/160 样本，
+    # 30ms/240 等同样常见；时间戳增量在 8kHz 时钟下即样本数）
+    ts_list = [stream_pkts[s][1] for s in sorted_seqs]
+    deltas = [signed32(b - a) for a, b in zip(ts_list, ts_list[1:])]
+    positive = sorted(d for d in deltas if d > 0)
+    spp = positive[len(positive) // 2] if positive else 0
+    if not (0 < spp <= G711_SAMPLE_RATE // 2):  # 单包不超过半秒，否则视为异常时间戳
+        spp = G711_SAMPLES_PER_PACKET
+    result['samples_per_packet'] = spp
+    result['packet_duration_ms'] = round(spp / G711_SAMPLE_RATE * 1000, 1)
+
     # Detect gaps and fill with silence
     all_audio = bytearray()
     prev_seq = sorted_seqs[0] - 1
-    silence_frame = b'\x00' * (G711_SAMPLES_PER_PACKET * 2)  # 16-bit silence
-    
+    prev_ts = None
+    ts_gap_filled = 0
+    ts_extra_silence_ms = 0.0
+
     for seq in sorted_seqs:
+        ts = stream_pkts[seq][1]
         gap = (seq - prev_seq - 1) & 0xFFFF
+        expected_advance = spp
         if gap > 0 and gap < 100:  # Reasonable gap (not a seq wrap)
-            for _ in range(gap):
-                all_audio.extend(silence_frame)
-                result['silence_filled'] += 1
+            expected_advance = (gap + 1) * spp
+            all_audio.extend(b'\x00' * (gap * spp * 2))
+            result['silence_filled'] += gap
             result['lost_packets'] += gap
-        
+
+        # 时间戳缺口：seq 连续但媒体时间断档（静音抑制/时间戳跳变）时，
+        # 按 ts 实测缺口补静音，否则重建音频会比真实通话短
+        if prev_ts is not None:
+            excess = signed32(ts - prev_ts) - expected_advance
+            if spp > 0 and excess > spp // 2:
+                if excess <= G711_SAMPLE_RATE * 5:  # 超过 5s 视为时间戳重置，不补
+                    all_audio.extend(b'\x00' * (excess * 2))
+                    ts_gap_filled += 1
+                    ts_extra_silence_ms += excess / G711_SAMPLE_RATE * 1000
+                else:
+                    ts_gap_filled += 1
+
         raw_payload = stream_pkts[seq][7]  # Index 7 is payload bytes
         if pt == PT_PCMU:
             # μ-law to 16-bit linear PCM
@@ -143,9 +175,13 @@ def reconstruct_audio(packets: dict, ssrc: int, output_path: str, server_ip: str
                 linear = b'\x00' * (len(raw_payload) * 2)
         else:
             linear = b'\x00' * (len(raw_payload) * 2)
-        
+
         all_audio.extend(linear)
         prev_seq = seq
+        prev_ts = ts
+
+    result['ts_gap_filled'] = ts_gap_filled
+    result['ts_extra_silence_ms'] = round(ts_extra_silence_ms, 1)
     
     # Write WAV file
     total_samples = len(all_audio) // 2
@@ -415,6 +451,8 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
                         'duration_ms': round(audio_result['duration_ms'], 1),
                         'total_packets': audio_result['total_packets'],
                         'lost_packets': audio_result['lost_packets'],
+                        'packet_duration_ms': audio_result.get('packet_duration_ms'),
+                        'ts_gap_filled': audio_result.get('ts_gap_filled', 0),
                         'path': filepath,
                         'filename': filename,
                     })
@@ -498,23 +536,210 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
 
 def get_media_urls(manifest: dict, session_id: str, output_date: str) -> dict:
     """Generate relative URLs for all media files in a manifest.
-    
+
     Args:
         manifest: The media manifest dict.
         session_id: Session UUID.
         output_date: Date string like '2026-09-11'.
-        
+
     Returns:
         Manifest with 'url' fields added for each media entry.
     """
     base = f'/media/{output_date}/{session_id}'
-    
+
     for entry in manifest.get('audio', []):
         entry['url'] = f"{base}/audio/{entry['filename']}"
-    
+
     for entry in manifest.get('video', []):
         if entry.get('mp4_available'):
             entry['url'] = f"{base}/video/{entry['filename']}"
         entry['raw_url'] = f"{base}/video/{entry['raw_filename']}"
-    
+
+    return manifest
+
+
+# ---------- 媒体流「谁到谁」标注 ----------
+# 回放页每条媒体文件只有「呼入/呼出」（相对抓包点的收发方向），FS 端一次
+# 列出多条流时无法分辨哪条属于主叫腿、哪条属于被叫腿。这里从流所属通话的
+# SIP 信令识别主叫/被叫，结合每条流的实际收发 IP 生成标注。
+
+# 兜底角色短名：无 SIP 信令可依时，抓包点自己的 IP（非服务器）用此称呼。
+# FS 抓包里的其他 IP 无法区分坐席/终端，不命名，直接显示原始 IP
+_PARTY_ROLE_NAMES = {'seat': '坐席端', 'terminal': '终端', 'fs': 'FS'}
+
+
+def _ident_label(ident: dict) -> str:
+    """SIP From/To 头的可读称呼：'张三（1002）' / '1002' / 显示名。
+
+    话机自报的超长单 token（base64 设备串等，From 的显示名与 user 常是同
+    一串）没有可读性，不采用——端点由展示层以 IP 标注。
+    """
+    if not ident:
+        return ''
+    name = (ident.get('name') or '').strip()
+    user = (ident.get('user') or '').strip()
+    if name and user and name != user and user not in name:
+        label = f'{name}（{user}）'
+    else:
+        label = name or user
+    if len(label) > 20 and ' ' not in label:
+        return ''
+    return label
+
+
+def extract_call_parties(call: dict, server_ip: str = None) -> dict:
+    """从一通通话的信令流程里识别主叫/被叫的 IP 与身份。
+
+    判定口径与前端 SIP 阶梯图一致：
+    - 主叫 = 第一个非服务器侧发出的 INVITE 的源，身份取其 From 头（UAC
+      自报身份）；
+    - 被叫 = INVITE 事务 200 OK 的非服务器发送方，身份取呼向它的 INVITE
+      的 To 头——响应回显请求的 From，不能用作被叫身份。
+
+    Returns:
+        {'caller_ip', 'caller_ident', 'answerer_ip', 'answerer_ident'}，
+        信令缺失时对应项为 None / 空 dict。
+    """
+    flow = call.get('sip_flow') or []
+    inv = next((m for m in flow if m['method'] == 'INVITE'
+                and m.get('src') != server_ip), None)
+    if inv is None:
+        inv = next((m for m in flow if m.get('kind') == 'request'), None)
+    if inv is None:
+        inv = flow[0] if flow else None
+    caller_ip = inv.get('src') if inv else None
+    caller_ident = (inv.get('from') or {}) if inv else {}
+
+    ok = next((m for m in flow if m['method'] == '200'
+               and m.get('cseq_method') == 'INVITE'
+               and m.get('src') != server_ip), None)
+    answerer_ip = ok.get('src') if ok else None
+    answerer_ident = {}
+    if answerer_ip:
+        # 呼向被叫的 INVITE 的 To；抓不到时退回 200 OK 的 To（回显同一头）
+        inv_to = next((m for m in flow if m['method'] == 'INVITE'
+                       and m.get('dst') == answerer_ip
+                       and _ident_label(m.get('to') or {})), None)
+        if inv_to is None:
+            inv_to = next((m for m in flow if m.get('dst') == answerer_ip
+                           and _ident_label(m.get('to') or {})), None)
+        answerer_ident = (inv_to.get('to') if inv_to else None) or (ok.get('to') or {})
+
+    return {'caller_ip': caller_ip, 'caller_ident': caller_ident,
+            'answerer_ip': answerer_ip, 'answerer_ident': answerer_ident}
+
+
+def _party_label(ip: str, parties: dict, server_ip: str, role_names: dict) -> str:
+    """端点 IP 的称呼：SIP 主叫/被叫身份 > 抓包角色名 > 原始 IP。"""
+    if parties:
+        if ip and ip == parties.get('caller_ip'):
+            ident = _ident_label(parties.get('caller_ident'))
+            return f'主叫 {ident}' if ident else '主叫'
+        if ip and ip == parties.get('answerer_ip'):
+            ident = _ident_label(parties.get('answerer_ident'))
+            return f'被叫 {ident}' if ident else '被叫'
+    if server_ip and ip == server_ip:
+        return 'FS'
+    if ip in role_names:
+        return role_names[ip]
+    return ip or ''
+
+
+def _party_chain(parties: dict, server_ip: str):
+    """通话拓扑行：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），无信令时为 None。"""
+    if not parties or not (parties.get('caller_ip') or parties.get('answerer_ip')):
+        return None
+    label = lambda ip: _party_label(ip, parties, server_ip, {})
+    caller = ({'label': label(parties['caller_ip']), 'ip': parties['caller_ip']}
+              if parties.get('caller_ip') else None)
+    answerer = ({'label': label(parties['answerer_ip']), 'ip': parties['answerer_ip']}
+                if parties.get('answerer_ip') else None)
+    return {'caller': caller, 'answerer': answerer, 'server_ip': server_ip}
+
+
+def describe_media_parties(manifest: dict, captures: dict, calls: list,
+                           server_ip: str = None, files_info: list = None) -> dict:
+    """给媒体清单里的每条流标注收发双方（谁到谁），就地修改并返回。
+
+    每条媒体文件（audio/video/unsupported）写入结构化标注：
+
+        entry['flow'] = {'from': {'label', 'ip'}, 'to': {'label', 'ip'}}
+
+    from/to 是媒体的真实发送/接收方：呼入 = 对端 → 本抓包点，呼出反之。
+    同时在 manifest['parties'] 汇总本批媒体涉及的通话拓扑（主叫 ↔ FS ↔
+    被叫，含 IP），供回放区开头一句话描述。
+
+    Args:
+        manifest: generate_all_media 的输出。
+        captures: {role: rtp_data}，只需其中的 streams（含 port_pairs）。
+        calls: detect_calls 的 API 结果列表（含 ssrcs / sip_flow），
+            用于把 SSRC 归属到通话并提取主叫/被叫。
+        server_ip: 检测到的服务器 IP。
+        files_info: 上传文件信息（role + ips），用于无信令时的角色名兜底。
+    """
+    role_names = {}
+    for fi in files_info or []:
+        role = fi.get('role')
+        if role == 'fs':
+            continue
+        for ip in fi.get('ips') or []:
+            if ip != server_ip:
+                role_names.setdefault(ip, _PARTY_ROLE_NAMES.get(role, role))
+
+    call_of_ssrc = {}
+    for call in calls or []:
+        for ssrc in call.get('ssrcs') or []:
+            call_of_ssrc.setdefault(ssrc, call)
+
+    parties_by_call = {}
+
+    def _parties(call):
+        if call is None:
+            return None
+        key = call.get('call_id')
+        if key not in parties_by_call:
+            parties_by_call[key] = extract_call_parties(call, server_ip)
+        return parties_by_call[key]
+
+    def _label_entry(entry):
+        try:
+            ssrc = int(entry.get('ssrc', ''), 16)
+        except ValueError:
+            return
+        role = entry.get('role')
+        stream_meta = (captures.get(role) or {}).get('streams', {}).get(ssrc) or {}
+        port_pairs = stream_meta.get('port_pairs') or []
+        if not port_pairs:
+            return
+        parties = _parties(call_of_ssrc.get(ssrc))
+        # 媒体包的真实流向就是 src → dst（呼入 = 对端 → 本抓包点，呼出反之）
+        src_ip, dst_ip = port_pairs[0][0], port_pairs[0][2]
+        entry['flow'] = {
+            'from': {'label': _party_label(src_ip, parties, server_ip, role_names),
+                     'ip': src_ip},
+            'to': {'label': _party_label(dst_ip, parties, server_ip, role_names),
+                   'ip': dst_ip},
+        }
+
+    for kind in ('audio', 'video', 'unsupported'):
+        for entry in manifest.get(kind) or []:
+            _label_entry(entry)
+
+    # 拓扑汇总：只覆盖实际出现在回放里的媒体对应的通话，按主被叫去重
+    chains, seen = [], set()
+    for kind in ('audio', 'video'):
+        for entry in manifest.get(kind) or []:
+            try:
+                ssrc = int(entry.get('ssrc', ''), 16)
+            except ValueError:
+                continue
+            chain = _party_chain(_parties(call_of_ssrc.get(ssrc)), server_ip)
+            if not chain:
+                continue
+            key = (chain['caller']['ip'] if chain['caller'] else None,
+                   chain['answerer']['ip'] if chain['answerer'] else None)
+            if key not in seen:
+                seen.add(key)
+                chains.append(chain)
+    manifest['parties'] = chains
     return manifest

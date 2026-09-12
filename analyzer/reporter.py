@@ -28,6 +28,7 @@ def generate_report(analysis_results: dict) -> dict:
         'delay': _build_delay_summary(analysis_results),
         'jitter': _build_jitter_summary(analysis_results),
         'packet_loss': _build_loss_summary(analysis_results),
+        'timestamp_continuity': _build_ts_summary(analysis_results),
         'clock_offset': _build_clock_summary(analysis_results),
         'conclusion': _build_conclusion(analysis_results),
     }
@@ -146,17 +147,52 @@ def _build_loss_summary(results: dict) -> dict:
     """构建丢包摘要。"""
     packet_loss = results.get('packet_loss', {})
     summary = {}
-    
+
     for ssrc, data in (packet_loss or {}).items():
         summary[ssrc] = {
             'label': data.get('label', ''),
             'total_packets': data.get('total_packets', 0),
             'total_lost': data.get('total_lost', 0),
             'loss_rate_pct': data.get('loss_rate_pct', 0),
+            'reorder_count': data.get('reorder_count', 0),
             'is_clean': data.get('is_clean', True),
         }
-    
+
     return summary
+
+
+def _build_ts_summary(results: dict) -> dict:
+    """构建时间戳连续性摘要。"""
+    ts = results.get('ts_continuity', {})
+    streams = {}
+
+    for label, data in (ts or {}).items():
+        streams[label] = {
+            'is_continuous': data.get('is_continuous', True),
+            'packet_count': data.get('packet_count', 0),
+            'mode': data.get('mode'),
+            'packet_duration_ms': data.get('packet_duration_ms'),
+            'event_count': data.get('event_count', 0),
+            'jump_count': data.get('jump_count', 0),
+            'backward_count': data.get('backward_count', 0),
+            'reorder_count': data.get('reorder_count', 0),
+            'duplicate_count': data.get('duplicate_count', 0),
+            'wrap_count': data.get('wrap_count', 0),
+            'total_media_gap_ms': data.get('total_media_gap_ms', 0),
+            # 事件明细带可读时间（最多 20 条，完整计数见上面各字段）
+            'events': [
+                {
+                    'time_str': datetime.fromtimestamp(ev['time']).strftime('%H:%M:%S'),
+                    'kind': ev['kind'],
+                    'seq': ev['seq'],
+                    'ts_delta': ev['ts_delta'],
+                    'media_gap_ms': ev['media_gap_ms'],
+                }
+                for ev in (data.get('events') or [])[:20]
+            ],
+        }
+
+    return {'streams': streams}
 
 
 def _build_clock_summary(results: dict) -> dict:
@@ -233,6 +269,43 @@ def _build_conclusion(results: dict) -> dict:
                         'message': (f'{data.get("label", "")}: 丢失 {data["total_lost"]} 包'
                                     f'（丢包率 {data["loss_rate_pct"]:.2f}%）'),
                     })
+                elif data.get('reorder_count', 0) > 0:
+                    issues.append({
+                        'severity': 'info',
+                        'message': (f'{data.get("label", "")}: 检测到 {data["reorder_count"]} '
+                                    f'个乱序包（未计入丢包）'),
+                    })
+
+    # 时间戳连续性评估
+    ts_continuity = results.get('ts_continuity') or {}
+    for label, data in ts_continuity.items():
+        n = data.get('event_count', 0)
+        if n == 0:
+            continue
+        parts = []
+        if data.get('jump_count', 0):
+            parts.append(f"时间戳跳变 {data['jump_count']} 次")
+        if data.get('backward_count', 0):
+            parts.append(f"时间戳倒退 {data['backward_count']} 次（seq 顺序未变，发送端异常）")
+        if data.get('reorder_count', 0):
+            parts.append(f"乱序倒退 {data['reorder_count']} 次")
+        if data.get('duplicate_count', 0):
+            parts.append(f"时间戳重复 {data['duplicate_count']} 次")
+        gap = data.get('total_media_gap_ms') or 0
+        if gap >= 60000:
+            gap_txt = f'，累计缺少 {gap / 60000:.1f} 分钟媒体时间'
+        elif gap >= 1000:
+            gap_txt = f'，累计缺少 {gap / 1000:.1f} 秒媒体时间'
+        elif gap >= 1:
+            gap_txt = f'，累计缺少 {gap:.0f}ms 媒体时间'
+        else:
+            gap_txt = ''
+        issues.append({
+            'severity': 'critical' if data.get('backward_count', 0) else 'warning',
+            'message': f'{label}: RTP 时间戳不连续（{"、".join(parts)}）{gap_txt}',
+        })
+    if ts_continuity and all(d.get('event_count', 0) == 0 for d in ts_continuity.values()):
+        ok_items.append('所有流 RTP 时间戳连续（无跳变/倒退/重复）')
 
     # 根因分析
     root_cause = None

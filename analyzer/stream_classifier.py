@@ -58,6 +58,21 @@ def classify_all_streams(streams: dict) -> dict:
     return result
 
 
+# RTP 时钟率（Hz）：把时间戳增量换算成媒体时间用。G722 采样 16kHz 但
+# 按 RFC 3551 其 RTP 时钟仍是 8000；动态 PT 96-127 按视频惯例取 90000
+AUDIO_CLOCK_RATE = 8000
+VIDEO_CLOCK_RATE = 90000
+
+
+def get_clock_rate(pt: int):
+    """获取 PT 对应的 RTP 时钟率，未知 PT 返回 None。"""
+    if pt in AUDIO_PT:
+        return AUDIO_CLOCK_RATE
+    if pt in VIDEO_PT_RANGE:
+        return VIDEO_CLOCK_RATE
+    return None
+
+
 def get_pt_name(pt: int) -> str:
     """获取 PT 的可读名称。"""
     if pt in PT_NAMES:
