@@ -95,6 +95,44 @@ def test_reorder_refund_not_loss():
     print("PASS: reordered pair -> 0 loss + 1 reorder (old code: 65486 lost)")
 
 
+def test_reorder_does_not_mask_later_jump():
+    """乱序后紧跟真实跳变：跳变必须照常上报（旧实现一次乱序就把 pending
+    打成巨负值，之后整条流的跳变检测全部失效）。"""
+    base = continuous_entries(30)
+    entries = list(base)
+    # 乱序（迟到 1 位）：seq 110 在 111 之后才被捕获
+    t10, t11 = entries[10][0], entries[11][0]
+    entries[10] = (t11, entries[10][1], entries[10][2])
+    entries[11] = (t10, entries[11][1], entries[11][2])
+    # seq 120..129 的 ts +8000：1 秒静音抑制（DTX）
+    for i in range(20, 30):
+        t, s, ts = entries[i]
+        entries[i] = (t, s, ts + 8000)
+    packets = make_packets(entries)
+    r = check_ts_continuity(packets, SSRC)
+    assert r['reorder_count'] == 1 and r['jump_count'] == 1, r
+    assert r['total_media_gap_ms'] == 1000.0, r['total_media_gap_ms']
+    loss = detect_packet_loss(packets, SSRC)
+    assert loss['total_lost'] == 0 and loss['reorder_count'] == 1, loss
+    print("PASS: reorder then 1s DTX jump -> jump still reported (1000ms gap)")
+
+
+def test_reorder_two_positions_does_not_mask_later_jump():
+    """迟到 2 位的乱序同理：抵偿按倒退的 2 步记，不吞后续跳变。"""
+    base = continuous_entries(30)
+    entries = list(base)
+    late = entries[11]                                   # seq 111 晚到 2 位
+    entries.remove(late)
+    entries.insert(14, (entries[13][0] + 0.005, late[1], late[2]))
+    for i in range(20, 30):
+        t, s, ts = entries[i]
+        entries[i] = (t, s, ts + 8000)
+    r = check_ts_continuity(make_packets(entries), SSRC)
+    assert r['reorder_count'] == 1 and r['jump_count'] == 1, r
+    assert r['total_media_gap_ms'] == 1000.0, r['total_media_gap_ms']
+    print("PASS: 2-position reorder then 1s DTX jump -> jump still reported")
+
+
 def test_true_loss_plus_reorder():
     """丢 1 包 + 1 个迟到包 -> 最终丢包数 1，不会被乱序放大。"""
     base = continuous_entries(20)
@@ -249,6 +287,8 @@ if __name__ == '__main__':
     test_silence_jump_marked_not_loss()
     test_seq_loss_consistent_with_ts()
     test_reorder_refund_not_loss()
+    test_reorder_does_not_mask_later_jump()
+    test_reorder_two_positions_does_not_mask_later_jump()
     test_true_loss_plus_reorder()
     test_seq_wrap()
     test_ts_wrap()

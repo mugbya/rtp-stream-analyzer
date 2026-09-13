@@ -27,6 +27,7 @@ TS_MOD = 1 << 32
 MAX_EVENTS = 50
 # seq 差值超过此值视为倒退（乱序）而非前进
 SEQ_BACKWARD = 1 << 15
+SEQ_SPACE = 1 << 16
 
 
 def signed32(x: int) -> int:
@@ -109,12 +110,18 @@ def check_ts_continuity(packets: dict, ssrc: int) -> dict:
         event = None
         if d < 0:
             if seq_gap >= SEQ_BACKWARD:
+                # 乱序：seq 同步倒退 k 步（迟到包），倒退的 k 步媒体时间会在
+                # seq 重新越过时再次计入，抵偿按 k 步记。若按无符号 gap 算，
+                # 抵偿变成 65535−k 步，pending 被打成巨负值，之后整条流的
+                # 跳变检测全部失效（一次乱序就够）
+                k = SEQ_SPACE - seq_gap
                 result['reorder_count'] += 1
                 event = ('reorder', d, None)
+                pending += d + k * median_delta
             else:
                 result['backward_count'] += 1
                 event = ('ts_backward', d, None)
-            pending += d - seq_gap * median_delta
+                pending += d - seq_gap * median_delta
         elif d == 0:
             if full_mode:
                 result['duplicate_count'] += 1
