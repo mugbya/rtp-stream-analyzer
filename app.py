@@ -22,7 +22,12 @@ from analyzer.packet_loss import detect_all_losses
 from analyzer.ts_continuity import check_ts_continuity
 from analyzer.charts import generate_analysis_chart
 from analyzer.reporter import generate_report
-from analyzer.media_extractor import generate_all_media, get_media_urls, describe_media_parties
+from analyzer.media_extractor import (
+    generate_all_media, get_media_urls, describe_media_parties, extract_call_parties,
+)
+from analyzer.silence_analyzer import analyze_silence, diagnose_audio
+from analyzer.rtcp_parser import summarize_rtcp
+from analyzer.delay_chains import build_delay_chains
 from analyzer.call_detector import detect_calls, check_capture_consistency
 
 app = Flask(__name__)
@@ -149,10 +154,13 @@ def run_analysis():
     calls = session.get('calls') or []
     
     # 加载所有抓包数据（含 RTP 载荷，用于音视频重建）
+    # _role 为规范化角色（terminal/seat/fs），供无声诊断/延迟链路按角色锚定
     captures = {}
     for fi in files_info:
         filepath = os.path.join(session_dir, fi['filename'])
-        captures[fi['role']] = extract_rtp_packets(filepath, include_payload=True)
+        cap = extract_rtp_packets(filepath, include_payload=True)
+        cap['_role'] = _canonical_role(fi['role'])
+        captures[fi['role']] = cap
     
     # 根据媒体类型筛选流
     if media_type == 'audio':
@@ -226,6 +234,48 @@ def run_analysis():
                     ts_results[label] = ts_result
 
     results['ts_continuity'] = ts_results
+
+    # === 无声诊断（静音/能量分析）+ RTCP 收发报告 + 分段延迟链路 ===
+    # 这三项以"通话"为单位、按规范化角色（主叫端/坐席端/FS）锚定方向；
+    # 未选中通话时没有方向语义，仅给出不可用说明
+    canon_captures = {}
+    for cap in captures.values():
+        canon_captures[cap['_role']] = cap
+
+    rtcp_by_role = {role: summarize_rtcp(cap)
+                    for role, cap in canon_captures.items()}
+    rtcp_results = {}
+    silence_profiles = {}
+    for role, cap in canon_captures.items():
+        summ = rtcp_by_role[role]
+        for ssrc in target_streams:
+            info = cap['streams'].get(ssrc)
+            if not info or not any(pt in AUDIO_PT for pt in info.get('pt', [])):
+                continue
+            silence_profiles[(role, ssrc)] = analyze_silence(cap['packets'], ssrc)
+            entry = {}
+            if ssrc in summ['sr']:
+                entry['sr'] = summ['sr'][ssrc]
+            if ssrc in summ['rr']:
+                entry['rr'] = summ['rr'][ssrc]
+            if entry:
+                rtcp_results[f"{role} (SSRC=0x{ssrc:08x})"] = entry
+    results['rtcp'] = rtcp_results
+
+    if selected_call:
+        parties = extract_call_parties(selected_call, server_ip)
+        results['audio_health'] = diagnose_audio(
+            canon_captures, selected_call, server_ip,
+            silence_profiles, rtcp_by_role, parties)
+        results['delay_chains'] = build_delay_chains(
+            canon_captures, selected_call, server_ip, parties)
+    else:
+        results['audio_health'] = {
+            'available': False, 'directions': [],
+            'summary': '未选中通话，无法按方向做无声诊断（请先选择通话）'}
+        results['delay_chains'] = {
+            'available': False, 'directions': [], 'roundtrip': [],
+            'notes': ['未选中通话，无法按方向定位链路延迟']}
 
     # === FS 内部延迟 ===
     fs_delay = None
@@ -412,6 +462,18 @@ def results_page(session_id):
     if session_id not in sessions:
         return "Session not found", 404
     return render_template('results.html', session_id=session_id)
+
+
+def _canonical_role(role):
+    """把上传时的角色文件名规范成 terminal/seat/fs（保留未知角色原样）。"""
+    r = (role or '').strip().lower()
+    if r == 'fs':
+        return 'fs'
+    if r in ('seat', 'zuoxi', '坐席'):
+        return 'seat'
+    if r in ('terminal', 'caller', '终端', '主叫'):
+        return 'terminal'
+    return role
 
 
 def _detect_available_directions(files_info, server_ip, classified):

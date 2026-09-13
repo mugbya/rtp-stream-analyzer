@@ -107,7 +107,7 @@ def identify_direction(stream_info: dict, server_ip: str = None) -> str:
 
 def detect_server_ip(all_streams: dict) -> str:
     """自动检测服务器 IP（通常是 SIP 5060 端口 + 多 RTP 流）。
-    
+
     Returns:
         推测的服务器 IP，或 None
     """
@@ -118,8 +118,35 @@ def detect_server_ip(all_streams: dict) -> str:
             dst_ip = pp[2]
             ip_connections[src_ip] = ip_connections.get(src_ip, 0) + 1
             ip_connections[dst_ip] = ip_connections.get(dst_ip, 0) + 1
-    
+
     # 连接数最多的 IP 可能是服务器
     if ip_connections:
         return max(ip_connections, key=ip_connections.get)
     return None
+
+
+def pick_call_stream(cap: dict, call_ssrcs, src_is=None, dst_is=None):
+    """在一份抓包里按收发 IP 条件选通话音频流（多个命中取包数最多的）。
+
+    Args:
+        cap: extract_rtp_packets 的输出（含 streams）。
+        call_ssrcs: 通话的候选 SSRC 集合。
+        src_is / dst_is: 要求流出现在 src→dst 方向的 IP 条件，None 不限制。
+
+    Returns:
+        命中的 SSRC，或 None。
+    """
+    best, best_n = None, 0
+    for ssrc in call_ssrcs:
+        info = (cap.get('streams') or {}).get(ssrc)
+        if not info or not any(pt in AUDIO_PT for pt in info.get('pt', [])):
+            continue
+        for pp in info.get('port_pairs') or []:
+            if src_is and pp[0] != src_is:
+                continue
+            if dst_is and pp[2] != dst_is:
+                continue
+            if info['count'] > best_n:
+                best, best_n = ssrc, info['count']
+            break
+    return best

@@ -30,6 +30,9 @@ def generate_report(analysis_results: dict) -> dict:
         'packet_loss': _build_loss_summary(analysis_results),
         'timestamp_continuity': _build_ts_summary(analysis_results),
         'clock_offset': _build_clock_summary(analysis_results),
+        'audio_health': analysis_results.get('audio_health'),
+        'delay_chains': analysis_results.get('delay_chains'),
+        'rtcp': analysis_results.get('rtcp'),
         'conclusion': _build_conclusion(analysis_results),
     }
     return report
@@ -372,6 +375,68 @@ def _build_conclusion(results: dict) -> dict:
         })
     if ts_continuity and all(d.get('event_count', 0) == 0 for d in ts_continuity.values()):
         ok_items.append('所有流的声音时间轴连续（无断开/倒退/重复）')
+
+    # 无声诊断评估（directions 按主叫→坐席 / 坐席→主叫给出链路级判定）
+    audio_health = results.get('audio_health') or {}
+    if audio_health.get('available'):
+        for d in audio_health.get('directions', []):
+            v = d.get('verdict')
+            label = f"无声诊断·{d.get('label', '')}"
+            if v in ('blocked', 'no_source', 'silent_source', 'silent_path'):
+                issues.append({
+                    'severity': 'critical',
+                    'message': f'{label}: {d.get("verdict_text", "")}',
+                })
+            elif v == 'unknown':
+                issues.append({
+                    'severity': 'info',
+                    'message': f'{label}: 数据不足，无法判定（缺对应抓包点'
+                               f'或编码不可解）',
+                })
+            else:
+                ok_items.append(f'{label}: 链路正常，各段都有人声')
+
+    # 分段延迟链路评估
+    delay_chains = results.get('delay_chains') or {}
+    if delay_chains.get('available'):
+        for d in delay_chains.get('directions', []):
+            if d.get('verdict') == 'high':
+                issues.append({
+                    'severity': 'warning',
+                    'message': f"延迟链路·{d.get('label', '')}: "
+                               f"{d.get('verdict_text', '')}",
+                })
+            elif d.get('verdict') == 'ok':
+                ok_items.append(f"延迟链路·{d.get('label', '')}: 各段延迟正常")
+        for r in delay_chains.get('roundtrip', []):
+            if r.get('status') == 'high':
+                issues.append({
+                    'severity': 'warning',
+                    'message': f"延迟链路·{r.get('pair', '')}: 往返 {r['ms']}ms，"
+                               f'链路整体偏慢',
+                })
+
+    # RTCP 接收端报告评估（RR 是接收端对收流质量的亲历上报）
+    rtcp = results.get('rtcp') or {}
+    for label, entry in rtcp.items():
+        rr = entry.get('rr')
+        if not rr:
+            continue
+        lost_pct = rr.get('fraction_lost_pct') or 0
+        if lost_pct > 2:
+            issues.append({
+                'severity': 'warning',
+                'message': (f'{_pretty_label(label)}: 接收端 RTCP RR 自报丢包 '
+                            f'{lost_pct}%（累计 {rr.get("cum_lost", 0)} 包）'),
+            })
+        else:
+            ok_items.append(f'{_pretty_label(label)}: 接收端 RR 丢包 {lost_pct}%')
+    if results.get('rtcp') is not None and not rtcp:
+        issues.append({
+            'severity': 'info',
+            'message': '未捕获 RTCP 报告——接收端视角的丢包/抖动不可观测'
+                       '（抓包点未覆盖 RTCP 端口，或终端未启用 RTCP）',
+        })
 
     # 根因分析
     root_cause = None

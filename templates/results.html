@@ -169,6 +169,16 @@ function showResults(results) {
             html += '</tr></table>';
         }
         
+        // 无声诊断：每个方向"发声端 → FS → 听者"逐腿检查流存在性与人声能量
+        if (report.audio_health) {
+            html += renderAudioHealth(report.audio_health);
+        }
+
+        // 分段延迟链路：每个方向拆成三段测量，定位延迟在哪一段
+        if (report.delay_chains) {
+            html += renderDelayChains(report.delay_chains);
+        }
+
         if (report.conclusion) {
             html += '<h6>结论</h6>';
             html += `<p><strong>${report.conclusion.root_cause}</strong></p>`;
@@ -193,7 +203,12 @@ function showResults(results) {
                 html += '</ul>';
             }
         }
-        
+
+        // RTCP 收发报告：接收端视角的丢包/抖动佐证
+        if (report.rtcp) {
+            html += renderRtcp(report.rtcp);
+        }
+
         detail.innerHTML = html;
     }
     
@@ -255,6 +270,136 @@ function renderTsEventTable(streamData) {
         `<thead><tr><th>时间</th><th>现象</th><th>前一个包 seq / 时间戳</th>` +
         `<th>本包 seq / 时间戳</th><th>时间戳增量</th><th>缺失声音</th></tr></thead>` +
         `<tbody>${rows}</tbody></table></div>`;
+}
+
+// ====== 无声诊断 / 分段延迟链路 / RTCP 展示 ======
+
+// 方向/链路状态徽章（verdict → [Bootstrap 色, 中文]）
+const HEALTH_BADGES = {
+    ok: ['success', '正常'],
+    blocked: ['danger', '媒体断裂'],
+    no_source: ['danger', '无媒体'],
+    silent_source: ['danger', '发出即静音'],
+    silent_path: ['danger', '途中变静音'],
+    unknown: ['secondary', '无法判定'],
+    high: ['warning', '偏高'],
+    partial: ['secondary', '部分可测'],
+    unavailable: ['secondary', '不可测'],
+};
+
+function _healthBadge(verdict) {
+    const [cls, txt] = HEALTH_BADGES[verdict] || ['secondary', verdict];
+    return `<span class="badge bg-${cls}">${_esc(txt)}</span>`;
+}
+
+function renderAudioHealth(h) {
+    let html = '<h6 class="mt-3">无声诊断（谁没听到谁的声音）</h6>';
+    if (!h.directions || !h.directions.length) {
+        return html + `<p class="text-muted small mb-3">${_esc(h.summary || '数据不足，无法做无声诊断')}</p>`;
+    }
+    html += `<p class="small text-muted mb-2">按方向逐腿检查"发声端 → FS → 听者"：流是否发出、是否到达、内容是否有人声，用于定位"没听到声音"。</p>`;
+    h.directions.forEach(d => {
+        html += `<div class="border rounded p-2 mb-2">` +
+            `<div class="d-flex flex-wrap align-items-center gap-2">` +
+            `<strong>${_esc(d.label)}</strong>${_healthBadge(d.verdict)}` +
+            `<span class="small">${_esc(d.verdict_text)}</span></div>`;
+        (d.legs || []).forEach(l => {
+            const p = l.presence || {};
+            const pres = [
+                p.sent_at_source === true ? '源端已发' :
+                    p.sent_at_source === false ? '源端未见' : '源端未观测',
+                p.arrived_at_next === true ? '下一跳已收' :
+                    p.arrived_at_next === false ? '下一跳未见' : '下一跳未观测',
+            ].join(' · ');
+            html += `<div class="ms-3 mt-1 small border-start ps-2">` +
+                `${_healthBadge(l.status)} <strong>${_esc(l.leg)}</strong> ` +
+                `<span class="text-muted">(${l.ssrc || '—'}；${pres})</span>` +
+                (l.note ? `<div class="mt-1">${_esc(l.note)}</div>` : '') +
+                `</div>`;
+        });
+        html += '</div>';
+    });
+    if (h.summary) html += `<p class="small text-muted mb-0 mt-1">${_esc(h.summary)}</p>`;
+    return html;
+}
+
+function renderDelayChains(dc) {
+    let html = '<h6 class="mt-3">分段延迟链路（延迟在哪一段）</h6>';
+    if (!dc.directions || !dc.directions.length) {
+        const note = (dc.notes && dc.notes[0]) || '数据不足，无法测量链路延迟';
+        return html + `<p class="text-muted small mb-3">${_esc(note)}</p>`;
+    }
+    html += `<p class="small text-muted mb-2">把每个方向拆成 发声端→FS、FS 内部、FS→听者 三段测量。` +
+        `跨抓包段包含抓包机时钟差，绝对值仅供参考；两段往返之和可抵消时钟差。</p>`;
+    dc.directions.forEach(d => {
+        html += `<div class="border rounded p-2 mb-2">` +
+            `<div class="d-flex flex-wrap align-items-center gap-2">` +
+            `<strong>${_esc(d.label)}</strong>${_healthBadge(d.verdict)}` +
+            (d.total_mean != null
+                ? `<span class="small text-muted">合计 ${d.total_mean}ms` +
+                  (d.total_note ? `（${_esc(d.total_note)}）` : '') + `</span>`
+                : '') +
+            `</div><div class="small mt-1">${_esc(d.verdict_text)}</div>`;
+        html += '<div class="table-responsive"><table class="table table-sm table-bordered mb-0 mt-1">' +
+            '<thead><tr><th>段</th><th>SSRC</th><th>均值</th><th>P50</th><th>P95</th>' +
+            '<th>样本</th><th>时钟差</th><th>状态</th></tr></thead><tbody>';
+        (d.segments || []).forEach(s => {
+            const num = v => (v != null && typeof v === 'number') ? v.toFixed(1) : '—';
+            html += `<tr><td class="text-nowrap">${_esc(s.name)}</td>` +
+                `<td class="text-nowrap">${_esc(s.ssrc || '—')}</td>` +
+                `<td>${s.mean != null ? num(s.mean) + 'ms' : '—'}</td>` +
+                `<td>${num(s.p50)}</td><td>${num(s.p95)}</td>` +
+                `<td>${s.count || '—'}</td>` +
+                `<td>${s.clock_offset_ms != null ? s.clock_offset_ms.toFixed(0) + 'ms' : '—'}</td>` +
+                `<td>${s.available ? _healthBadge(s.status) :
+                    '<span class="badge bg-secondary">未测到</span>'}</td></tr>`;
+            if (s.note) {
+                html += `<tr class="table-light"><td colspan="8" class="small text-muted">${_esc(s.note)}</td></tr>`;
+            }
+        });
+        html += '</tbody></table></div></div>';
+    });
+    if (dc.roundtrip && dc.roundtrip.length) {
+        html += '<div class="small mt-1"><strong>往返参考（已抵消时钟差）：</strong>';
+        dc.roundtrip.forEach(r => {
+            html += `<span class="badge ${r.status === 'high' ? 'bg-warning text-dark' : 'bg-success'} me-1">` +
+                `${_esc(r.pair)} ${r.ms}ms</span>`;
+        });
+        html += '</div>';
+    }
+    (dc.notes || []).forEach(n => {
+        html += `<div class="text-muted small mt-1">${_esc(n)}</div>`;
+    });
+    return html;
+}
+
+function renderRtcp(rtcp) {
+    const labels = Object.keys(rtcp || {});
+    let html = '<h6 class="mt-3">RTCP 收发报告</h6>';
+    if (!labels.length) {
+        return html + '<p class="text-muted small mb-3">未捕获 RTCP 报告——接收端视角的丢包/抖动不可观测。</p>';
+    }
+    html += `<p class="small text-muted mb-2">SR 由发送端报告已产出的媒体量（证明确实在发声）；` +
+        `RR 由接收端报告收流质量（丢包/抖动），是"听者视角"的亲历佐证。</p>`;
+    html += '<div class="table-responsive"><table class="table table-sm table-bordered mb-0">' +
+        '<thead><tr><th>流</th><th>SR 已发包数/字节数</th><th>RR 丢包率</th><th>累计丢包</th>' +
+        '<th>RR 抖动(ts)</th><th>RR 上报方</th></tr></thead><tbody>';
+    labels.forEach(label => {
+        const e = rtcp[label] || {};
+        // sr/rr 恒为对象（可能为空 {}，JS 里为 truthy），按键数判断有无数据
+        const sr = e.sr, rr = e.rr;
+        const hasSr = !!(sr && Object.keys(sr).length);
+        const hasRr = !!(rr && Object.keys(rr).length);
+        const hex = x => '0x' + Number(x).toString(16).padStart(8, '0');
+        html += `<tr><td class="text-nowrap">${_esc(label)}</td>` +
+            `<td>${hasSr ? `${sr.pkt_count ?? '—'} / ${sr.octet_count ?? '—'}` : '—'}</td>` +
+            `<td>${hasRr ? `${rr.fraction_lost_pct ?? '—'}%` : '—'}</td>` +
+            `<td>${hasRr ? (rr.cum_lost ?? '—') : '—'}</td>` +
+            `<td>${hasRr ? (rr.jitter ?? '—') : '—'}</td>` +
+            `<td class="text-nowrap">${hasRr && rr.reporters ? rr.reporters.map(hex).join(', ') : '—'}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    return html;
 }
 
 // ====== 音视频回放展示 ======

@@ -7,6 +7,8 @@ from collections import defaultdict
 import os
 import re
 
+from analyzer.rtcp_parser import parse_rtcp
+
 # SIP requests kept for call detection and per-call signaling flow.
 # Dialog-related methods only: REGISTER/OPTIONS/SUBSCRIBE keepalives carry
 # unrelated Call-IDs and must not enter call flows.
@@ -261,6 +263,7 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
     capture_start = None
     capture_end = None
     sip_events = []
+    rtcp_events = []
 
     for p in pkts:
         t = float(p.time)
@@ -286,14 +289,14 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
                 src_port = p[UDP].sport
                 dst_port = p[UDP].dport
                 key = (ssrc, seq)
-                
+
                 # Only keep the first occurrence of each packet (dedup)
                 if key not in packets:
                     if include_payload:
                         packets[key] = (float(p.time), ts, pt, src_ip, dst_ip, src_port, dst_port, payload)
                     else:
                         packets[key] = (float(p.time), ts, pt, src_ip, dst_ip, src_port, dst_port)
-                
+
                 ips.add(src_ip)
                 ips.add(dst_ip)
                 ssrcs.add(ssrc)
@@ -301,6 +304,15 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
                 streams[ssrc]['pt'].add(pt)
                 streams[ssrc]['ips'].add((src_ip, dst_ip))
                 streams[ssrc]['port_pairs'].add((src_ip, src_port, dst_ip, dst_port))
+            else:
+                # RTCP（SR/RR）：RTP 解析会把类型 200/201 拒掉，落到这里。
+                # SR 证明发送端在产媒体并携带 NTP↔RTP 映射，RR 是接收端对
+                # 入流的丢包/抖动亲历上报，无声与延迟诊断都用得上
+                for ev in parse_rtcp(bytes(p[Raw])):
+                    ev['time'] = t
+                    ev['src'] = p[IP].src
+                    ev['dst'] = p[IP].dst
+                    rtcp_events.append(ev)
     
     # Convert sets to lists in streams (for JSON serialization)
     streams_clean = {}
@@ -322,6 +334,7 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
         'capture_start': capture_start,
         'capture_end': capture_end,
         'sip_events': sip_events,
+        'rtcp_events': rtcp_events,
     }
 
 
