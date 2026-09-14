@@ -169,6 +169,53 @@ const FS_MEDIA_BADGES = {
     same: '<span class="badge bg-success"><i class="bi bi-check2-circle"></i> FS 未转码</span>',
 };
 
+// FS 媒体转发检测（后端 fs_relay.verdict）：结论样式与提示块配色。
+// redirected = FS 用 SDP 透传把媒体改道成端到端直连；no_relay = 两端都没往
+// FS 发媒体；partial_uplink = 一部分发了另一部分没发（才考虑网络问题）
+const FS_RELAY_META = {
+    redirected:     {alert: 'alert-danger',   badge: 'bg-danger',
+                     icon: 'bi-signpost-split', label: '媒体已改道直连'},
+    no_relay:       {alert: 'alert-danger',   badge: 'bg-danger',
+                     icon: 'bi-x-octagon-fill', label: '未经过 FS 中转'},
+    partial_uplink: {alert: 'alert-warning',  badge: 'bg-warning text-dark',
+                     icon: 'bi-exclamation-triangle-fill', label: '部分上行缺失'},
+    relayed:        {alert: 'alert-success',  badge: 'bg-success',
+                     icon: 'bi-check-circle-fill', label: 'FS 正常转发'},
+    insufficient:   {alert: 'alert-secondary', badge: 'bg-secondary',
+                     icon: 'bi-question-circle', label: '无法判断'},
+};
+
+// FS 媒体转发提示块：结论一句话 + 各端与 FS 之间的上下行实测表 + 改道/
+// 佐证明细 + 按优先级的排查建议（先中转配置、后网络）
+function _fsRelayHtml(r) {
+    if (!r || r.available === false) return '';
+    const meta = FS_RELAY_META[r.verdict] || FS_RELAY_META.insufficient;
+    let html = `<div class="alert ${meta.alert} w-100 mb-2 py-2 small">` +
+        `<strong><i class="bi ${meta.icon} me-1"></i>FS 媒体转发检测：${meta.label}</strong>` +
+        `<div class="mt-1">${_esc(r.headline || '')}</div>`;
+    const devs = r.devices || [];
+    if (devs.length) {
+        html += '<div class="table-responsive mt-1"><table class="table table-sm table-bordered mb-1 bg-white">' +
+            '<thead><tr><th>端点</th><th>上行 → FS 音频</th><th>上行 → FS 视频</th>' +
+            '<th>FS 下行 → 音频</th><th>FS 下行 → 视频</th></tr></thead><tbody>';
+        const cell = v => (!v || !v.pkts)
+            ? '<span class="text-muted">0 包</span>'
+            : `${v.pkts} 包<span class="text-muted">${v.span_s ? `（${v.span_s}s）` : ''}</span>`;
+        devs.forEach(d => {
+            html += `<tr><td><strong>${_esc(d.label || d.ip)}</strong></td>` +
+                `<td>${cell(d.uplink?.audio)}</td><td>${cell(d.uplink?.video)}</td>` +
+                `<td>${cell(d.downlink?.audio)}</td><td>${cell(d.downlink?.video)}</td></tr>`;
+        });
+        html += '</tbody></table></div>';
+    }
+    const lists = (r.redirects || []).map(x =>
+        `<li>${_esc(x.time_str)} ${_esc(x.label || '')}：向 ${_esc(x.dst || '')} 宣告了 ${_esc(x.targets || '')} 的媒体地址</li>`)
+        .concat((r.notes || []).map(n => `<li>${_esc(n)}</li>`));
+    if (lists.length) html += `<ul class="mb-1 ps-3">${lists.join('')}</ul>`;
+    if (r.advice) html += `<div class="mt-1"><strong>排查建议：</strong>${_esc(r.advice)}</div>`;
+    return html + '</div>';
+}
+
 // 折叠标题里的协商编码摘要：优先按腿展示（主叫 … / 被叫 …），与阶梯图的
 // 两行协商行、FS 转码判定一一对应；旧会话数据没有 per-leg 字段时回退为
 // 单份 negotiated_codecs（主叫腿汇总）
@@ -208,6 +255,11 @@ function renderCalls(calls, captureWarning) {
         const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
         const files = c.files.map(f => ROLE_NAMES[f] || f).join(' / ');
         const media = c.media_types.map(m => m === 'audio' ? '音频' : '视频').join('+') || '未知';
+        const relay = c.fs_relay;
+        const relayMeta = relay && FS_RELAY_META[relay.verdict];
+        const relayBadge = relayMeta && relay.verdict !== 'insufficient'
+            ? `<span class="badge ${relayMeta.badge}"><i class="bi ${relayMeta.icon}"></i> ${relayMeta.label}</span>`
+            : '';
 
         let reasons = '';
         for (const [role, pf] of Object.entries(c.completeness.per_file || {})) {
@@ -247,11 +299,13 @@ function renderCalls(calls, captureWarning) {
                 <span class="badge ${st.badge}"><i class="bi ${st.icon}"></i> ${st.label}</span>
                 ${c.is_p2p ? '<span class="badge bg-info text-dark"><i class="bi bi-arrow-left-right"></i> 点对点直连</span>' : ''}
                 ${FS_MEDIA_BADGES[c.fs_media?.verdict] || ''}
+                ${relayBadge}
                 <span class="badge bg-light text-dark">${c.stream_count} 条流</span>
                 <span class="badge bg-light text-dark">${media}</span>
                 <span class="text-muted small">${files}</span>
                 ${_callPartyChain(flow)}
             </div>
+            ${_fsRelayHtml(relay)}
             ${flowHtml}
             ${reasons ? `<details class="mt-1">
                 <summary class="text-muted small" style="cursor:pointer">完整性判断依据</summary>
@@ -402,6 +456,13 @@ function _sdpTags(m) {
         `<i class="bi bi-file-earmark-code"></i> ${_sdpTag(m)}</span>`;
 }
 
+// FS 把对端媒体地址透传给本端的消息行标注（媒体改道直连的证据行）
+function _redirectTag(m) {
+    if (!m.media_redirect) return '';
+    return `<span class="sl-sdp" title="FS 在此消息里把对端的媒体地址透传给了本端——媒体改道为端到端直连，不再经过 FS">` +
+        `<i class="bi bi-signpost-split"></i> 媒体改道</span>`;
+}
+
 // SDP 完整编码列表行：挂在消息行下方独立成行，可完整换行
 function _sdpListRow(m) {
     const sc = m.sdp_codecs;
@@ -456,14 +517,14 @@ function _sipLadder(flow, call) {
         let inner;
         if (a === b) {
             inner = `<div class="sl-msg ${kindCls} sl-self" style="left:${pct((a + 0.5) / n)}">` +
-                `<span class="lb">${m.label}${_sdpTags(m)}</span></div>`;
+                `<span class="lb">${m.label}${_sdpTags(m)}${_redirectTag(m)}</span></div>`;
         } else {
             const lo = Math.min(a, b), hi = Math.max(a, b);
             const lSeg = a < b ? '<i class="ln"></i>' : '<i class="ln arr-l"></i>';
             const rSeg = a < b ? '<i class="ln arr-r"></i>' : '<i class="ln"></i>';
             inner = `<div class="sl-msg ${kindCls}" ` +
                 `style="left:${pct((lo + 0.5) / n)};width:${pct((hi - lo) / n)}">` +
-                `${lSeg}<span class="lb">${m.label}${_sdpTags(m)}</span>${rSeg}</div>`;
+                `${lSeg}<span class="lb">${m.label}${_sdpTags(m)}${_redirectTag(m)}</span>${rSeg}</div>`;
         }
         rowBefore[i] = rows.length;
         rows.push(`<div class="sl-row"><span class="sl-t">${m.time_str}</span>` +
@@ -604,6 +665,25 @@ function _callPartyChain(flow) {
 function showConfigPanel(data) {
     const section = document.getElementById('config-section');
     section.classList.remove('d-none');
+
+    // 延迟可测性：需要 ≥2 个抓包点（跨抓包传输延迟）或含 FS 抓包（FS 内部延迟）。
+    // 单端抓包测不了延迟，自动禁用"延迟测量"，但抖动/丢包与音画质量不受影响。
+    const files = data.files || [];
+    const delayAvailable = files.length >= 2 ||
+        files.some(f => (f.role || '').toLowerCase() === 'fs');
+    const delayCheck = document.getElementById('check-delay');
+    const delayHint = document.getElementById('check-delay-hint');
+    if (delayCheck) {
+        delayCheck.disabled = !delayAvailable;
+        delayCheck.checked = delayAvailable;
+        if (delayHint) {
+            delayHint.classList.toggle('d-none', delayAvailable);
+            delayHint.textContent = delayAvailable
+                ? '' : '仅单端抓包无法测量延迟（需 ≥2 个抓包点或含 FS 抓包），已自动禁用；抖动/丢包与音画质量仍可分析';
+        }
+        const dirCol = document.getElementById('direction-col');
+        if (dirCol) dirCol.classList.toggle('opacity-50', !delayAvailable);
+    }
 
     const container = document.getElementById('direction-options');
     const directions = data.available_directions;
@@ -758,6 +838,10 @@ async function runAnalysis() {
         callId = callRadio.value;
     }
 
+    // 分析内容开关（单端抓包时延迟复选框被禁用 → 不测延迟）
+    const checkDelay = document.getElementById('check-delay');
+    const checkQuality = document.getElementById('check-quality');
+
     try {
         const resp = await fetch('/api/analyze', {
             method: 'POST',
@@ -767,6 +851,10 @@ async function runAnalysis() {
                 direction: direction,
                 media_type: mediaType,
                 call_id: callId,
+                checks: {
+                    delay: checkDelay ? (checkDelay.checked && !checkDelay.disabled) : true,
+                    quality: checkQuality ? checkQuality.checked : true,
+                },
             }),
         });
         const data = await resp.json();
@@ -794,9 +882,14 @@ async function runAnalysis() {
     // 摘要
     const summary = data.summary;
     let summaryHtml = '<div class="row g-3">';
-    summaryHtml += _summaryCard('bi-speedometer2', 'FS 内部延迟',
-                                summary.fs_delay_mean.toFixed(1) + '<span class="stat-unit">ms</span>',
-                                'P95 ' + summary.fs_delay_p95.toFixed(1) + 'ms', 'primary');
+    // 未勾选延迟分析或缺少 FS 抓包时，FS 内部延迟未测——如实显示，不用 0.0ms 误导
+    summaryHtml += (summary.fs_delay_mean != null)
+        ? _summaryCard('bi-speedometer2', 'FS 内部延迟',
+                       summary.fs_delay_mean.toFixed(1) + '<span class="stat-unit">ms</span>',
+                       'P95 ' + summary.fs_delay_p95.toFixed(1) + 'ms', 'primary')
+        : _summaryCard('bi-speedometer2', 'FS 内部延迟', '未测量',
+                       summary.delay_checked === false ? '未勾选延迟分析' : '缺少 FS 端抓包',
+                       'secondary');
     summaryHtml += _summaryCard('bi-activity', '抖动流数', summary.jitter_streams, '已分析', 'success');
     summaryHtml += _summaryCard('bi-shield-exclamation', '丢包状态',
                                 summary.packet_loss_clean ? '无丢包' : '有丢包',
@@ -804,6 +897,11 @@ async function runAnalysis() {
     summaryHtml += _summaryCard('bi-clock-history', '时间戳',
                                 summary.ts_clean === false ? '异常' : '连续',
                                 '', summary.ts_clean === false ? 'warning' : 'success');
+    if (summary.media_quality && summary.media_quality.checked) {
+        summaryHtml += _summaryCard(summary.media_quality.clean ? 'bi-music-note-beamed' : 'bi-exclamation-diamond',
+                                    '音画质量', summary.media_quality.clean ? '正常' : '有异常',
+                                    '杂音/啸叫/花屏检测', summary.media_quality.clean ? 'success' : 'danger');
+    }
     summaryHtml += _summaryCard('bi-clipboard2-pulse', '综合评估',
                                 summary.overall === 'healthy' ? '健康' :
                                 summary.overall === 'warning' ? '注意' : '异常',
@@ -853,6 +951,11 @@ async function runAnalysis() {
             reportHtml += '</ul>';
         }
 
+        // 音画质量分析：杂音/啸叫/削波破音/底噪（音频）与花屏风险（视频）
+        if (data.report.media_quality) {
+            reportHtml += renderMediaQuality(data.report.media_quality);
+        }
+
         document.getElementById('result-report').innerHTML = reportHtml;
     }
 
@@ -861,6 +964,76 @@ async function runAnalysis() {
 
     // 滚动到结果区域
     section.scrollIntoView({ behavior: 'smooth' });
+}
+
+// ====== 音画质量分析（杂音 / 啸叫 / 花屏）======
+// 音画质量专用徽章（音频 clean/noisy/bad，视频 ok/risk/bad）
+const QUALITY_BADGES = {
+    clean: ['success', '干净'],
+    noisy: ['warning', '有杂音'],
+    bad: ['danger', '异常'],
+    ok: ['success', '无花屏风险'],
+    risk: ['warning', '花屏风险'],
+};
+
+function renderMediaQuality(mq) {
+    const audioEntries = Object.entries(mq.audio || {});
+    const videoEntries = Object.entries(mq.video || {});
+    if (!audioEntries.length && !videoEntries.length) return '';
+    let html = '<h6 class="mt-3">音画质量分析（杂音 / 啸叫 / 花屏）</h6>';
+    html += '<p class="small text-muted mb-2">对重建媒体做针对性检测：音频查啸叫/持续单频音、削波破音、爆点、低频嗡声、底噪与音量；' +
+        '视频把丢包映射为花屏影响（破损帧数据、关键帧间隔、ffmpeg 解码校验）。事件时间为相对该流开始的秒数。</p>';
+    audioEntries.forEach(([label, q]) => { html += _audioQualityCard(label, q); });
+    videoEntries.forEach(([label, q]) => { html += _videoQualityCard(label, q); });
+    return html;
+}
+
+function _qualityCard(label, q, badge, chips, issues) {
+    let html = '<div class="border rounded p-2 mb-2">' +
+        '<div class="d-flex flex-wrap align-items-center gap-2">' +
+        `<strong>${_esc(label)}</strong>` +
+        `<span class="badge bg-${badge[0]}">${_esc(badge[1])}</span>`;
+    chips.forEach(c => {
+        html += `<span class="badge bg-light text-dark border">${_esc(c)}</span>`;
+    });
+    html += '</div>';
+    (issues || []).forEach(i => {
+        const sev = i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'secondary';
+        html += `<div class="mt-1 small"><span class="badge bg-${sev} me-1">${i.severity === 'critical' ? '严重' : i.severity === 'warning' ? '注意' : '提示'}</span>${_esc(i.message)}</div>`;
+    });
+    html += '</div>';
+    return html;
+}
+
+function _audioQualityCard(label, q) {
+    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
+    if (q.verdict === 'unknown') {
+        return _qualityCard(label, q, badge,
+            [`${q.codec || ''} 编码不可解（仅 PCMU/PCMA 支持音质检测）`], []);
+    }
+    const chips = [];
+    if (q.tones?.howl_count) chips.push(`啸叫/单频音 ${q.tones.howl_count} 处`);
+    if (q.tones?.hum_count) chips.push(`低频嗡声 ${q.tones.hum_count} 处`);
+    if (q.clipping?.run_count) chips.push(`削波 ${q.clipping.run_count} 处`);
+    if (q.clicks?.count) chips.push(`爆点 ${q.clicks.count} 个`);
+    if (q.noise_floor_dbfs != null) chips.push(`底噪 ${q.noise_floor_dbfs} dBFS`);
+    if (q.speech_level_dbfs != null) chips.push(`话音 ${q.speech_level_dbfs} dBFS`);
+    if (!chips.length) chips.push('未检测到异常');
+    return _qualityCard(label, q, badge, chips, q.issues);
+}
+
+function _videoQualityCard(label, q) {
+    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
+    const chips = [];
+    if (q.total_lost) chips.push(`丢包 ${q.total_lost} 包（${q.loss_rate_pct}%)`);
+    if (q.broken_nals) chips.push(`破损帧 ${q.broken_nals} 个`);
+    chips.push(`IDR 关键帧 ${q.idr_count ?? 0} 个`);
+    if (q.idr_interval_max_s != null) chips.push(`最长间隔 ${q.idr_interval_max_s}s`);
+    if (q.est_artifacts_ms) chips.push(`估算花屏 ${(q.est_artifacts_ms / 1000).toFixed(1)}s`);
+    if (q.decode_check === 'ok') chips.push('解码校验通过');
+    else if (q.decode_check === 'errors') chips.push(`解码错误 ${q.decode_errors} 处`);
+    else if (q.decode_check === 'unavailable') chips.push('解码校验跳过（无 ffmpeg）');
+    return _qualityCard(label, q, badge, chips, q.issues);
 }
 
 // ====== 音视频回放展示 ======

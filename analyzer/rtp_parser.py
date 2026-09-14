@@ -3,6 +3,7 @@ RTP Packet Parser
 Parse pcap/pcapng files and extract all RTP packet information.
 """
 from scapy.all import rdpcap, IP, UDP, Raw
+from scapy.layers.inet import defragment
 from collections import defaultdict
 import os
 import re
@@ -73,8 +74,9 @@ def _parse_sdp_codecs(body: str) -> dict:
            'full': {'audio': [], 'video': []}}
     media = None
     order = {'audio': [], 'video': []}   # m= 行的 PT 顺序
-    named = {}                           # a=rtpmap 解析出的 pt -> 名字
-    rates = {}                           # a=rtpmap 解析出的 pt -> 时钟率
+    named = {'audio': {}, 'video': {}}   # a=rtpmap 解析出的 pt -> 名字（按媒体隔离：
+    rates = {'audio': {}, 'video': {}}   # 音/视频动态 PT 各自独立编号，音频视频同用
+                                         # PT 96 时全局表会串台）
     for line in body.replace('\r\n', '\n').split('\n'):
         if line.startswith('m='):
             parts = line.split()
@@ -84,20 +86,20 @@ def _parse_sdp_codecs(body: str) -> dict:
         elif line.startswith('a=rtpmap:') and media in ('audio', 'video'):
             bits = line.split(':', 1)[1].split()
             if len(bits) >= 2:
-                named[bits[0]] = bits[1].split('/')[0].upper()
+                named[media][bits[0]] = bits[1].split('/')[0].upper()
                 clock = bits[1].split('/')
                 if len(clock) > 1 and clock[1].isdigit():
-                    rates[bits[0]] = int(clock[1])
+                    rates[media][bits[0]] = int(clock[1])
 
     for kind in ('audio', 'video'):
         for pt in order[kind]:
-            name = named.get(pt) or STATIC_PT_NAMES.get(pt)
+            name = named[kind].get(pt) or STATIC_PT_NAMES.get(pt)
             if not name or name.startswith('TELEPHONE'):
                 continue
             if name not in out[kind]:
                 out[kind].append(name)
             out['map'][kind].setdefault(pt, name)
-            rate = rates.get(pt)
+            rate = rates[kind].get(pt)
             if rate is None and pt in STATIC_PT_NAMES:
                 rate = STATIC_PT_CLOCK.get(pt, 90000 if kind == 'video' else 8000)
             ident = {'name': name, 'rate': rate}
@@ -256,6 +258,10 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
         }
     """
     pkts = rdpcap(filepath)
+    # 大 SDP 的 SIP 消息超过 MTU 时会被 IP 分片：只有首片带 UDP 头，SDP 正文
+    # 往往落在后续分片里。先重组再遍历，否则这些消息只剩半截、SDP 解析不到
+    # （协商编码、媒体端点全丢，直接影响信令流程与通话归属判定）
+    pkts = defragment(pkts)
     packets = {}
     ips = set()
     ssrcs = set()

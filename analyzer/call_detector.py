@@ -364,6 +364,7 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             c['sdp_endpoints_by_cid'] = {}
             c['sdp_dialog_ranges'] = {}
             c['sip_peers_by_cid'] = {}
+            c['media_redirects'] = []
         return
 
     all_events.sort(key=lambda e: e['time'])
@@ -568,6 +569,36 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
                                      'video': list(fallback['video'])}
         call['sdp_answered'] = shown['answered'] if shown else False
 
+        # —— 媒体改道（bypass media / SDP 透传）检测 ——
+        # FS 中转媒体时，它自己产出的 SDP 一律宣告 FS 的媒体地址；若 FS 发出
+        # 的消息里宣告的媒体端点是通话中另一台设备的 ip:port，说明 FS 把另一
+        # 条腿的 SDP 原样透传了出去——媒体被改道为端到端直连，此后不再经过
+        # FS（实测上表现为各端在改道后停止向 FS 上行 RTP）
+        dev_ips = {ip for leg in (call.get('legs') or [])
+                   for ip in (leg.get('ips') or [])}
+        if server_ip:
+            dev_ips.discard(server_ip)
+        flow_redirects = {}
+        for i, e in enumerate(flow):
+            if server_ip and e['src'] != server_ip:
+                continue
+            hits = [ep for ep in (e.get('sdp') or {}).get('endpoints') or []
+                    if ep.get('addr') in dev_ips]
+            if hits:
+                flow_redirects[i] = {
+                    'targets': sorted({ep['addr'] for ep in hits}),
+                    'ports': sorted({ep['port'] for ep in hits if ep.get('port')}),
+                }
+        call['media_redirects'] = [
+            {'time': flow[i]['time'], 'time_str': _fmt_time(flow[i]['time']),
+             'method': flow[i]['method'],
+             'label': flow[i]['method'] + (' ' + flow[i]['reason']
+                                           if flow[i]['reason'] else ''),
+             'dst': flow[i]['dst'], 'call_id': flow[i].get('call_id'),
+             **info}
+            for i, info in flow_redirects.items()
+        ]
+
         call['sip_flow'] = [{
             'time': e['time'],
             'time_str': _fmt_time(e['time']),
@@ -585,7 +616,10 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             # 编码行插到应答行之后
             'sdp_codecs': ({k: e['sdp'][k] for k in ('audio', 'video')
                             if e['sdp'].get(k)} if e.get('sdp') else None),
-        } for e in flow]
+            # FS 在此消息里把对端媒体地址透传给了本端（媒体改道证据），供
+            # 信令阶梯图在消息行上直接标注
+            'media_redirect': flow_redirects.get(i),
+        } for i, e in enumerate(flow)]
 
 
 def _sip_kind(method: str) -> str:
@@ -627,12 +661,65 @@ def _codec_match(a: dict, b: dict) -> bool:
 def _negotiate_leg(sdp_msgs: list) -> tuple:
     """一个 Call-ID（= B2BUA 的一条腿）内的 offer/answer 配对。
 
+    按时间顺序扫描该腿带 SDP 的消息，以信令事务（CSeq）为单位配对，取
+    **最后一轮完整配对**作为该腿的协商结果——407 鉴权重发、桥接 blink
+    re-INVITE、会话刷新 re-INVITE 都会重新协商编码，实际生效的是最后一轮：
+
+    - 带 SDP 的 INVITE 是 offer（其应答 1xx/2xx 的 CSeq 与之一致才算它的
+      answer；200 OK 之后再配 183 会被覆盖，最终答案以最终应答为准）；
+    - 无 SDP 的 blink INVITE 之后，设备在 200 OK 里发 offer、FS 的 ACK 带
+      answer（慢启动同理：offer 在 200 OK、answer 在 ACK）；
+    - FS 自产 INVITE 的 SDP 若解析不出编码名（audio/video 均空）对"协商了
+      什么"没有信息量，调用方已过滤。
+
     返回 ({'audio': [编码身份], 'video': [编码身份]}, 是否收到应答)。
     协商结果 = 双方列出编码的交集（保持 offer 顺序）；交集为空以 answer 为
     准（应答方决定，含拒绝某路媒体）；无 answer 时只有候选，谈不上协商。
     """
-    offer = sdp_msgs[0]['sdp']
-    answer = sdp_msgs[1]['sdp'] if len(sdp_msgs) > 1 else None
+    negotiated = None
+    answered = False
+    pending = None     # 待应答的 offer {'sdp':…, 'cseq':…}
+    last_cseq = None   # 最近一轮配对的 offer 事务号：同事务的最终应答覆盖早先的 183
+    last_offer_sdp = None
+    for e in sdp_msgs:
+        sdp = e.get('sdp') or {}
+        if not (sdp.get('audio') or sdp.get('video')):
+            continue
+        if e['method'] == 'INVITE':
+            pending = {'sdp': sdp, 'cseq': e.get('cseq')}
+            continue
+        if e['method'].isdigit():
+            if pending is not None and e.get('cseq') == pending['cseq']:
+                negotiated = _pair_offer_answer(pending['sdp'], sdp)
+                answered = True
+                last_cseq = pending['cseq']
+                last_offer_sdp = pending['sdp']
+                pending = None
+            elif pending is None and e.get('cseq') == last_cseq:
+                # 同一事务更晚的应答（183 早释 → 200 OK 最终应答）覆盖更新
+                negotiated = _pair_offer_answer(last_offer_sdp, sdp)
+            elif pending is None:
+                # 无 SDP 的 blink re-INVITE 之后，应答方在 200 OK 里发 offer
+                pending = {'sdp': sdp, 'cseq': e.get('cseq')}
+            continue
+        if e['method'] == 'ACK' and pending is not None \
+                and e.get('cseq') == pending['cseq']:
+            negotiated = _pair_offer_answer(pending['sdp'], sdp)
+            answered = True
+            last_cseq = pending['cseq']
+            last_offer_sdp = pending['sdp']
+            pending = None
+    if negotiated is None and pending is not None:
+        # 只有 offer 没等到应答：如实给候选
+        negotiated = _pair_offer_answer(pending['sdp'], None)
+        answered = False
+    if negotiated is None:
+        negotiated = {'audio': [], 'video': []}
+    return negotiated, answered
+
+
+def _pair_offer_answer(offer: dict, answer: dict | None) -> dict:
+    """一轮 offer/answer 的协商结果：交集（offer 顺序），空则以 answer 为准。"""
     negotiated = {}
     for kind in ('audio', 'video'):
         offered = _sdp_codec_idents(offer, kind)
@@ -642,7 +729,7 @@ def _negotiate_leg(sdp_msgs: list) -> tuple:
         ans = _sdp_codec_idents(answer, kind)
         negotiated[kind] = [c for c in offered
                             if any(_codec_match(c, a) for a in ans)] or ans
-    return negotiated, answer is not None
+    return negotiated
 
 
 def _pick_leg(leg_codecs: dict, role: str) -> dict | None:
@@ -972,7 +1059,7 @@ def _leg_pt_sides(call: dict, server_ip: str = None) -> dict:
 def _fs_media_verdict(call: dict, is_p2p: bool, server_ip: str = None) -> dict:
     """判定「FS 参与编解码了吗」，供 SIP 流程展示。
 
-    - bypass：媒体不经 FS（点对点直连 / FS bypass media），FS 不在媒体路径，
+    - bypass：媒体不经 FS（点对点直连 / bypass media），FS 不在媒体路径，
       未参与编解码；
     - transcode：两腿协商编码不同，FS 作为 B2BUA 必然解码再编码（转码）；
     - same：两腿编码相同，FS 即使在媒体路径也没有编码格式转换发生（是否
@@ -981,12 +1068,19 @@ def _fs_media_verdict(call: dict, is_p2p: bool, server_ip: str = None) -> dict:
       不可比（如动态 PT 无 rtpmap）。
 
     SDP 对比不可行时用每条腿实际使用的音频 PT 反查编码名兜底（结论标注
-    推断来源）。
+    推断来源）。媒体已被改道（SDP 透传）时 FS 不在媒体路径，转码问题随之
+    无意义，直接给 bypass 结论。
     """
     if is_p2p:
         return {'verdict': 'bypass',
                 'text': '媒体在两端之间直连（点对点 / bypass media），'
                         'FS 不在媒体路径，未参与编解码'}
+    redirs = call.get('media_redirects') or []
+    if redirs:
+        r0 = redirs[0]
+        return {'verdict': 'bypass',
+                'text': f"FS 已在 {r0['time_str']} 把媒体改道为端到端直连"
+                        '（SDP 透传），FS 不在媒体路径，未参与编解码'}
     caller = _pick_leg(call.get('leg_codecs') or {}, 'caller')
     callee = _pick_leg(call.get('leg_codecs') or {}, 'callee')
     if caller and callee:
@@ -1006,6 +1100,173 @@ def _fs_media_verdict(call: dict, is_p2p: bool, server_ip: str = None) -> dict:
                         'FS 参与转码（依 RTP 载荷类型推断）'}
     return {'verdict': 'unknown',
             'text': '未能同时看到两条腿的协商编码或实际编码，无法判定'}
+
+
+def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None:
+    """判定这通通话的音视频流有没有经过 FS 转发，给出排查方向提示。
+
+    实测判据是各设备与 FS 之间的 RTP 上/下行（腿内每条 SSRC 流方向恒定），
+    信令判据是 SDP 透传改道（media_redirects）。结论按排查优先级组织：
+    1. 中转问题优先——FS 改道直连（SDP 透传）、或两端都没有向 FS 上行 RTP，
+       说明媒体没走 FS 中转，先查 FS 中转配置（bypass media / 媒体地址通告），
+       不要先怀疑网络；
+    2. 网络问题其次——只有部分端点/媒体有上行时（发了的和没发的混着），
+       才往网络方向排查。
+
+    Returns None 表示无需此判定（点对点直连通话已有专门提示，或无服务器 IP）。
+    """
+    if not server_ip:
+        return None
+    # 全部腿都不经过服务器：点对点直连，转发判定无意义（另有提示）
+    if not any(server_ip in leg['ips'] for leg in call['legs']):
+        return None
+    # 转发判定只能由服务器侧抓包下结论：别的抓包点看不到"是否发给了 FS"
+    if not any(server_ip in (rd.get('ips') or set()) for rd in captures.values()):
+        return {'available': True, 'verdict': 'insufficient',
+                'headline': '没有 FS 侧抓包，无法判断媒体是否经过 FS 中转'
+                            '（需在 FS 上或其镜像口抓包）',
+                'advice': '', 'redirects': [], 'devices': [], 'notes': []}
+
+    # 每台设备与 FS 之间按媒体类别的上下行实测
+    stats = {}   # device_ip -> {'up': {kind: agg}, 'down': {kind: agg}}
+    for leg in call['legs']:
+        if server_ip not in leg['ips']:
+            continue
+        for st in leg['streams'].values():
+            if st['src_ip'] == server_ip:
+                direction, dev = 'down', st['dst_ip']
+            elif st['dst_ip'] == server_ip:
+                direction, dev = 'up', st['src_ip']
+            else:
+                continue
+            kind = ('audio' if st['pt'] in AUDIO_PT
+                    else 'video' if 96 <= st['pt'] <= 127 else None)
+            if not kind:
+                continue
+            agg = (stats.setdefault(dev, {'up': {}, 'down': {}})[direction]
+                        .setdefault(kind, {'pkts': 0,
+                                           'first': st['start'], 'last': st['end']}))
+            agg['pkts'] += st['count']
+            agg['first'] = min(agg['first'], st['start'])
+            agg['last'] = max(agg['last'], st['end'])
+
+    # 期望参与转发的设备集：信令识别出的主叫/被叫，缺信令时退回媒体腿上
+    # 与 FS 通信过的非服务器 IP
+    caller_ip, callee_ip = _call_party_pair(call.get('sip_flow') or [], server_ip)
+    expected = [ip for ip in (caller_ip, callee_ip) if ip and ip != server_ip]
+    if not expected:
+        expected = sorted({ip for leg in call['legs'] if server_ip in leg['ips']
+                           for ip in leg['ips']} - {server_ip})
+
+    def _label(ip):
+        if ip == caller_ip:
+            return f'主叫端 {ip}'
+        if ip == callee_ip:
+            return f'被叫端 {ip}'
+        return f'端点 {ip}'
+
+    call_dur = max(call['duration'], 0.001)
+    devices = []
+    for ip in expected:
+        s = stats.get(ip, {'up': {}, 'down': {}})
+        devices.append({
+            'ip': ip, 'label': _label(ip),
+            'uplink': {k: {'pkts': s['up'].get(k, {}).get('pkts', 0),
+                           'span_s': round(max(0.0, s['up'].get(k, {}).get('last', 0)
+                                               - s['up'].get(k, {}).get('first', 0)), 1),
+                           'last_str': _fmt_time(s['up'][k]['last']) if k in s['up'] else None}
+                       for k in ('audio', 'video')},
+            'downlink': {k: {'pkts': s['down'].get(k, {}).get('pkts', 0),
+                             'span_s': round(max(0.0, s['down'].get(k, {}).get('last', 0)
+                                                 - s['down'].get(k, {}).get('first', 0)), 1),
+                             'last_str': _fmt_time(s['down'][k]['last']) if k in s['down'] else None}
+                         for k in ('audio', 'video')},
+        })
+
+    redirs = call.get('media_redirects') or []
+    notes = []
+    up_devs = [d for d in devices if any(v['pkts'] > 0 for v in d['uplink'].values())]
+    no_up_devs = [d for d in devices if not any(v['pkts'] > 0 for v in d['uplink'].values())]
+
+    if redirs:
+        r0 = redirs[0]
+        headline = (f"FS 在 {r0['time_str']} 用 {r0['label']} 把媒体改道为端到端直连"
+                    f"（SDP 透传，向 {_label(r0['dst']) if r0['dst'] != server_ip else r0['dst']}"
+                    f" 宣告 {'、'.join(r0['targets'])} 的媒体地址），"
+                    '此后音视频流不再经过 FS 转发。')
+        # 佐证：各端上行是否随改道一并停止（改道时刻 ±5 秒内停 = 服从了新
+        # SDP，是干净的信令性停止，不是网络丢包的形态）
+        stopped, kept = [], []
+        for d in up_devs:
+            lasts = [v['last_str'] and stats[d['ip']]['up'][k]['last']
+                     for k, v in d['uplink'].items() if v['pkts'] > 0]
+            if lasts and all(abs(t - r0['time']) <= 5.0 for t in lasts):
+                stopped.append(d['label'])
+            elif lasts:
+                kept.append(d['label'])
+        if stopped:
+            notes.append(f"{'、'.join(stopped)}的 RTP 上行在改道时刻即停止——"
+                         '各端服从了新 SDP，属干净的信令性停止，不是网络丢包')
+        if kept:
+            notes.append(f"{'、'.join(kept)}在改道后仍有上行（FS 侧仍在收部分媒体）")
+        advice = ('排查优先级：这是中转问题，不是网络问题。先确认 FS 的媒体旁路'
+                  '配置（bypass_media / bypass_media_after_bridge 等）是否符合预期；'
+                  '本抓包点看不到端到端直连的媒体，若要确认两端是否真正收到对方的'
+                  '音视频，需在两端本地抓包验证。')
+    elif not up_devs:
+        names = '、'.join(d['label'] for d in devices) or '两端'
+        headline = (f'{names}都没有向 FS 发送任何 RTP——'
+                    '音视频流没有经过 FS 中转。')
+        advice = ('排查优先级：两端都不往 FS 发媒体 → 优先排查中转问题：'
+                  'FS 是否配置了 bypass media、信令里宣告的媒体地址是否指向 FS、'
+                  '两端是否拿到了彼此地址在直连；确认后才是网络问题。')
+    elif no_up_devs:
+        sent = '、'.join(d['label'] for d in up_devs)
+        missing = '、'.join(d['label'] for d in no_up_devs)
+        headline = (f'只有 {sent} 向 FS 发送了媒体，{missing} 没有任何上行 RTP。')
+        advice = ('排查优先级：一部分发了、一部分没发 → 这种情况才考虑网络问题：'
+                  '先在未发送端本地抓包，确认它确实在发（排除终端自身不发），'
+                  '再逐段检查链路、防火墙/NAT。')
+    else:
+        headline = '各端都有上行、FS 也有下行——媒体确实经过 FS 中转。'
+        advice = ''
+    # 下行来源核对：FS 的下行应能被对端的上行解释（转发包数 1:1）。
+    # 对端没发过、或包数远小于下行，说明该下行不是转发——FS 本地媒体源
+    # （彩铃/视频公告/MOH 等），这直接影响"FS 是否在转发"的结论。
+    for d in devices:
+        peer = next((x for x in devices if x['ip'] != d['ip']), None)
+        if not peer:
+            continue
+        for kind, kname in (('audio', '音频'), ('video', '视频')):
+            up = peer['uplink'][kind]
+            down = d['downlink'][kind]
+            if not down['pkts']:
+                if up['pkts']:
+                    notes.append(f"FS 从未向 {d['label']} 下发{kname}"
+                                 f"（0 包，而对端 {peer['label']} 上行过"
+                                 f" {up['pkts']} 包）——该方向未发生转发")
+                continue
+            if not up['pkts']:
+                notes.append(f"FS 向 {d['label']} 下发了 {down['pkts']} 包{kname}，"
+                             f"但 {peer['label']} 从未上行过{kname}——该下行并非"
+                             '转发，应是 FS 本地媒体源（如彩铃/视频公告/MOH）')
+            elif down['span_s'] > 30 and down['pkts'] > up['pkts'] * 4:
+                notes.append(f"FS 向 {d['label']} 下发{kname} {down['pkts']} 包"
+                             f"（覆盖约 {down['span_s']} 秒），而 {peer['label']}"
+                             f" 上行仅 {up['pkts']} 包（约 {up['span_s']} 秒）——"
+                             '下行主体并非来自对端的转发')
+
+    return {'available': True, 'verdict': (
+                'redirected' if redirs else
+                'no_relay' if not up_devs else
+                'partial_uplink' if no_up_devs else 'relayed'),
+            'headline': headline, 'advice': advice,
+            'redirects': [{'time_str': r['time_str'], 'label': r['label'],
+                           'dst': _label(r['dst']) if r['dst'] != server_ip else r['dst'],
+                           'targets': '、'.join(r['targets'])}
+                          for r in redirs],
+            'devices': devices,
+            'notes': notes}
 
 
 def detect_calls(captures: dict, server_ip: str = None) -> list:
@@ -1105,6 +1366,10 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             'negotiated_codecs': call.get('negotiated_codecs') or {'audio': [], 'video': []},
             'negotiated_per_leg': call.get('negotiated_per_leg') or {},
             'fs_media': _fs_media_verdict(call, p2p, server_ip),
+            # FS 媒体转发判定：这通话的音视频流到底有没有经过 FS 转发
+            # （点对点直连时为 None，已有专门提示）
+            'fs_relay': (None if p2p
+                         else _fs_relay_verdict(call, captures, server_ip)),
             'sdp_answered': call.get('sdp_answered', True),
             'ssrcs': sorted(call['ssrcs']),
             'is_p2p': p2p,

@@ -102,8 +102,30 @@
                         多通通话混在一起分析会使延迟/抖动结果失真，建议选择具体通话
                     </small>
                 </div>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">分析内容</label>
+                    <div class="d-flex flex-wrap gap-4">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox"
+                                   id="check-delay" checked>
+                            <label class="form-check-label" for="check-delay">
+                                <i class="bi bi-speedometer2 text-primary"></i> 延迟测量
+                                <small class="text-muted">（FS 内部 / 跨抓包 / 端到端）</small>
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox"
+                                   id="check-quality" checked>
+                            <label class="form-check-label" for="check-quality">
+                                <i class="bi bi-music-note-beamed text-success"></i> 音画质量
+                                <small class="text-muted">（杂音 / 啸叫 / 花屏）</small>
+                            </label>
+                        </div>
+                    </div>
+                    <small class="text-muted d-none" id="check-delay-hint"></small>
+                </div>
                 <div class="row g-3">
-                    <div class="col-md-6">
+                    <div class="col-md-6" id="direction-col">
                         <label class="form-label fw-bold">延迟方向</label>
                         <div id="direction-options">
                             <!-- 动态填充 -->
@@ -113,23 +135,25 @@
                         </small>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label fw-bold">延迟类型</label>
+                        <label class="form-label fw-bold">媒体类型</label>
                         <div class="form-check">
-                            <input class="form-check-input" type="radio" name="media-type" 
+                            <input class="form-check-input" type="radio" name="media-type"
                                    id="type-audio" value="audio" checked>
                             <label class="form-check-label" for="type-audio">
-                                <i class="bi bi-mic-fill text-primary"></i> 仅音频延迟
+                                <i class="bi bi-mic-fill text-primary"></i> 仅音频
+                                <small class="text-muted">（杂音/啸叫类检测 + 音频流分析）</small>
                             </label>
                         </div>
                         <div class="form-check">
-                            <input class="form-check-input" type="radio" name="media-type" 
+                            <input class="form-check-input" type="radio" name="media-type"
                                    id="type-video" value="video">
                             <label class="form-check-label" for="type-video">
-                                <i class="bi bi-camera-video-fill text-danger"></i> 仅视频延迟
+                                <i class="bi bi-camera-video-fill text-danger"></i> 仅视频
+                                <small class="text-muted">（花屏类检测 + 视频流分析）</small>
                             </label>
                         </div>
                         <div class="form-check">
-                            <input class="form-check-input" type="radio" name="media-type" 
+                            <input class="form-check-input" type="radio" name="media-type"
                                    id="type-all" value="all">
                             <label class="form-check-label" for="type-all">
                                 <i class="bi bi-collection-fill text-success"></i> 音视频都分析

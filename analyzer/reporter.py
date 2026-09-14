@@ -33,6 +33,10 @@ def generate_report(analysis_results: dict) -> dict:
         'audio_health': analysis_results.get('audio_health'),
         'delay_chains': analysis_results.get('delay_chains'),
         'rtcp': analysis_results.get('rtcp'),
+        'media_quality': {
+            'audio': analysis_results.get('audio_quality') or {},
+            'video': analysis_results.get('video_quality') or {},
+        },
         'conclusion': _build_conclusion(analysis_results),
     }
     return report
@@ -376,6 +380,26 @@ def _build_conclusion(results: dict) -> dict:
     if ts_continuity and all(d.get('event_count', 0) == 0 for d in ts_continuity.values()):
         ok_items.append('所有流的声音时间轴连续（无断开/倒退/重复）')
 
+    # FS 媒体转发判定（音视频流是否真的经过 FS 转发 + 排查方向）
+    fs_relay = results.get('fs_relay') or {}
+    if fs_relay.get('available'):
+        v = fs_relay.get('verdict')
+        if v in ('redirected', 'no_relay'):
+            issues.append({
+                'severity': 'critical',
+                'message': f"FS 媒体转发：{fs_relay.get('headline', '')}",
+            })
+        elif v == 'partial_uplink':
+            issues.append({
+                'severity': 'warning',
+                'message': f"FS 媒体转发：{fs_relay.get('headline', '')}",
+            })
+        elif v == 'relayed':
+            ok_items.append('FS 媒体转发正常：各端媒体均经过 FS 中转')
+        for n in fs_relay.get('notes') or []:
+            issues.append({'severity': 'warning',
+                           'message': f'FS 媒体转发：{n}'})
+
     # 无声诊断评估（directions 按主叫→坐席 / 坐席→主叫给出链路级判定）
     audio_health = results.get('audio_health') or {}
     if audio_health.get('available'):
@@ -415,6 +439,22 @@ def _build_conclusion(results: dict) -> dict:
                     'message': f"延迟链路·{r.get('pair', '')}: 往返 {r['ms']}ms，"
                                f'链路整体偏慢',
                 })
+
+    # 音画质量分析（杂音/啸叫/削波破音/底噪 + 视频花屏风险）：
+    # 每条流的 issues 逐条进结论并带上流名前缀，检测通过的流进 ok_items
+    for kind, entries in (('audio', results.get('audio_quality') or {}),
+                          ('video', results.get('video_quality') or {})):
+        for label, q in entries.items():
+            for issue in q.get('issues') or []:
+                issues.append({
+                    'severity': issue.get('severity', 'warning'),
+                    'message': f'{_pretty_label(label)}: {issue.get("message", "")}',
+                })
+            if q.get('verdict') in ('clean', 'ok'):
+                ok_items.append(f'{_pretty_label(label)}: ' +
+                                ('音质检测通过（无啸叫/杂音/削波）'
+                                 if kind == 'audio'
+                                 else '视频流未发现花屏风险因素'))
 
     # RTCP 接收端报告评估（RR 是接收端对收流质量的亲历上报）
     rtcp = results.get('rtcp') or {}

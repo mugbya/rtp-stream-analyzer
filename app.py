@@ -28,6 +28,7 @@ from analyzer.media_extractor import (
 from analyzer.silence_analyzer import analyze_silence, diagnose_audio
 from analyzer.rtcp_parser import summarize_rtcp
 from analyzer.delay_chains import build_delay_chains
+from analyzer.quality_analyzer import analyze_audio_quality, analyze_video_quality
 from analyzer.call_detector import detect_calls, check_capture_consistency
 
 app = Flask(__name__)
@@ -141,6 +142,11 @@ def run_analysis():
     direction = data.get('direction', 'auto')
     media_type = data.get('media_type', 'audio')
     call_id = data.get('call_id')
+    # 分析内容开关：延迟类分析需要 ≥2 个抓包点或 FS 抓包，单端抓包时前端
+    # 会禁用该选项；音画质量分析单端即可做。未传时保持全开（兼容旧调用）。
+    checks = data.get('checks') or {}
+    check_delay = bool(checks.get('delay', True))
+    check_quality = bool(checks.get('quality', True))
 
     if session_id not in sessions:
         return jsonify({'error': 'Session not found'}), 404
@@ -188,6 +194,7 @@ def run_analysis():
     results = {
         'direction': direction,
         'media_type': media_type,
+        'checks': {'delay': check_delay, 'quality': check_quality},
         'call_id': selected_call['call_id'] if selected_call else None,
         'num_captures': len(captures),
         'capture_roles': {fi['role']: fi['filename'] for fi in files_info},
@@ -267,8 +274,17 @@ def run_analysis():
         results['audio_health'] = diagnose_audio(
             canon_captures, selected_call, server_ip,
             silence_profiles, rtcp_by_role, parties)
-        results['delay_chains'] = build_delay_chains(
-            canon_captures, selected_call, server_ip, parties)
+        # 无声诊断属于"内容是否有人声"的质量范畴，单端也可做，不受延迟开关限制
+        if check_delay:
+            results['delay_chains'] = build_delay_chains(
+                canon_captures, selected_call, server_ip, parties)
+        else:
+            results['delay_chains'] = {
+                'available': False, 'directions': [], 'roundtrip': [],
+                'notes': ['未勾选延迟分析，跳过分段延迟链路测量']}
+        # FS 媒体转发判定（上传识别时已按通话算好）：音视频流是否真的
+        # 经过 FS 转发、被改道/缺失时的排查方向提示
+        results['fs_relay'] = selected_call.get('fs_relay')
     else:
         results['audio_health'] = {
             'available': False, 'directions': [],
@@ -277,21 +293,61 @@ def run_analysis():
             'available': False, 'directions': [], 'roundtrip': [],
             'notes': ['未选中通话，无法按方向定位链路延迟']}
 
+    # === 音视频重建 ===
+    # 输出目录按日期组织: outputs/YYYY-MM-DD/<session_id>/
+    # 便于定期清理脚本按日期目录删除。
+    # 提前到质量分析之前：视频裸流重建后才能做 ffmpeg 解码校验
+    output_date = date.today().isoformat()
+    media_dir = os.path.join(app.config['OUTPUT_FOLDER'], output_date, session_id)
+    media_types = media_type if media_type in ('audio', 'video') else 'all'
+    media_manifest = generate_all_media(captures, classified, media_dir,
+                                        server_ip, media_types,
+                                        ssrc_filter=call_ssrcs,
+                                        call_id=selected_call['call_id'] if selected_call else None)
+    media_manifest = get_media_urls(media_manifest, session_id, output_date)
+    # 给每条媒体流标注收发双方（谁到谁），并在清单汇总通话拓扑（主叫↔FS↔被叫）
+    describe_media_parties(media_manifest, captures, calls, server_ip, files_info)
+    results['media_manifest'] = media_manifest
+    results['media_dir'] = media_dir
+
+    # === 音画质量分析（杂音/啸叫/削波破音/底噪 + 花屏风险） ===
+    # 音频对解码后的 PCM 做 DSP 检测；视频把丢包映射到"花到下一个关键帧"
+    # 的影响时长，并用重建裸流做 ffmpeg 解码校验
+    audio_quality, video_quality = {}, {}
+    if check_quality:
+        for role, cap in captures.items():
+            for ssrc in target_streams:
+                info = cap['streams'].get(ssrc)
+                if not info:
+                    continue
+                label = f"{role} (SSRC=0x{ssrc:08x})"
+                if any(pt in AUDIO_PT for pt in info.get('pt', [])):
+                    audio_quality[label] = analyze_audio_quality(cap['packets'], ssrc)
+                elif any(pt in VIDEO_PT_RANGE for pt in info.get('pt', [])):
+                    entry = next((e for e in media_manifest.get('video', [])
+                                  if e.get('role') == role
+                                  and e.get('ssrc') == f'0x{ssrc:08x}'), None)
+                    raw_path = entry.get('raw_path') if entry else None
+                    video_quality[label] = analyze_video_quality(
+                        cap['packets'], ssrc, raw_path=raw_path)
+    results['audio_quality'] = audio_quality
+    results['video_quality'] = video_quality
+
     # === FS 内部延迟 ===
     fs_delay = None
-    if 'fs' in captures or 'FS' in captures:
+    if check_delay and ('fs' in captures or 'FS' in captures):
         fs_role = 'fs' if 'fs' in captures else 'FS'
         fs_cap = captures[fs_role]
-        
+
         # 找入站和出站 SSRC 对
         # 策略：寻找同一媒体类型中，方向相反的 SSRC 对
         fs_delay = _find_and_calc_fs_delay(fs_cap['packets'], target_streams, server_ip)
-    
+
     results['fs_delay'] = fs_delay or {}
-    
+
     # === 跨抓包延迟 ===
     cross_delays = []
-    if len(captures) >= 2:
+    if check_delay and len(captures) >= 2:
         roles = list(captures.keys())
         for i in range(len(roles)):
             for j in range(i + 1, len(roles)):
@@ -318,7 +374,7 @@ def run_analysis():
         results['end_to_end'] = estimate_end_to_end_delay(fs_delay)
     
     # === 生成瀑布图数据 ===
-    if len(captures) >= 3:
+    if check_delay and len(captures) >= 3:
         results['waterfall'] = _build_waterfall_data(captures, target_streams, server_ip)
     
     # === 生成图表 ===
@@ -331,22 +387,6 @@ def run_analysis():
     report = generate_report(results)
     results['report'] = report
     
-    # === 音视频重建 ===
-    # 输出目录按日期组织: outputs/YYYY-MM-DD/<session_id>/
-    # 便于定期清理脚本按日期目录删除
-    output_date = date.today().isoformat()
-    media_dir = os.path.join(app.config['OUTPUT_FOLDER'], output_date, session_id)
-    media_types = media_type if media_type in ('audio', 'video') else 'all'
-    media_manifest = generate_all_media(captures, classified, media_dir,
-                                        server_ip, media_types,
-                                        ssrc_filter=call_ssrcs,
-                                        call_id=selected_call['call_id'] if selected_call else None)
-    media_manifest = get_media_urls(media_manifest, session_id, output_date)
-    # 给每条媒体流标注收发双方（谁到谁），并在清单汇总通话拓扑（主叫↔FS↔被叫）
-    describe_media_parties(media_manifest, captures, calls, server_ip, files_info)
-    results['media_manifest'] = media_manifest
-    results['media_dir'] = media_dir
-
     # 保存结果到会话
     session['results'] = results
 
@@ -363,12 +403,17 @@ def run_analysis():
             'unsupported': media_manifest.get('unsupported', []),
         },
         'summary': {
-            'fs_delay_mean': fs_delay.get('mean', 0) if fs_delay else 0,
-            'fs_delay_p95': fs_delay.get('p95', 0) if fs_delay else 0,
+            # fs_delay_mean/p95：未测（未勾选延迟或无 FS 抓包）时为 None，
+            # 前端据此显示"未测量"而非误导性的 0.0ms
+            'fs_delay_mean': fs_delay.get('mean') if fs_delay else None,
+            'fs_delay_p95': fs_delay.get('p95') if fs_delay else None,
             'jitter_streams': len(jitter_results),
             'packet_loss_clean': all(d.get('is_clean', True) for d in loss_results.values()),
             'ts_clean': all(d.get('event_count', 0) == 0 for d in ts_results.values()),
             'clock_warning': clock_info.get('warning'),
+            'media_quality': _quality_flags(results),
+            'delay_checked': check_delay,
+            'quality_checked': check_quality,
             'overall': report['conclusion']['overall'],
         },
     })
@@ -407,20 +452,37 @@ def get_session(session_id):
     })
 
 
+def _quality_flags(results):
+    """音画质量检测汇总（供摘要卡片）：checked=是否测过，clean=是否全部正常。"""
+    entries = list((results.get('audio_quality') or {}).values()) + \
+        list((results.get('video_quality') or {}).values())
+    verdicts = [e.get('verdict') for e in entries if e.get('verdict')]
+    return {
+        'checked': bool(verdicts),
+        'clean': bool(verdicts) and all(v in ('clean', 'ok') for v in verdicts),
+    }
+
+
 def _build_summary(results):
     """从 results 构建摘要（与 /api/analyze 响应中的 summary 一致）。"""
     report = results.get('report') or {}
     conclusion = report.get('conclusion') or {}
     fs_delay = results.get('fs_delay') or {}
     loss_results = results.get('packet_loss') or {}
+    checks = results.get('checks') or {}
     return {
-        'fs_delay_mean': fs_delay.get('mean', 0),
-        'fs_delay_p95': fs_delay.get('p95', 0),
+        # fs_delay_mean/p95：未测（未勾选延迟或无 FS 抓包）时为 None，
+        # 前端据此显示"未测量"而非误导性的 0.0ms
+        'fs_delay_mean': fs_delay.get('mean') if fs_delay else None,
+        'fs_delay_p95': fs_delay.get('p95') if fs_delay else None,
         'jitter_streams': len(results.get('jitter') or {}),
         'packet_loss_clean': all(d.get('is_clean', True) for d in loss_results.values()),
         'ts_clean': all(d.get('event_count', 0) == 0
                         for d in (results.get('ts_continuity') or {}).values()),
         'clock_warning': (results.get('clock_info') or {}).get('warning'),
+        'media_quality': _quality_flags(results),
+        'delay_checked': bool(checks.get('delay', True)),
+        'quality_checked': bool(checks.get('quality', True)),
         'overall': conclusion.get('overall'),
     }
 

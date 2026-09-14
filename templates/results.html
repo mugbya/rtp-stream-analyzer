@@ -120,13 +120,23 @@ function showResults(results) {
         error:   ['bi-x-octagon', '异常', 'danger'],
     }[summary.overall] || ['bi-x-octagon', '异常', 'danger'];
     cards.innerHTML =
-        statCard('bi-speedometer2', 'FS 内部延迟',
-                 `${summary.fs_delay_mean.toFixed(1)}<span class="stat-unit">ms</span>`,
-                 `P95 ${summary.fs_delay_p95.toFixed(1)}ms`, 'primary') +
+        (summary.fs_delay_mean != null
+            ? statCard('bi-speedometer2', 'FS 内部延迟',
+                       `${summary.fs_delay_mean.toFixed(1)}<span class="stat-unit">ms</span>`,
+                       `P95 ${summary.fs_delay_p95.toFixed(1)}ms`, 'primary')
+            : statCard('bi-speedometer2', 'FS 内部延迟', '未测量',
+                       summary.delay_checked === false ? '未勾选延迟分析' : '缺少 FS 端抓包',
+                       'secondary')) +
         statCard('bi-activity', '抖动流数', summary.jitter_streams, '已分析', 'success') +
         statCard(summary.packet_loss_clean ? 'bi-shield-check' : 'bi-shield-x',
                  '丢包状态', summary.packet_loss_clean ? '无丢包' : '有丢包', '',
                  summary.packet_loss_clean ? 'success' : 'danger') +
+        (summary.media_quality && summary.media_quality.checked
+            ? statCard(summary.media_quality.clean ? 'bi-music-note-beamed' : 'bi-exclamation-diamond',
+                       '音画质量', summary.media_quality.clean ? '正常' : '有异常',
+                       '杂音/啸叫/花屏检测',
+                       summary.media_quality.clean ? 'success' : 'danger')
+            : '') +
         statCard(overallMeta[0], '综合评估', overallMeta[1], '', overallMeta[2]);
     
     // 详细报告
@@ -159,6 +169,11 @@ function showResults(results) {
         // 分段延迟链路：每个方向拆成三段测量，定位延迟在哪一段
         if (report.delay_chains) {
             html += renderDelayChains(report.delay_chains);
+        }
+
+        // 音画质量分析：杂音/啸叫/削波破音/底噪（音频）与花屏风险（视频）
+        if (report.media_quality) {
+            html += renderMediaQuality(report.media_quality);
         }
 
         if (report.conclusion) {
@@ -353,6 +368,75 @@ function renderDelayChains(dc) {
         html += `<div class="text-muted small mt-1">${_esc(n)}</div>`;
     });
     return html;
+}
+
+// 音画质量专用徽章（音频 clean/noisy/bad，视频 ok/risk/bad）
+const QUALITY_BADGES = {
+    clean: ['success', '干净'],
+    noisy: ['warning', '有杂音'],
+    bad: ['danger', '异常'],
+    ok: ['success', '无花屏风险'],
+    risk: ['warning', '花屏风险'],
+};
+
+function renderMediaQuality(mq) {
+    const audioEntries = Object.entries(mq.audio || {});
+    const videoEntries = Object.entries(mq.video || {});
+    if (!audioEntries.length && !videoEntries.length) return '';
+    let html = '<h6 class="mt-3">音画质量分析（杂音 / 啸叫 / 花屏）</h6>';
+    html += '<p class="small text-muted mb-2">对重建媒体做针对性检测：音频查啸叫/持续单频音、削波破音、爆点、低频嗡声、底噪与音量；' +
+        '视频把丢包映射为花屏影响（破损帧数据、关键帧间隔、ffmpeg 解码校验）。事件时间为相对该流开始的秒数。</p>';
+    audioEntries.forEach(([label, q]) => { html += _audioQualityCard(label, q); });
+    videoEntries.forEach(([label, q]) => { html += _videoQualityCard(label, q); });
+    return html;
+}
+
+function _qualityCard(label, q, badge, chips, issues) {
+    let html = '<div class="border rounded p-2 mb-2">' +
+        '<div class="d-flex flex-wrap align-items-center gap-2">' +
+        `<strong>${_esc(label)}</strong>` +
+        `<span class="badge bg-${badge[0]}">${_esc(badge[1])}</span>`;
+    chips.forEach(c => {
+        html += `<span class="badge bg-light text-dark border">${_esc(c)}</span>`;
+    });
+    html += '</div>';
+    (issues || []).forEach(i => {
+        const sev = i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'secondary';
+        html += `<div class="mt-1 small"><span class="badge bg-${sev} me-1">${i.severity === 'critical' ? '严重' : i.severity === 'warning' ? '注意' : '提示'}</span>${_esc(i.message)}</div>`;
+    });
+    html += '</div>';
+    return html;
+}
+
+function _audioQualityCard(label, q) {
+    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
+    if (q.verdict === 'unknown') {
+        return _qualityCard(label, q, badge,
+            [`${q.codec || ''} 编码不可解（仅 PCMU/PCMA 支持音质检测）`], []);
+    }
+    const chips = [];
+    if (q.tones?.howl_count) chips.push(`啸叫/单频音 ${q.tones.howl_count} 处`);
+    if (q.tones?.hum_count) chips.push(`低频嗡声 ${q.tones.hum_count} 处`);
+    if (q.clipping?.run_count) chips.push(`削波 ${q.clipping.run_count} 处`);
+    if (q.clicks?.count) chips.push(`爆点 ${q.clicks.count} 个`);
+    if (q.noise_floor_dbfs != null) chips.push(`底噪 ${q.noise_floor_dbfs} dBFS`);
+    if (q.speech_level_dbfs != null) chips.push(`话音 ${q.speech_level_dbfs} dBFS`);
+    if (!chips.length) chips.push('未检测到异常');
+    return _qualityCard(label, q, badge, chips, q.issues);
+}
+
+function _videoQualityCard(label, q) {
+    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
+    const chips = [];
+    if (q.total_lost) chips.push(`丢包 ${q.total_lost} 包（${q.loss_rate_pct}%)`);
+    if (q.broken_nals) chips.push(`破损帧 ${q.broken_nals} 个`);
+    chips.push(`IDR 关键帧 ${q.idr_count ?? 0} 个`);
+    if (q.idr_interval_max_s != null) chips.push(`最长间隔 ${q.idr_interval_max_s}s`);
+    if (q.est_artifacts_ms) chips.push(`估算花屏 ${(q.est_artifacts_ms / 1000).toFixed(1)}s`);
+    if (q.decode_check === 'ok') chips.push('解码校验通过');
+    else if (q.decode_check === 'errors') chips.push(`解码错误 ${q.decode_errors} 处`);
+    else if (q.decode_check === 'unavailable') chips.push('解码校验跳过（无 ffmpeg）');
+    return _qualityCard(label, q, badge, chips, q.issues);
 }
 
 function renderRtcp(rtcp) {
