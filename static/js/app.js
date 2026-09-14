@@ -793,19 +793,20 @@ async function runAnalysis() {
 
     // 摘要
     const summary = data.summary;
-    let summaryHtml = '<div class="row g-2">';
-    summaryHtml += _summaryCard('FS 内部延迟', summary.fs_delay_mean.toFixed(1) + 'ms',
-                                'P95: ' + summary.fs_delay_p95.toFixed(1) + 'ms', 'primary');
-    summaryHtml += _summaryCard('抖动流数', summary.jitter_streams, '已分析', 'success');
-    summaryHtml += _summaryCard('丢包状态',
-                                summary.packet_loss_clean ? '✓ 无丢包' : '✗ 有丢包',
+    let summaryHtml = '<div class="row g-3">';
+    summaryHtml += _summaryCard('bi-speedometer2', 'FS 内部延迟',
+                                summary.fs_delay_mean.toFixed(1) + '<span class="stat-unit">ms</span>',
+                                'P95 ' + summary.fs_delay_p95.toFixed(1) + 'ms', 'primary');
+    summaryHtml += _summaryCard('bi-activity', '抖动流数', summary.jitter_streams, '已分析', 'success');
+    summaryHtml += _summaryCard('bi-shield-exclamation', '丢包状态',
+                                summary.packet_loss_clean ? '无丢包' : '有丢包',
                                 '', summary.packet_loss_clean ? 'success' : 'danger');
-    summaryHtml += _summaryCard('时间戳',
-                                summary.ts_clean === false ? '⚠ 异常' : '✓ 连续',
+    summaryHtml += _summaryCard('bi-clock-history', '时间戳',
+                                summary.ts_clean === false ? '异常' : '连续',
                                 '', summary.ts_clean === false ? 'warning' : 'success');
-    summaryHtml += _summaryCard('综合评估',
-                                summary.overall === 'healthy' ? '✓ 健康' :
-                                summary.overall === 'warning' ? '⚠ 注意' : '✗ 异常',
+    summaryHtml += _summaryCard('bi-clipboard2-pulse', '综合评估',
+                                summary.overall === 'healthy' ? '健康' :
+                                summary.overall === 'warning' ? '注意' : '异常',
                                 '', summary.overall === 'healthy' ? 'success' :
                                 summary.overall === 'warning' ? 'warning' : 'danger');
     summaryHtml += '</div>';
@@ -1000,14 +1001,15 @@ function _mediaItem(entry, kind) {
     `;
 }
 
-function _summaryCard(title, value, subtitle, color) {
+function _summaryCard(icon, title, value, subtitle, color) {
     return `
-        <div class="col-6 col-md-3">
-            <div class="card border-${color}">
-                <div class="card-body text-center py-2">
-                    <small class="text-muted">${title}</small>
-                    <h4 class="text-${color} mb-0">${value}</h4>
-                    ${subtitle ? `<small class="text-muted">${subtitle}</small>` : ''}
+        <div class="col-6 col-md-4 col-xl">
+            <div class="stat-card stat-${color}">
+                <div class="stat-icon"><i class="bi ${icon}"></i></div>
+                <div>
+                    <div class="stat-title">${title}</div>
+                    <div class="stat-value">${value}</div>
+                    ${subtitle ? `<div class="stat-sub">${subtitle}</div>` : ''}
                 </div>
             </div>
         </div>

@@ -2,21 +2,20 @@
 {% block title %}RTP Analyzer - Home{% endblock %}
 
 {% block content %}
-<div class="row">
-    <div class="col-lg-8 mx-auto">
-        <div class="text-center mb-4">
-            <h1 class="display-5 fw-bold">
-                <i class="bi bi-soundwave text-primary"></i> 
-                RTP 音视频流分析
-            </h1>
-            <p class="lead text-muted">
-                上传抓包文件，自动分析延迟、抖动、丢包
-            </p>
-        </div>
+<div class="page-main">
+    <div class="hero text-center mb-4">
+        <h1 class="hero-title">
+            <i class="bi bi-soundwave"></i>
+            RTP 音视频流分析
+        </h1>
+        <p class="hero-sub">
+            上传抓包文件，自动分析延迟、抖动、丢包
+        </p>
+    </div>
 
         <!-- Step 1: 文件上传 -->
-        <div class="card shadow-sm mb-4" id="upload-section">
-            <div class="card-header bg-primary text-white">
+        <div class="card mb-4" id="upload-section">
+            <div class="card-header bg-primary">
                 <h5 class="mb-0"><i class="bi bi-1-circle"></i> 上传抓包文件</h5>
             </div>
             <div class="card-body">
@@ -71,8 +70,8 @@
         </div>
 
         <!-- Step 2: 识别结果 -->
-        <div class="card shadow-sm mb-4 d-none" id="detection-section">
-            <div class="card-header bg-success text-white">
+        <div class="card mb-4 d-none" id="detection-section">
+            <div class="card-header bg-success">
                 <h5 class="mb-0"><i class="bi bi-2-circle"></i> 流识别结果</h5>
             </div>
             <div class="card-body">
@@ -89,7 +88,7 @@
         </div>
 
         <!-- Step 3: 分析配置 -->
-        <div class="card shadow-sm mb-4 d-none" id="config-section">
+        <div class="card mb-4 d-none" id="config-section">
             <div class="card-header bg-warning">
                 <h5 class="mb-0"><i class="bi bi-3-circle"></i> 选择分析参数</h5>
             </div>
@@ -149,8 +148,8 @@
         </div>
 
         <!-- Step 4: 结果 -->
-        <div class="card shadow-sm mb-4 d-none" id="result-section">
-            <div class="card-header bg-info text-white">
+        <div class="card mb-4 d-none" id="result-section">
+            <div class="card-header bg-info">
                 <h5 class="mb-0"><i class="bi bi-4-circle"></i> 分析结果</h5>
             </div>
             <div class="card-body text-center">
@@ -161,8 +160,8 @@
         </div>
 
         <!-- Step 5: 音视频播放 -->
-        <div class="card shadow-sm mb-4 d-none" id="media-section">
-            <div class="card-header bg-purple text-white" style="background-color: #6f42c1;">
+        <div class="card mb-4 d-none" id="media-section">
+            <div class="card-header bg-purple">
                 <h5 class="mb-0"><i class="bi bi-collection-play"></i> 音视频回放</h5>
             </div>
             <div class="card-body">
@@ -172,7 +171,6 @@
                 <div id="media-container"></div>
             </div>
         </div>
-    </div>
 </div>
 {% endblock %}
 

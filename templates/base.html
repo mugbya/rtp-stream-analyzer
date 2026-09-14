@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234f46e5'/><g stroke='white' stroke-width='9' stroke-linecap='round'><line x1='22' y1='42' x2='22' y2='58'/><line x1='38' y1='30' x2='38' y2='70'/><line x1='54' y1='22' x2='54' y2='78'/><line x1='70' y1='34' x2='70' y2='66'/><line x1='84' y1='44' x2='84' y2='56'/></g></svg>">
     <title>{% block title %}RTP Stream Analyzer{% endblock %}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
@@ -10,22 +12,23 @@
     {% block extra_head %}{% endblock %}
 </head>
 <body>
-    <nav class="navbar navbar-dark bg-dark mb-4">
-        <div class="container">
+    <nav class="navbar navbar-dark navbar-app">
+        <div class="shell">
             <a class="navbar-brand" href="/">
-                <i class="bi bi-soundwave"></i> RTP Stream Analyzer
+                <i class="bi bi-soundwave"></i>
+                <span>RTP Stream Analyzer</span>
             </a>
-            <span class="navbar-text text-light small">
+            <span class="navbar-text d-none d-md-inline-block">
                 音视频流延迟 & 抖动分析平台
             </span>
         </div>
     </nav>
 
-    <div class="container">
+    <main class="shell content-area">
         {% block content %}{% endblock %}
-    </div>
+    </main>
 
-    <footer class="text-center text-muted py-4 mt-5">
+    <footer class="text-center py-4 mt-5">
         <small>RTP Stream Analyzer — VoIP Audio/Video Delay & Jitter Analysis</small>
     </footer>
 
