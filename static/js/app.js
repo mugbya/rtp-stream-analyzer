@@ -444,8 +444,8 @@ function _sipLadder(flow, call) {
     });
     html += `</div>`;
     // RTP 部分：编码标签 + 媒体开始/结束标线，按媒体时间插入消息时间线——
-    // 开始线落在媒体首包之后（紧贴 200 OK 应答一侧），结束线落在媒体末包
-    // 之前（紧贴 BYE 挂断一侧）。time_str 是定宽 HH:MM:SS，可直接比较。
+    // 两条标线成对落在首条 BYE 行之前（开始线在上、结束线在下）。time_str
+    // 是定宽 HH:MM:SS，可直接比较。
     // 带 SDP 编码的消息在行下追加一条独立列表行；rowBefore/rowAfter 记录
     // 每条消息的行区间，供标线/协商行按消息下标锚定。
     const rows = [];
@@ -473,10 +473,10 @@ function _sipLadder(flow, call) {
         rowAfter[i] = rows.length;
     });
     if (call) {
-        // 标线锚定在信令行上，确保两条线之间不夹应答/挂断握手的其余指令：
-        // 开始线紧跟被叫应答的 200 OK 行（answer_time 由后端从该通话信令中
-        // 选出），结束线落在首条 BYE 行之前。RTP 首末包时间（talk_*，无信令
-        // 时后端回退为整段媒体）只用于标签显示，行锚定失败才按时间插。
+        // 标线成对放在首条 BYE 行之前：开始线在上、结束线在下，媒体区间作为
+        // 挂断前的整体标注展示。RTP 首末包时间（talk_*，无信令时后端回退为
+        // 整段媒体）只用于标签显示。不按应答 200 OK 给开始线单独锚位——缺头
+        // 通话抓到的应答是中途 re-INVITE，开始线会被锚到图中间 100 之前
         const sStr = call.talk_start_str || call.start_str;
         const eStr = call.talk_end_str || call.end_str;
         const dur = call.talk_duration_s ?? call.duration_s;
@@ -486,32 +486,13 @@ function _sipLadder(flow, call) {
             chips.push(`<span class="badge text-bg-light border"><i class="bi bi-music-note-beamed"></i> 音频 ${codecs.audio.join(' / ')}</span>`);
         if (codecs.video?.length)
             chips.push(`<span class="badge text-bg-light border"><i class="bi bi-camera-video"></i> 视频 ${codecs.video.join(' / ')}</span>`);
-        // 开始位置：answer_time 对应的 200 OK 行之后 → 首条 200(cseq INVITE) 行
-        // 之后 → 媒体开始时间之后，逐级兜底。锚点先按消息下标算（mk/ek），
-        // 再经 rowBefore/rowAfter 换算成行下标（SDP 消息可能带列表子行）
-        let mk = -1;
-        if (call.answer_time != null)
-            mk = msgs.findIndex(m => m.time === call.answer_time) + 1;
-        if (mk <= 0)
-            mk = msgs.findIndex(m => m.method === '200' && m.cseq_method === 'INVITE') + 1;
-        if (mk <= 0) {
-            mk = sStr ? msgs.findIndex(m => m.time_str > sStr) : -1;
-            if (mk === -1) mk = msgs.length;
-        }
-        // 多抓包时被叫 200 OK 可能以坐席副本的时钟排在 answer_time 行之后
-        // （应答握手尾巴），把锚点后移到握手结束（ACK/200-INVITE 连续段之后），
-        // 保证两条标线之间不出现任何信令行
-        while (mk < msgs.length &&
-               (msgs[mk].method === 'ACK' ||
-                (msgs[mk].method === '200' && msgs[mk].cseq_method === 'INVITE')))
-            mk++;
         // 结束位置：首条 BYE 行之前；无 BYE 再按媒体结束时间插
         let ek = msgs.findIndex(m => m.method === 'BYE');
         if (ek === -1)
             ek = eStr ? msgs.findIndex(m => m.time_str >= eStr) : -1;
-        let si = mk >= msgs.length ? rows.length : rowAfter[mk];
+        // 两条标线同一行位（ei），先插结束线再插开始线 → 开始线在上
         let ei = ek === -1 ? rows.length : rowBefore[ek];
-        si = Math.min(si, ei);
+        let si = ei;
         if (eStr)
             rows.splice(ei, 0, `<div class="sl-marker sl-end"><span class="lb">` +
                 `<i class="bi bi-stop-fill"></i> RTP 媒体结束 ${eStr}（持续 ${dur}s）</span></div>`);
