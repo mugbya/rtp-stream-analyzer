@@ -795,6 +795,89 @@ def test_party_filter_without_sdp():
     print("PASS: caller/callee IP filter evicts other-endpoint streams (no SDP)")
 
 
+def test_preexisting_calls_with_tail_signaling_separate():
+    """服务器侧抓包开始时已有一通进行中的通话（A，信令只剩 BYE），其后紧跟
+    一通完整的新通话（B）与另一通同样缺头、只有 re-INVITE/BYE 半截信令的
+    通话（C）：三通必须拆开——缺头通话的尾段不得焊进时间重叠的新通话，C 的
+    两侧腿（一侧只有带 SDP 的 re-INVITE、一侧只有 BYE）必须合成一通。
+
+    复现 qigndao2_2026_09_14_02.pcap 的真实场景：此前 A 的尾段会并进 B、C
+    的 W 侧腿会跟着焊进去，剩 D 侧单独一通没有信令。"""
+    Y, Z, D, W = '10.0.0.22', '10.0.0.33', '10.0.0.44', '10.0.0.55'
+
+    def ev(time, method, cid, cseq, src, dst, sdp=None):
+        e = {'time': time, 'method': method, 'call_id': cid, 'cseq': cseq,
+             'cseq_method': 'INVITE' if method == 'INVITE'
+             else ('BYE' if method == 'BYE' else method),
+             'src': src, 'dst': dst, 'reason': ''}
+        if sdp:
+            e['sdp'] = sdp
+        return e
+
+    streams = [
+        # 通话 A（抓包前已在进行，媒体 100~121，只剩挂断信令）
+        (0xA1, 49236, 31330, 100, 121, 7000, Y, SERVER, 8, 0.02),
+        (0xA2, 31330, 49236, 100, 121, 300, SERVER, Y, 0, 0.02),
+        (0xA3, 60336, 24340, 100, 121, 5000, Z, SERVER, 0, 0.02),
+        (0xA4, 24340, 60336, 100, 121, 400, SERVER, Z, 0, 0.02),
+        # 通话 C（同样缺头，媒体 100~211；W 侧只有带 SDP 的 re-INVITE，
+        # D 侧只剩 BYE）
+        (0xC1, 63683, 22840, 100, 211, 9000, W, SERVER, 8, 0.02),
+        (0xC2, 22840, 63683, 100, 211, 800, SERVER, W, 0, 0.02),
+        (0xC3, 44058, 16848, 100, 211, 11000, D, SERVER, 8, 0.02),
+        (0xC4, 16848, 44058, 100, 211, 900, SERVER, D, 0, 0.02),
+        # 通话 B（完整新通话：INVITE 156，媒体 157~225）
+        (0xB1, 49666, 20146, 157, 224.8, 0, Y, SERVER, 8, 0.02),
+        (0xB2, 20146, 49666, 157, 224.8, 0, SERVER, Y, 8, 0.02),
+        (0xB3, 64076, 30028, 162.8, 225, 0, Z, SERVER, 0, 0.02),
+        (0xB4, 30028, 64076, 162.8, 225, 0, SERVER, Z, 0, 0.02),
+    ]
+    sip = [
+        # A 的半截信令：两侧腿各一条 BYE 事务
+        ev(121.2, 'BYE', 'a-y', 99, Y, SERVER),
+        ev(121.25, '200', 'a-y', 99, SERVER, Y),
+        ev(121.3, 'BYE', 'a-z', 99, Z, SERVER),
+        ev(121.35, '200', 'a-z', 99, SERVER, Z),
+        # C 的半截信令：W 侧 re-INVITE（SDP 宣告本侧 FS 端口），D 侧只剩 BYE
+        ev(142, 'INVITE', 'c-w', 50, SERVER, W,
+           sdp=_sdp([(SERVER, 22840)], audio='PCMA')),
+        ev(142.5, '200', 'c-w', 50, W, SERVER,
+           sdp=_sdp([(W, 63683)], audio='PCMA')),
+        ev(211.2, 'BYE', 'c-d', 51, D, SERVER),
+        ev(211.25, '200', 'c-d', 51, SERVER, D),
+        # B 的完整信令（B2BUA 两腿各一个 Call-ID）
+        ev(156, 'INVITE', 'b-y', 1, Y, SERVER, sdp=_sdp([(Y, 49666)])),
+        ev(157, '200', 'b-y', 1, SERVER, Y, sdp=_sdp([(SERVER, 20146)])),
+        ev(157, 'INVITE', 'b-z', 1, SERVER, Z, sdp=_sdp([(SERVER, 30028)])),
+        ev(162, '200', 'b-z', 1, Z, SERVER, sdp=_sdp([(Z, 64076)])),
+        ev(224, 'BYE', 'b-y', 2, Y, SERVER),
+        ev(224.25, '200', 'b-y', 2, SERVER, Y),
+        ev(224.5, 'BYE', 'b-z', 2, SERVER, Z),
+        ev(225, '200', 'b-z', 2, Z, SERVER),
+    ]
+    rd = make_rtp_data(streams, 100, 300, sip_events=sip)
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 3, f"expected 3 calls, got {len(calls)}"
+    a = next(c for c in calls if 'a-y' in (c.get('sip_call_ids') or []))
+    c = next(c for c in calls if 'c-w' in (c.get('sip_call_ids') or []))
+    b = next(c for c in calls if 'b-y' in (c.get('sip_call_ids') or []))
+    assert set(a['sip_call_ids']) == {'a-y', 'a-z'}, a['sip_call_ids']
+    assert set(c['sip_call_ids']) == {'c-w', 'c-d'}, c['sip_call_ids']
+    assert set(b['sip_call_ids']) == {'b-y', 'b-z'}, b['sip_call_ids']
+    assert set(a['ssrcs']) == {0xA1, 0xA2, 0xA3, 0xA4}, a['ssrcs']
+    assert set(c['ssrcs']) == {0xC1, 0xC2, 0xC3, 0xC4}, c['ssrcs']
+    assert set(b['ssrcs']) == {0xB1, 0xB2, 0xB3, 0xB4}, b['ssrcs']
+    # A/C 缺头（上行 seq 非零、无开头 INVITE）、挂断已抓到；B 完整
+    assert a['completeness']['status'] == 'truncated_head', a['completeness']
+    assert c['completeness']['status'] == 'truncated_head', c['completeness']
+    assert b['completeness']['status'] == 'complete', b['completeness']
+    # A 的信令只有两条 BYE 事务；B 的信令从 INVITE 到自己的 BYE 为止
+    assert [m['method'] for m in a['sip_flow']] == ['BYE', '200', 'BYE', '200']
+    assert b['sip_flow'][0]['method'] == 'INVITE'
+    assert [m['method'] for m in b['sip_flow'][-2:]] == ['BYE', '200']
+    print("PASS: pre-existing tail call + truncated call + full call separated")
+
+
 def _b2bua_relay_events(cid_a, cid_b, caller, term_port, fs_a_ports, seat_port,
                         fs_b_ports, t_inv, t_bye):
     """真实 B2BUA 的两腿信令：A 腿（主叫↔FS）与 B 腿（FS↔被叫）是两个
@@ -1069,6 +1152,7 @@ if __name__ == '__main__':
     test_concurrent_calls_split_by_sdp()
     test_foreign_stream_evicted_from_call()
     test_party_filter_without_sdp()
+    test_preexisting_calls_with_tail_signaling_separate()
     test_sequential_b2bua_calls_split_with_bridge_streams()
     test_fs_media_transcode_between_legs()
     test_fs_media_same_codec()
