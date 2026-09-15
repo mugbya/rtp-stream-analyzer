@@ -777,7 +777,9 @@ def _compare_leg_codecs(caller: dict, callee: dict) -> dict | None:
 def _call_party_pair(flow: list, server_ip: str = None) -> tuple:
     """从信令流程识别主叫/被叫 IP（口径与 media_extractor.extract_call_parties
     一致，只取 IP）：主叫 = 第一个非服务器侧 INVITE 的源（回退首个请求），
-    被叫 = INVITE 事务 200 OK 的非服务器发送方。识别不出返回 None。"""
+    被叫 = INVITE 事务 200 OK 的非服务器发送方；未接通（CANCEL/486/480/487
+    收场）没有 200 OK 时，被叫退而取信令里出现最多的非服务器对端。识别不出
+    返回 None。"""
     if not flow:
         return None, None
     inv = next((m for m in flow if m['method'] == 'INVITE'
@@ -790,8 +792,17 @@ def _call_party_pair(flow: list, server_ip: str = None) -> tuple:
     ok = next((m for m in flow if m['method'] == '200'
                and m.get('cseq_method') == 'INVITE'
                and m.get('src') != server_ip), None)
-    return (inv.get('src') if inv else None,
-            ok.get('src') if ok else None)
+    callee = ok.get('src') if ok else None
+    if callee is None:
+        caller_ip = inv.get('src') if inv else None
+        peers = {}
+        for m in flow:
+            for ip in (m.get('src'), m.get('dst')):
+                if ip and ip != server_ip and ip != caller_ip:
+                    peers[ip] = peers.get(ip, 0) + 1
+        if peers:
+            callee = max(peers, key=peers.get)
+    return (inv.get('src') if inv else None, callee)
 
 
 def _rebuild_call(call: dict) -> None:

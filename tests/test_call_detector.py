@@ -1132,6 +1132,36 @@ def test_fs_media_clock_rate_mismatch():
     print("PASS: unknown rate on one side falls back to name match -> same")
 
 
+def test_call_party_pair_unanswered_callee_fallback():
+    """未接通的通话（CANCEL/487 收场，无 INVITE 的 200 OK）：被叫取信令对端
+    兜底，不因缺 200 OK 而丢失；接通通话的判定不受影响。"""
+    from analyzer.call_detector import _call_party_pair
+    flow = [
+        {'method': 'INVITE', 'kind': 'request', 'src': SERVER, 'dst': TERM,
+         'from': {}, 'to': {}},
+        {'method': '180', 'kind': 'provisional', 'src': TERM, 'dst': SERVER,
+         'from': {}, 'to': {}},
+        {'method': 'CANCEL', 'kind': 'request', 'src': SERVER, 'dst': TERM,
+         'from': {}, 'to': {}},
+        # CANCEL 的 200（cseq 不符）与 487 都不能当接听确认
+        {'method': '200', 'kind': 'success', 'cseq_method': 'CANCEL',
+         'src': TERM, 'dst': SERVER, 'from': {}, 'to': {}},
+        {'method': '487', 'kind': 'failure', 'cseq_method': 'INVITE',
+         'src': TERM, 'dst': SERVER, 'from': {}, 'to': {}},
+        {'method': 'ACK', 'kind': 'request', 'src': SERVER, 'dst': TERM,
+         'from': {}, 'to': {}},
+    ]
+    assert _call_party_pair(flow, SERVER) == (SERVER, TERM)
+    answered = flow[:2] + [
+        {'method': '200', 'kind': 'success', 'cseq_method': 'INVITE',
+         'src': TERM, 'dst': SERVER, 'from': {}, 'to': {}},
+        {'method': 'ACK', 'kind': 'request', 'src': SERVER, 'dst': TERM,
+         'from': {}, 'to': {}},
+    ]
+    assert _call_party_pair(answered, SERVER) == (SERVER, TERM)
+    print("PASS: unanswered call callee via peer fallback in party pair")
+
+
 if __name__ == '__main__':
     test_two_sequential_calls()
     test_port_reuse_same_ports()
@@ -1159,4 +1189,5 @@ if __name__ == '__main__':
     test_fs_media_bypass()
     test_fs_media_unknown_single_leg()
     test_fs_media_clock_rate_mismatch()
+    test_call_party_pair_unanswered_callee_fallback()
     print("\n=== ALL CALL DETECTOR TESTS PASSED ===")

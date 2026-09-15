@@ -205,10 +205,16 @@ def test_two_calls_distinct_parties():
 
 
 def test_ident_label_format():
-    # 话机自报的超长 base64 设备串（显示名与 user 同串）不采用
+    # 话机自报的超长 base64 设备串（显示名与 user 同串）不采用：
+    # 解码后仍是超过 20 字符的无空格单 token
     b64 = 'LTU4NTcyODU2NjAwZWYwN2MxMzZkYjIxYzk0NQ'
     assert _ident_label({'name': b64, 'user': b64}) == ''
     assert _ident_label({'name': '', 'user': b64}) == ''
+    # base64 分机号解出可读内容
+    assert _ident_label({'name': 'Extension ' + b64, 'user': b64}) == \
+        'Extension -58572856600ef07c136db21c945'
+    # 解不出（含不可打印字节）保持原样
+    assert _ident_label({'name': '', 'user': 'abcdefgh1234567'}) == 'abcdefgh1234567'
     assert _ident_label({'name': '张三', 'user': '1001'}) == '张三（1001）'
     assert _ident_label({'name': '1002', 'user': '1002'}) == '1002'
     assert _ident_label({'name': '', 'user': '1002'}) == '1002'
@@ -237,6 +243,37 @@ def test_extract_call_parties_fallbacks():
     print("PASS: party extraction fallbacks")
 
 
+def test_unanswered_call_callee_fallback():
+    """未接通的通话（CANCEL/487 收场，无 INVITE 的 200 OK）：被叫取信令
+    对端兜底，不整列丢失；转报主叫身份可读。"""
+    relayed_caller = {'name': 'Extension LTU4NTcyODU2NjAwNDZkYWY4ZjBlZjA4NzU0OQ',
+                      'user': 'LTU4NTcyODU2NjAwNDZkYWY4ZjBlZjA4NzU0OQ', 'host': SERVER}
+    flow = [
+        {'method': 'INVITE', 'kind': 'request', 'src': SERVER, 'dst': SEAT,
+         'from': relayed_caller, 'to': CALLEE_IDENT},
+        {'method': '100', 'kind': 'provisional', 'src': SEAT, 'dst': SERVER,
+         'from': relayed_caller, 'to': CALLEE_IDENT},
+        {'method': '180', 'kind': 'provisional', 'src': SEAT, 'dst': SERVER,
+         'from': relayed_caller, 'to': CALLEE_IDENT},
+        {'method': 'CANCEL', 'kind': 'request', 'src': SERVER, 'dst': SEAT,
+         'from': relayed_caller, 'to': CALLEE_IDENT},
+        {'method': '200', 'kind': 'success', 'cseq_method': 'CANCEL',
+         'src': SEAT, 'dst': SERVER, 'from': relayed_caller, 'to': CALLEE_IDENT},
+        {'method': '487', 'kind': 'failure', 'cseq_method': 'INVITE',
+         'src': SEAT, 'dst': SERVER, 'from': relayed_caller, 'to': CALLEE_IDENT},
+        {'method': 'ACK', 'kind': 'request', 'src': SERVER, 'dst': SEAT,
+         'from': relayed_caller, 'to': CALLEE_IDENT},
+    ]
+    parties = extract_call_parties({'sip_flow': flow}, SERVER)
+    # 200-for-CANCEL（cseq 不符）与 487 都不能当接听确认，被叫靠对端兜底
+    assert parties['caller_ip'] == SERVER
+    assert parties['answerer_ip'] == SEAT
+    assert parties['answerer_ident'] == CALLEE_IDENT
+    # FS 转报的主叫身份解出可读内容（base64 里的号码）
+    assert _ident_label(relayed_caller) == 'Extension -5857285660046daf8f0ef087549'
+    print("PASS: unanswered call keeps callee via peer fallback; relayed caller decoded")
+
+
 if __name__ == '__main__':
     test_fs_streams_labeled_with_caller_callee()
     test_endpoint_captures_share_ssrc_labels()
@@ -245,4 +282,5 @@ if __name__ == '__main__':
     test_two_calls_distinct_parties()
     test_ident_label_format()
     test_extract_call_parties_fallbacks()
+    test_unanswered_call_callee_fallback()
     print("\n=== ALL MEDIA PARTY LABEL TESTS PASSED ===")

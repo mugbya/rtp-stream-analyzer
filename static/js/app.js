@@ -405,11 +405,23 @@ function _sipIdents(msgs, caller, answerer) {
     return idents;
 }
 
+// 平台/话机常把号码编码成 base64 当分机号（From/To 里出现 "Extension LTU4NT..."
+// 这类不可读串）：能解出可读 ASCII 的 token 就地替换，解不出保持原样
+function _decodeIdents(s) {
+    return String(s).replace(/[A-Za-z0-9+/]{16,}={0,2}/g, tok => {
+        try {
+            const bin = atob(tok);
+            if (/^[\x20-\x7e]+$/.test(bin)) return bin;
+        } catch (e) { /* 不是 base64，按原样保留 */ }
+        return tok;
+    });
+}
+
 function _identLabel(id) {
     if (!id) return '';
     if (id.name && id.user && id.name !== id.user && !id.name.includes(id.user))
-        return `${id.name}（${id.user}）`;
-    return id.name || id.user || '';
+        return _decodeIdents(`${id.name}（${id.user}）`);
+    return _decodeIdents(id.name || id.user || '');
 }
 
 function _sipParties(flow) {
@@ -425,7 +437,19 @@ function _sipParties(flow) {
                 flow.find(m => m.kind === 'request') || flow[0];
     const caller = inv.src;
     const ok = flow.find(m => m.method === '200' && m.cseq_method === 'INVITE' && m.src !== server);
-    const answerer = ok ? ok.src : null;
+    let answerer = ok ? ok.src : null;
+    // 未接通的通话（CANCEL/486/480/487 收场）没有 INVITE 的 200 OK：被叫退而
+    // 取信令里出现最多的非服务器对端（正常就是被叫设备），保证被叫腿不会从
+    // 阶梯图整列消失
+    if (!answerer) {
+        const peers = {};
+        flow.forEach(m => [m.src, m.dst].forEach(ip => {
+            if (ip && ip !== server && ip !== caller) peers[ip] = (peers[ip] || 0) + 1;
+        }));
+        const ranked = Object.entries(peers).sort((a, b) => b[1] - a[1]);
+        answerer = ranked.length ? ranked[0][0]
+            : (inv.dst !== server && inv.dst !== caller ? inv.dst : null);
+    }
 
     const cols = [caller];
     if (server && server !== caller) cols.push(server);
@@ -494,10 +518,19 @@ function _sipLadder(flow, call) {
             name = label || _ipName(ip);
             if (name !== ip) ipSub = ip;   // 有身份名时，IP 缩进副行保留
         }
+        // FS 自己发 INVITE 的外呼腿（服务端只抓到 FS→被叫的半边时必然如此）：
+        // From 头是 FS 转报的原始主叫身份，主叫端点不在抓包里，挂注在 FS 列展示
+        let relay = '';
+        if (ip === server && caller === server && idents[ip]) {
+            const lbl = _identLabel(idents[ip]);
+            if (lbl) relay = lbl;
+        }
         const badge = ip === caller ? '<span class="sl-role bg-primary text-white">主叫</span>'
             : ip === answerer ? '<span class="sl-role bg-success text-white">被叫</span>' : '';
         html += `<div class="sl-p"><div class="sl-name"${ipSub ? ` title="${name}"` : ''}>${name}</div>` +
-            (ipSub ? `<div class="sl-ip">${ipSub}</div>` : '') + badge + `</div>`;
+            (ipSub ? `<div class="sl-ip">${ipSub}</div>` : '') +
+            (relay ? `<div class="sl-ip" title="${_esc(relay)}">主叫(转报): ${_esc(relay)}</div>` : '') +
+            badge + `</div>`;
     });
     html += `</div></div><div class="sl-body"><div class="sl-lines">`;
     cols.forEach((ip, i) => {

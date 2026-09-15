@@ -7,6 +7,9 @@ import json
 import struct
 import wave
 import audioop
+import base64
+import binascii
+import re
 import subprocess
 from datetime import datetime
 from collections import defaultdict
@@ -573,6 +576,24 @@ def get_media_urls(manifest: dict, session_id: str, output_date: str) -> dict:
 _PARTY_ROLE_NAMES = {'seat': '坐席端', 'terminal': '终端', 'fs': 'FS'}
 
 
+# base64 形态的 SIP 身份 token（平台/话机把号码编码成 base64 当分机号）
+_B64_TOKEN_RE = re.compile(r'[A-Za-z0-9+/]{16,}={0,2}')
+
+
+def _decode_ident_tokens(label: str) -> str:
+    """解出身份串里 base64 token 的可读内容（"Extension LTU4NT..." 里的号码），
+    解不出（非法 base64 或含不可打印字符）保持原样。"""
+    def _dec(m):
+        tok = m.group(0)
+        try:
+            raw = base64.b64decode(tok + '=' * (-len(tok) % 4), validate=True)
+            txt = raw.decode('ascii')
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            return tok
+        return txt if all(32 <= ord(ch) < 127 for ch in txt) else tok
+    return _B64_TOKEN_RE.sub(_dec, label)
+
+
 def _ident_label(ident: dict) -> str:
     """SIP From/To 头的可读称呼：'张三（1002）' / '1002' / 显示名。
 
@@ -587,6 +608,7 @@ def _ident_label(ident: dict) -> str:
         label = f'{name}（{user}）'
     else:
         label = name or user
+    label = _decode_ident_tokens(label)
     if len(label) > 20 and ' ' not in label:
         return ''
     return label
@@ -619,6 +641,17 @@ def extract_call_parties(call: dict, server_ip: str = None) -> dict:
                and m.get('cseq_method') == 'INVITE'
                and m.get('src') != server_ip), None)
     answerer_ip = ok.get('src') if ok else None
+    if answerer_ip is None:
+        # 未接通的通话（CANCEL/486/480/487 收场）没有 INVITE 的 200 OK：被叫
+        # 退而取信令里出现最多的非服务器对端（与前端阶梯图同口径），保证被
+        # 叫侧标注不丢
+        peers = {}
+        for m in flow:
+            for ip in (m.get('src'), m.get('dst')):
+                if ip and ip != server_ip and ip != caller_ip:
+                    peers[ip] = peers.get(ip, 0) + 1
+        if peers:
+            answerer_ip = max(peers, key=peers.get)
     answerer_ident = {}
     if answerer_ip:
         # 呼向被叫的 INVITE 的 To；抓不到时退回 200 OK 的 To（回显同一头）
