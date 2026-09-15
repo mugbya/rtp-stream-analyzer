@@ -155,6 +155,100 @@ def test_audio_undecodable():
     print("PASS: audio undecodable codec -> unknown")
 
 
+# ---------- RTP 序号/时间戳秩序 ----------
+
+def test_audio_rtp_integrity_clean():
+    """连续流：序号每包 +1、时间戳单调递增，rtp_ok 提示进 issues。"""
+    r = analyze_audio_quality(make_packets(A, audio_items(speech_like(1.0))), A)
+    integ = r['rtp_integrity']
+    assert integ['seq_continuous'] and integ['monotonic'], integ
+    assert integ['lost_packets'] == 0 and integ['ts_backward'] == 0, integ
+    assert integ['median_ts_delta'] == 160 and integ['packet_duration_ms'] == 20.0, integ
+    assert any(i['kind'] == 'rtp_ok' for i in r['issues']), r['issues']
+    print("PASS: rtp integrity clean -> seq/ts order affirmed")
+
+
+def test_audio_rtp_ts_backward():
+    """时间戳倒退（发送端时钟异常）：critical rtp_order issue。"""
+    items = audio_items(speech_like(1.0))
+    seq, ts, pt, payload = items[20]
+    items[20] = (seq, ts - 480, pt, payload)
+    r = analyze_audio_quality(make_packets(A, items), A)
+    integ = r['rtp_integrity']
+    assert not integ['monotonic'] and integ['ts_backward'] >= 1, integ
+    assert any(i['kind'] == 'rtp_order' and i['severity'] == 'critical'
+               for i in r['issues']), r['issues']
+    print("PASS: ts backward detected as critical")
+
+
+def test_audio_rtp_ts_duplicate():
+    """时间戳重复（序号前进、媒体时间原地踏步）：warning rtp_order issue。"""
+    items = audio_items(speech_like(1.0))
+    seq, ts, pt, payload = items[15]
+    items[15] = (seq, ts - 160, pt, payload)
+    r = analyze_audio_quality(make_packets(A, items), A)
+    assert r['rtp_integrity']['ts_duplicate'] == 1, r['rtp_integrity']
+    assert any(i['kind'] == 'rtp_order' and i['severity'] == 'warning'
+               for i in r['issues']), r['issues']
+    print("PASS: ts duplicate detected as warning")
+
+
+def test_audio_rtp_seq_loss():
+    """序号缺口（丢 3 包）：补零 60ms 计入，rtp_loss issue。"""
+    items = audio_items(speech_like(1.0))
+    del items[10:13]
+    r = analyze_audio_quality(make_packets(A, items), A)
+    integ = r['rtp_integrity']
+    assert integ['seq_gaps'] == 1 and integ['lost_packets'] == 3, integ
+    assert not integ['seq_continuous'] and integ['zero_filled_ms'] == 60.0, integ
+    assert any(i['kind'] == 'rtp_loss' for i in r['issues']), r['issues']
+    print("PASS: seq gap loss counted with zero-fill amount")
+
+
+def dtmf_mixed_items(n_audio=100):
+    """音频 + 2 次 DTMF 按键（RFC 4733：事件包 ts=事件起始时刻、落后于
+    当前音频时钟；重传包共用同一 ts），seq 交错——复刻真实抓包里
+    "时间戳倒退 6 处 + 重复 2 处"的形态。"""
+    audio = audio_items(speech_like(n_audio * 0.02 + 0.1))[:n_audio]
+    ev_groups = {29: 3, 69: 2}          # 音频包序号 -> 其后插入的事件包数
+    items, seq = [], 0
+    for i, (aseq, ats, apt, apayload) in enumerate(audio):
+        items.append((seq, ats, apt, apayload))
+        seq += 1
+        if i in ev_groups:
+            ev_ts = 1000 + (i - 1) * 160        # 事件起始：落后音频时钟头
+            for _ in range(ev_groups[i]):
+                items.append((seq, ev_ts, 101, bytes([5, 0, 200, 0])))
+                seq += 1
+    return items
+
+
+def test_audio_rtp_dtmf_events_not_flagged():
+    """混合 RFC4733 事件包：不误报倒退/重复，秩序判定保持正常。"""
+    r = analyze_audio_quality(make_packets(A, dtmf_mixed_items()), A)
+    integ = r['rtp_integrity']
+    assert integ['monotonic'] and integ['ts_backward'] == 0, integ
+    assert integ['ts_duplicate'] == 0, integ
+    assert integ['seq_continuous'] and integ['lost_packets'] == 0, integ
+    assert integ['other_pt_packets'] == 5, integ
+    assert not any(i['kind'] == 'rtp_order' for i in r['issues']), r['issues']
+    print("PASS: DTMF event packets exempted from ts order check")
+
+
+def test_audio_rtp_rollback_still_detected_in_mixed():
+    """混合流中纯音频包上的真实时间戳回退仍要被检出。"""
+    items = dtmf_mixed_items()
+    audio_idx = [k for k, it in enumerate(items) if it[2] == 0]
+    k = audio_idx[85]
+    items[k] = (items[k][0], items[k][1] - 800, items[k][2], items[k][3])
+    r = analyze_audio_quality(make_packets(A, items), A)
+    integ = r['rtp_integrity']
+    assert not integ['monotonic'] and integ['ts_backward'] >= 1, integ
+    assert any(i['kind'] == 'rtp_order' and i['severity'] == 'critical'
+               for i in r['issues']), r['issues']
+    print("PASS: real ts rollback among audio packets still detected")
+
+
 # ---------- 视频花屏风险 ----------
 
 def fu_fragments(nal_body, frag_size=40):
@@ -249,6 +343,27 @@ def test_video_missing_start_fragment():
     print("PASS: video missing start fragment -> broken NAL")
 
 
+def test_video_rtp_frame_ts_order():
+    """视频同帧多包共用时间戳（frame 模式）：不误报倒退/重复，秩序正常。"""
+    items = []
+    ts, seq = 3000, 0
+    for i in range(60):
+        n_pkts = 3 if i % 30 == 0 else 1    # 关键帧拆 3 包，共用同一 ts
+        for _ in range(n_pkts):
+            payload = (bytes([0x65]) + b'\xaa' * 30 if i % 30 == 0
+                       else bytes([0x41]) + b'\xbb' * 30)
+            items.append((seq, ts, 96, payload))
+            seq += 1
+        ts += 3000
+    r = analyze_video_quality(make_packets(A, items, dt=0.04), A)
+    integ = r['rtp_integrity']
+    assert integ['monotonic'] and integ['ts_backward'] == 0, integ
+    assert integ['ts_duplicate'] == 0 and integ['seq_continuous'], integ
+    assert integ['lost_packets'] == 0, integ
+    assert r['verdict'] == 'ok' and not r['issues'], r
+    print("PASS: video frame-mode same-ts packets not flagged")
+
+
 # ---------- 报告接线 ----------
 
 def test_report_wiring():
@@ -287,9 +402,16 @@ if __name__ == '__main__':
     test_audio_click()
     test_audio_noisy_floor()
     test_audio_undecodable()
+    test_audio_rtp_integrity_clean()
+    test_audio_rtp_ts_backward()
+    test_audio_rtp_ts_duplicate()
+    test_audio_rtp_seq_loss()
+    test_audio_rtp_dtmf_events_not_flagged()
+    test_audio_rtp_rollback_still_detected_in_mixed()
     test_video_broken_fragment()
     test_video_clean()
     test_video_no_idr()
     test_video_missing_start_fragment()
+    test_video_rtp_frame_ts_order()
     test_report_wiring()
     print("ALL TESTS PASSED")

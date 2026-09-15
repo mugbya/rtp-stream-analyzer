@@ -384,7 +384,8 @@ function renderMediaQuality(mq) {
     const videoEntries = Object.entries(mq.video || {});
     if (!audioEntries.length && !videoEntries.length) return '';
     let html = '<h6 class="mt-3">音画质量分析（杂音 / 啸叫 / 花屏）</h6>';
-    html += '<p class="small text-muted mb-2">对重建媒体做针对性检测：音频查啸叫/持续单频音、削波破音、爆点、低频嗡声、底噪与音量；' +
+    html += '<p class="small text-muted mb-2">对重建媒体做针对性检测：音频查啸叫/持续单频音、削波破音、爆点、低频嗡声、底噪与音量，' +
+        '并核对 RTP 序号/时间戳秩序（序号每包 +1、时间戳单调递增是重建与检测可信的前提）；' +
         '视频把丢包映射为花屏影响（破损帧数据、关键帧间隔、ffmpeg 解码校验）。事件时间为相对该流开始的秒数。</p>';
     audioEntries.forEach(([label, q]) => { html += _audioQualityCard(label, q); });
     videoEntries.forEach(([label, q]) => { html += _videoQualityCard(label, q); });
@@ -421,6 +422,17 @@ function _audioQualityCard(label, q) {
     if (q.clicks?.count) chips.push(`爆点 ${q.clicks.count} 个`);
     if (q.noise_floor_dbfs != null) chips.push(`底噪 ${q.noise_floor_dbfs} dBFS`);
     if (q.speech_level_dbfs != null) chips.push(`话音 ${q.speech_level_dbfs} dBFS`);
+    const integ = q.rtp_integrity;
+    if (integ) {
+        if (integ.monotonic && !integ.lost_packets && !integ.ts_duplicate) {
+            chips.push(`RTP 秩序正常（每包 +${integ.median_ts_delta} ≈ ${integ.packet_duration_ms}ms）`);
+        } else {
+            if (integ.lost_packets) chips.push(`序号缺口 ${integ.seq_gaps} 处（丢 ${integ.lost_packets} 包）`);
+            if (integ.ts_backward) chips.push(`时间戳倒退 ${integ.ts_backward} 处`);
+            if (integ.ts_duplicate) chips.push(`时间戳重复 ${integ.ts_duplicate} 处`);
+        }
+        if (integ.other_pt_packets) chips.push(`其他PT包 ${integ.other_pt_packets} 个（DTMF 事件等，不参与秩序判定）`);
+    }
     if (!chips.length) chips.push('未检测到异常');
     return _qualityCard(label, q, badge, chips, q.issues);
 }
@@ -429,6 +441,7 @@ function _videoQualityCard(label, q) {
     const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
     const chips = [];
     if (q.total_lost) chips.push(`丢包 ${q.total_lost} 包（${q.loss_rate_pct}%)`);
+    if (q.rtp_integrity?.ts_backward) chips.push(`时间戳倒退 ${q.rtp_integrity.ts_backward} 处`);
     if (q.broken_nals) chips.push(`破损帧 ${q.broken_nals} 个`);
     chips.push(`IDR 关键帧 ${q.idr_count ?? 0} 个`);
     if (q.idr_interval_max_s != null) chips.push(`最长间隔 ${q.idr_interval_max_s}s`);

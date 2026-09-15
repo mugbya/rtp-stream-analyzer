@@ -107,6 +107,12 @@ def check_ts_continuity(packets: dict, ssrc: int) -> dict:
         if ts < prev_ts and d > 0:
             result['wrap_count'] += 1
 
+        # 非 main PT 包（如 RFC 4733 DTMF telephone-event：ts 为"事件起始"
+        # 时刻、重传包重复同一 ts）时间戳语义与主媒体流不同，不参与倒退/
+        # 重复/跳变判定——否则正常按键会被误报成发送端时钟异常
+        if full_mode and (pkts[i][3] != pt or pkts[i - 1][3] != pt):
+            continue
+
         event = None
         if d < 0:
             if seq_gap >= SEQ_BACKWARD:

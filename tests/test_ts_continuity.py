@@ -282,6 +282,32 @@ def test_report_marks_ts_anomaly():
     print("PASS: report marks ts anomaly in issues + timestamp_continuity section")
 
 
+def test_dtmf_events_not_flagged():
+    """音频混入 RFC4733 DTMF 事件包（ts=事件起始、重传共用 ts）：
+    事件包不参与倒退/重复/跳变判定，正常按键不误报。"""
+    packets = {}
+    t, seq, ts = 100.0, 100, 1000
+    plan = []
+    for i in range(100):
+        plan.append((t, seq, ts, 0))
+        seq += 1
+        ts += 160
+        t += 0.02
+        if i in (29, 69):                       # 两次按键：音频流中插入事件重传包
+            ev_ts = ts - 400                    # 事件起始落后于当前音频时钟头
+            for _ in range(3 if i == 29 else 2):
+                plan.append((t, seq, ev_ts, 101))
+                seq += 1
+                t += 0.02
+    for tt, s, tts, p in plan:
+        packets[(SSRC, s)] = (tt, tts, p, '10.0.0.2', '10.0.0.1', 5000, 6000)
+    r = check_ts_continuity(packets, SSRC)
+    assert r['event_count'] == 0, r['events'][:5]
+    assert r['backward_count'] == 0 and r['duplicate_count'] == 0, r
+    assert r['jump_count'] == 0 and r['is_continuous'], r
+    print("PASS: DTMF event packets not flagged as ts anomaly")
+
+
 if __name__ == '__main__':
     test_continuous_stream()
     test_silence_jump_marked_not_loss()
@@ -294,6 +320,7 @@ if __name__ == '__main__':
     test_ts_wrap()
     test_duplicate_ts()
     test_ts_backward_with_in_order_seq()
+    test_dtmf_events_not_flagged()
     test_video_frame_mode()
     test_audio_rebuild_30ms_packetization()
     test_audio_rebuild_ts_jump_filled()

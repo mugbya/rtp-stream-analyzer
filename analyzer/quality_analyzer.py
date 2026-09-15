@@ -14,6 +14,11 @@
 4. 爆点/咔哒声——孤立的脉冲尖峰：本身幅度极大而前后邻域都很小。
 5. 底噪——静音帧（无话音）的电平中位数：偏高说明拾音环境/设备底噪明显。
 6. 音量——话音帧平均电平过低/过高。
+7. RTP 序号/时间戳秩序——序号应每包 +1（缺口即丢包），时间戳按序号
+   排列应单调递增（倒退 = 发送端时钟异常）。二者是"重建出来的音视频
+   可不可信"的前提：时间戳倒退会让按 seq 拼接的 PCM 错位，杂音类检测
+   可能产生假事件；序号缺口意味着拼接里含补零静音，底噪/电平统计要
+   结合补零量解读。
 
 视频（RTP 层证据，H.264）：
 1. 丢包 → 花屏：视频丢包不像音频那样只缺一瞬间，受损宏块会一直花到
@@ -77,6 +82,7 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
 
     Returns:
         {'packet_count', 'codec', 'decodable', 'duration_s',
+         'rtp_integrity': 序号/时间戳秩序判定（见 _rtp_integrity），
          'clipping': {'run_count', 'sample_count', 'events': [...]},
          'clicks': {'count', 'events': [...]},
          'tones': {'count', 'howl_count', 'hum_count', 'events': [...]},
@@ -91,6 +97,7 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
         'clicks': {'count': 0, 'events': []},
         'tones': {'count': 0, 'howl_count': 0, 'hum_count': 0, 'events': []},
         'noise_floor_dbfs': None, 'speech_level_dbfs': None,
+        'rtp_integrity': None,
         'issues': [], 'verdict': 'clean',
     }
 
@@ -118,9 +125,12 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
     spp = positive[len(positive) // 2] if positive else 0
     if not (0 < spp <= SAMPLE_RATE // 2):
         spp = 160
+    result['rtp_integrity'] = _rtp_integrity(
+        [(s, stream[s][1], stream[s][2]) for s in seqs], spp, pt, 'packet')
 
     # 拼接 PCM（含 DTX 补零），媒体时间 = 采样位置 / 采样率
     chunks = []
+    zero_filled = 0
     prev_ts = None
     for seq in seqs:
         ts = stream[seq][1]
@@ -128,6 +138,7 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
             gap = signed32(ts - prev_ts) - spp
             if 0 < gap <= 10 * SAMPLE_RATE:      # DTX/静音抑制缺口补零
                 chunks.append(np.zeros(gap, dtype=np.float64))
+                zero_filled += gap
         payload = stream[seq][7]
         if stream[seq][2] == pt:
             try:
@@ -141,6 +152,8 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
 
     x = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float64)
     result['duration_s'] = round(x.size / SAMPLE_RATE, 2)
+    result['rtp_integrity']['zero_filled_ms'] = round(
+        zero_filled / SAMPLE_RATE * 1000, 1)
     if x.size < FRAME:
         return result
 
@@ -326,9 +339,108 @@ def _dbfs(rms: float) -> float:
     return round(20 * math.log10(max(rms, 1) / 32768), 1)
 
 
+def _rtp_integrity(items, spp: int, main_pt: int, mode: str = 'packet') -> dict:
+    """按序号顺序核对 RTP 序号与时间戳秩序（发送端视角）。
+
+    Args:
+        items: 按 seq 排序的 [(seq, ts, pt)]，覆盖该 SSRC 的全部包。
+        spp: 每包样本数（实测中位数），用于展示每包媒体时长。
+        main_pt: 主载荷类型。时间戳秩序只核对主 PT 包。
+        mode: 'packet'（音频，逐包独立媒体时间）| 'frame'（视频等同帧
+            多包共用时间戳，重复不算异常，只查倒退）。
+
+    序号应每包 +1（模 65536），缺口即网络丢包——音频拼接按时间戳差额
+    补零，视频直接对应花屏。时间戳是发送端媒体时钟：按序号排列应单调
+    递增（音频逐包 +每包时长），倒退说明发送端时钟异常——此时按 seq
+    拼接的 PCM/帧序与真实播放序错位，本流的质量检测结论可信度下降。
+    32 位回绕属正常计数，只统计不报异常。
+
+    非 main PT 包（典型为 RFC 4733 DTMF telephone-event：ts 是"事件起始"
+    时刻、重传包重复同一 ts，与音频时钟语义不同）不参与时间戳秩序判定，
+    只计数记录——否则正常按键会被误判成"时间戳倒退/重复"。
+
+    Returns:
+        {'seq_continuous', 'seq_gaps', 'lost_packets', 'loss_rate_pct',
+         'monotonic', 'ts_backward', 'ts_duplicate', 'ts_wrap',
+         'median_ts_delta', 'packet_duration_ms', 'zero_filled_ms',
+         'other_pt_packets'}
+    """
+    seq_gaps = lost = 0
+    for (a, _, _), (b, _, _) in zip(items, items[1:]):
+        d_seq = (b - a) & 0xFFFF
+        if d_seq > 1:
+            seq_gaps += 1
+            lost += d_seq - 1
+    ts_backward = ts_duplicate = ts_wrap = other_pt = 0
+    prev_ts = None
+    for _, ts, pkt_pt in items:
+        if pkt_pt != main_pt:
+            other_pt += 1
+            continue
+        if prev_ts is not None:
+            d_ts = signed32(ts - prev_ts)
+            if d_ts < 0:
+                ts_backward += 1
+            elif d_ts == 0:
+                if mode == 'packet':
+                    ts_duplicate += 1
+            elif ts < prev_ts:
+                ts_wrap += 1
+        prev_ts = ts
+    return {
+        'seq_continuous': lost == 0,
+        'seq_gaps': seq_gaps,
+        'lost_packets': lost,
+        'loss_rate_pct': round(lost / (len(items) + lost) * 100, 2) if lost else 0.0,
+        'monotonic': ts_backward == 0,
+        'ts_backward': ts_backward,
+        'ts_duplicate': ts_duplicate,
+        'ts_wrap': ts_wrap,
+        'median_ts_delta': spp,
+        'packet_duration_ms': round(spp / SAMPLE_RATE * 1000, 2) if spp else None,
+        'zero_filled_ms': 0.0,
+        'other_pt_packets': other_pt,
+    }
+
+
 def _audio_issues(r: dict) -> list:
     """把检测结果翻译成面向用户的结论（不含流名，由报告层加前缀）。"""
     issues = []
+    integ = r.get('rtp_integrity') or {}
+    if integ.get('ts_backward'):
+        issues.append({
+            'kind': 'rtp_order', 'severity': 'critical',
+            'message': (f"RTP 时间戳倒退 {integ['ts_backward']} 处（按序号"
+                        f"排列后媒体时钟往回走）——发送端时钟异常，按序号"
+                        f"拼接的音频会错位，可能产生卡顿杂音，本流杂音类"
+                        f"检测结论的可信度也下降")})
+    if integ.get('ts_duplicate'):
+        issues.append({
+            'kind': 'rtp_order', 'severity': 'warning',
+            'message': (f"RTP 时间戳重复 {integ['ts_duplicate']} 处（序号"
+                        f"前进但媒体时间原地踏步）——发送端时钟停走或冗余"
+                        f"重传，听感为重复音/卡顿")})
+    if integ.get('lost_packets'):
+        issues.append({
+            'kind': 'rtp_loss',
+            'severity': 'critical' if integ['loss_rate_pct'] >= 3 else 'warning',
+            'message': (f"RTP 序号不连续：缺口 {integ['seq_gaps']} 处、丢 "
+                        f"{integ['lost_packets']} 包"
+                        f"（{integ['loss_rate_pct']:.2f}%）——缺失音频已按"
+                        f"静音补零 {integ.get('zero_filled_ms') or 0} ms，"
+                        f"丢包处听感为断音/吞字，底噪与电平统计含补零段")})
+    elif integ and integ.get('monotonic') and not integ.get('ts_duplicate'):
+        extra = (f"（静音抑制补零 {integ['zero_filled_ms']} ms）"
+                 if integ.get('zero_filled_ms') else '')
+        other = (f"（另有 {integ['other_pt_packets']} 个其他载荷类型包"
+                 f"（如 DTMF 电话事件），不参与秩序判定）"
+                 if integ.get('other_pt_packets') else '')
+        issues.append({
+            'kind': 'rtp_ok', 'severity': 'info',
+            'message': (f"RTP 序号连续正向（每包 +1）、时间戳单调递增（每包 "
+                        f"+{integ.get('median_ts_delta', 0)} ≈ "
+                        f"{integ.get('packet_duration_ms')} ms）{extra}{other}"
+                        f"——重建音频与杂音/啸叫检测的基础数据可信")})
     tones = r['tones']
     if tones['howl_count']:
         ev = [e for e in tones['events'] if e['band'] == 'howl']
@@ -410,6 +522,7 @@ def analyze_video_quality(packets: dict, ssrc: int, raw_path: str = None) -> dic
         'nal_units': 0, 'idr_count': 0, 'sps_count': 0, 'pps_count': 0,
         'broken_nals': 0, 'idr_interval_max_s': None, 'first_idr_s': None,
         'est_artifacts_ms': 0.0, 'decode_check': 'skipped', 'decode_errors': None,
+        'rtp_integrity': None,
         'issues': [], 'verdict': 'ok',
     }
 
@@ -428,6 +541,10 @@ def analyze_video_quality(packets: dict, ssrc: int, raw_path: str = None) -> dic
     result['max_consecutive_loss'] = loss['max_consecutive_loss']
 
     sorted_seqs = sorted(stream)
+    v_pts = [stream[s][2] for s in sorted_seqs]
+    result['rtp_integrity'] = _rtp_integrity(
+        [(s, stream[s][1], stream[s][2]) for s in sorted_seqs], 0,
+        max(set(v_pts), key=v_pts.count), mode='frame')
     t0 = stream[sorted_seqs[0]][0]
     t_end = stream[sorted_seqs[-1]][0]
     result['duration_s'] = round(t_end - t0, 2)
@@ -555,6 +672,13 @@ def analyze_video_quality(packets: dict, ssrc: int, raw_path: str = None) -> dic
 
 def _video_issues(r: dict) -> list:
     issues = []
+    integ = r.get('rtp_integrity') or {}
+    if integ.get('ts_backward'):
+        issues.append({
+            'kind': 'rtp_order', 'severity': 'critical',
+            'message': (f"RTP 时间戳倒退 {integ['ts_backward']} 处——发送端"
+                        f"时钟异常，按序号重组的视频帧与真实播放序错位，"
+                        f"花屏/卡顿风险高")})
     if r['broken_nals']:
         issues.append({
             'kind': 'broken_nal', 'severity': 'critical',

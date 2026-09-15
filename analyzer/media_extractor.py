@@ -161,7 +161,12 @@ def reconstruct_audio(packets: dict, ssrc: int, output_path: str, server_ip: str
                     ts_gap_filled += 1
 
         raw_payload = stream_pkts[seq][7]  # Index 7 is payload bytes
-        if pt == PT_PCMU:
+        if stream_pkts[seq][2] != pt:
+            # 非 main PT 包（如 RFC 4733 DTMF telephone-event，载荷仅 4 字节
+            # 事件描述）不能按主 PT 解码——按原样解会产出垃圾采样，听感为
+            # 轻微咔哒；置零，时间线由上方 ts 缺口补偿逻辑对齐
+            linear = b'\x00' * (len(raw_payload) * 2)
+        elif pt == PT_PCMU:
             # μ-law to 16-bit linear PCM
             try:
                 linear = audioop.ulaw2lin(raw_payload, 2)
