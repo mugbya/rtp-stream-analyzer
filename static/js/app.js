@@ -809,67 +809,91 @@ function renderCallSelector(calls, captureWarning) {
 
 // ====== 执行分析 ======
 function setupAnalyzeButton() {
-    document.getElementById('btn-analyze').addEventListener('click', runAnalysis);
+    document.getElementById('btn-analyze').addEventListener('click', () => runAnalysis());
 }
 
-async function runAnalysis() {
+// 分析进行中标志：防止面板按钮与结果区切换通话并发触发两次分析
+let analyzing = false;
+
+// 分析结果缓存（本会话内）：key = 会话 + 通话 + 方向 + 媒体类型 + 分析项。
+// 已分析过的通话再切回来时直接复用历史结论，不重复分析
+const analysisCache = new Map();
+
+// 组装一次分析的完整参数（请求体与缓存 key 共用，保证口径一致）
+function currentAnalysisParams(callId) {
+    const dirRadio = document.querySelector('input[name="direction"]:checked');
+    const mediaRadio = document.querySelector('input[name="media-type"]:checked');
+    const checkDelay = document.getElementById('check-delay');
+    const checkQuality = document.getElementById('check-quality');
+    return {
+        call_id: callId,
+        direction: dirRadio ? dirRadio.value : 'auto',
+        media_type: mediaRadio ? mediaRadio.value : 'audio',
+        checks: {
+            delay: checkDelay ? (checkDelay.checked && !checkDelay.disabled) : true,
+            quality: checkQuality ? checkQuality.checked : true,
+        },
+    };
+}
+
+const _analysisCacheKey = params =>
+    JSON.stringify({ session_id: sessionId, ...params });
+
+async function runAnalysis(callIdOverride = null) {
     if (!sessionId) {
         alert('请先上传抓包文件');
         return;
     }
+    if (analyzing) return;
 
+    // 获取选中的通话（多通时；"all" = 全部混合）。
+    // 结果区"切换通话"会直接传入 callIdOverride，优先于面板当前选择
+    let callId = callIdOverride;
+    if (callId === null) {
+        const callRadio = document.querySelector('input[name="call-select"]:checked');
+        if (callRadio && callRadio.value !== 'all') {
+            callId = callRadio.value;
+        }
+    }
+    const params = currentAnalysisParams(callId);
+    const cacheKey = _analysisCacheKey(params);
+
+    // 相同参数已分析过：直接使用历史结论，不重复分析
+    if (analysisCache.has(cacheKey)) {
+        document.getElementById('analyze-status').innerHTML =
+            '<span class="text-success">✓ 该通话此前已分析过，已直接使用历史结论（未重新分析）</span>';
+        showResults(analysisCache.get(cacheKey));
+        return;
+    }
+
+    analyzing = true;
     const btn = document.getElementById('btn-analyze');
     const status = document.getElementById('analyze-status');
     btn.disabled = true;
     status.innerHTML = '<span class="text-warning"><div class="spinner-border spinner-border-sm me-2"></div>正在分析中，请稍候...</span>';
 
-    // 获取选中的方向
-    const dirRadio = document.querySelector('input[name="direction"]:checked');
-    const direction = dirRadio ? dirRadio.value : 'auto';
-
-    // 获取媒体类型
-    const mediaRadio = document.querySelector('input[name="media-type"]:checked');
-    const mediaType = mediaRadio ? mediaRadio.value : 'audio';
-
-    // 获取选中的通话（多通时；"all" = 全部混合）
-    let callId = null;
-    const callRadio = document.querySelector('input[name="call-select"]:checked');
-    if (callRadio && callRadio.value !== 'all') {
-        callId = callRadio.value;
-    }
-
-    // 分析内容开关（单端抓包时延迟复选框被禁用 → 不测延迟）
-    const checkDelay = document.getElementById('check-delay');
-    const checkQuality = document.getElementById('check-quality');
-
     try {
         const resp = await fetch('/api/analyze', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: sessionId,
-                direction: direction,
-                media_type: mediaType,
-                call_id: callId,
-                checks: {
-                    delay: checkDelay ? (checkDelay.checked && !checkDelay.disabled) : true,
-                    quality: checkQuality ? checkQuality.checked : true,
-                },
-            }),
+            body: JSON.stringify({ session_id: sessionId, ...params }),
         });
         const data = await resp.json();
 
         if (data.error) {
             status.innerHTML = `<span class="text-danger">${data.error}</span>`;
-            btn.disabled = false;
             return;
         }
 
+        analysisCache.set(cacheKey, data);
         status.innerHTML = '<span class="text-success">✓ 分析完成</span>';
         showResults(data);
 
     } catch (err) {
         status.innerHTML = `<span class="text-danger">分析失败: ${err.message}</span>`;
+    } finally {
+        // 分析结束后恢复按钮：同一会话可换一通通话再次分析，无需重新上传
+        analyzing = false;
         btn.disabled = false;
     }
 }
@@ -964,11 +988,76 @@ async function runAnalysis() {
         document.getElementById('result-report').innerHTML = reportHtml;
     }
 
+    // 多通通话切换提示：标明当前分析的通话，支持一键换一通重新分析
+    renderCallSwitchBanner(data.call_id);
+
     // 音视频回放
     showMedia(data.media_manifest);
 
     // 滚动到结果区域
     section.scrollIntoView({ behavior: 'smooth' });
+}
+
+// ====== 结果区通话切换 ======
+// 抓包里检测到多通通话时，在结果区顶部提示当前分析的是哪一通，并支持一键
+// 切换到其他通话重新分析（沿用面板当前的方向/媒体类型/分析内容设置）
+function renderCallSwitchBanner(currentCallId) {
+    const banner = document.getElementById('call-switch-banner');
+    if (!banner) return;
+    if (!detectedCalls || detectedCalls.length < 2) {
+        banner.classList.add('d-none');
+        return;
+    }
+    const curTxt = currentCallId
+        ? `当前分析的是<strong>${callLabel(currentCallId)}</strong>，` +
+          '可切换到其他通话（标有「已分析」的直接复用历史结论）：'
+        : '当前分析的是全部通话混合的结果，建议选择具体通话：';
+    const btns = detectedCalls.map(c => {
+        const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
+        const cur = c.call_id === currentCallId;
+        const title = `${c.start_str} ~ ${c.end_str} · ${c.stream_count} 条流`;
+        const fmBadge = FS_MEDIA_BADGES[c.fs_media?.verdict] || '';
+        const cachedBadge = analysisCache.has(_analysisCacheKey(
+            currentAnalysisParams(c.call_id)))
+            ? ' <span class="badge bg-secondary"><i class="bi bi-clock-history"></i> 已分析</span>'
+            : '';
+        return `<button type="button" class="btn btn-sm ${cur ? 'btn-primary' : 'btn-outline-primary'}"
+                    ${cur ? 'disabled' : ''} onclick="switchCall('${c.call_id}')" title="${title}">
+                    <i class="bi bi-telephone"></i> ${callLabel(c.call_id)}
+                    <span class="badge ${st.badge} ms-1"><i class="bi ${st.icon}"></i> ${st.label}</span>${fmBadge}${cachedBadge}
+                    <span class="ms-1 small">${title}</span>
+                </button>`;
+    }).join('');
+    banner.classList.remove('d-none');
+    banner.innerHTML = `
+        <div class="alert alert-info mb-0 text-start">
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                <strong><i class="bi bi-collection me-1"></i>检测到 ${detectedCalls.length} 通通话</strong>
+                <span class="small">${curTxt}</span>
+            </div>
+            <div class="d-flex flex-wrap gap-2 mt-2">${btns}</div>
+        </div>`;
+}
+
+function switchCall(callId) {
+    if (analyzing) return;
+    // 同步配置面板的通话选择（单选框 + 高亮），两处状态保持一致
+    const radio = document.querySelector(`input[name="call-select"][value="${callId}"]`);
+    if (radio) {
+        document.querySelectorAll('#call-options .direction-option').forEach(o => o.classList.remove('selected'));
+        radio.checked = true;
+        radio.closest('.direction-option').classList.add('selected');
+    }
+    // 分析进行中禁用切换按钮并就地提示，防止重复触发（完成后随结果重绘恢复）
+    const banner = document.getElementById('call-switch-banner');
+    if (banner) {
+        banner.querySelectorAll('button').forEach(b => { b.disabled = true; });
+        const note = document.createElement('div');
+        note.className = 'w-100 small text-primary mt-1';
+        note.innerHTML = '<div class="spinner-border spinner-border-sm me-2"></div>正在重新分析…';
+        banner.appendChild(note);
+    }
+    runAnalysis(callId);
 }
 
 // ====== 音画质量分析（杂音 / 啸叫 / 花屏）======
