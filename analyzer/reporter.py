@@ -5,6 +5,8 @@
 import json
 from datetime import datetime
 
+from analyzer.problem_taxonomy import classify_problems
+
 
 def generate_report(analysis_results: dict) -> dict:
     """生成完整的分析报告。
@@ -38,6 +40,9 @@ def generate_report(analysis_results: dict) -> dict:
             'video': analysis_results.get('video_quality') or {},
         },
         'conclusion': _build_conclusion(analysis_results),
+        # 声音问题分类：对照《声音问题种类》清单，把各检测器结论聚合为
+        # "问题种类 + 用户听感词 + 排查方向"，供前端单独渲染
+        'problem_classification': classify_problems(analysis_results),
     }
     return report
 

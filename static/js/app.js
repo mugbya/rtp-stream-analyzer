@@ -951,6 +951,11 @@ async function runAnalysis() {
             reportHtml += '</ul>';
         }
 
+        // 声音问题分类：对照《声音问题种类》清单，把检测结论对号入座
+        if (data.report.problem_classification) {
+            reportHtml += renderProblemClassification(data.report.problem_classification);
+        }
+
         // 音画质量分析：杂音/啸叫/削波破音/底噪（音频）与花屏风险（视频）
         if (data.report.media_quality) {
             reportHtml += renderMediaQuality(data.report.media_quality);
@@ -975,6 +980,78 @@ const QUALITY_BADGES = {
     ok: ['success', '无花屏风险'],
     risk: ['warning', '花屏风险'],
 };
+
+// ====== 声音问题分类（对照《声音问题种类》清单） ======
+// 把各检测器结论按问题种类聚合展示：种类描述 + 用户听感词 + 证据 +
+// 排查方向。默认只展开"严重"级卡片，注意/提示级收进折叠区，点开才看
+//（没有严重级时全部直接列出，避免整块空着）。抓包看不到的听感问题
+// 单独折叠列出人工验证方法。
+const PRIO_BADGE = {P0: 'danger', P1: 'warning', P2: 'info', P3: 'secondary'};
+
+function _problemCard(p) {
+    let html = '<div class="border rounded p-2 mb-2">';
+    html += '<div class="d-flex flex-wrap align-items-center gap-2">' +
+            `<span class="badge bg-${PRIO_BADGE[p.priority] || 'secondary'}">${p.priority}</span>` +
+            `<strong>${_esc(p.name)}</strong>` +
+            `<span class="badge bg-light text-dark border">${_esc(p.category)}</span>` +
+            `<code class="small">${_esc(p.term)}</code>` +
+            `<span class="badge bg-${p.severity === 'critical' ? 'danger' : p.severity === 'warning' ? 'warning' : 'secondary'}">` +
+            `${p.severity === 'critical' ? '严重' : p.severity === 'warning' ? '注意' : '提示'}</span>` +
+            '</div>';
+    html += `<div class="small mt-1">用户听感：` +
+            p.feel.map(f => `<span class="badge bg-warning-subtle text-dark border border-warning-subtle me-1 fw-normal">“${_esc(f)}”</span>`).join('') +
+            '</div>';
+    html += `<div class="small text-muted mt-1">${_esc(p.description)}</div>`;
+    if (p.evidence && p.evidence.length) {
+        html += '<div class="small mt-1"><strong>证据：</strong><ul class="mb-0 ps-4">';
+        p.evidence.forEach(e => { html += `<li>${_esc(e)}</li>`; });
+        html += '</ul></div>';
+    }
+    html += `<div class="small mt-1"><strong>排查方向：</strong>${_esc((p.causes || []).join('；'))}</div>`;
+    html += `<div class="small"><strong>验证方法：</strong>${_esc((p.verify || []).join('；'))}</div>`;
+    html += '</div>';
+    return html;
+}
+
+function renderProblemClassification(pc) {
+    if (!pc || !pc.available) return '';
+    let html = '<h6 class="mt-3">声音问题分类' +
+        ' <span class="text-muted small fw-normal">对照《声音问题种类》清单，把检测结论对号入座</span></h6>';
+    html += `<div class="alert alert-secondary py-2 small mb-2">${_esc(pc.summary)}</div>`;
+    (pc.notes || []).forEach(n => {
+        html += `<p class="small text-muted mb-2">${_esc(n)}</p>`;
+    });
+    if (!pc.problems.length) {
+        html += '<div class="alert alert-success py-2 mb-2">抓包层面未发现可归类的声音问题。</div>';
+    }
+    const severe = pc.problems.filter(p => p.severity === 'critical');
+    const minor = pc.problems.filter(p => p.severity !== 'critical');
+    severe.forEach(p => { html += _problemCard(p); });
+    if (minor.length) {
+        if (severe.length) {
+            // 有严重级问题时，注意/提示级默认收起，点开才看
+            html += `<details class="mt-1">` +
+                    `<summary class="small text-muted user-select-none">另有 ${minor.length} 类注意/提示级问题（点开展开查看）</summary>` +
+                    '<div class="mt-2">';
+            minor.forEach(p => { html += _problemCard(p); });
+            html += '</div></details>';
+        } else {
+            minor.forEach(p => { html += _problemCard(p); });
+        }
+    }
+    if (pc.unobservable && pc.unobservable.length) {
+        html += `<details class="mt-2"><summary class="small text-muted user-select-none">另有 ${pc.unobservable.length} 类听感问题无法仅凭抓包确认（点开看原因与人工验证方法）</summary>`;
+        html += '<div class="table-responsive mt-1"><table class="table table-sm table-bordered small mb-0">' +
+                '<thead><tr><th>类别</th><th>问题</th><th>用户听感</th><th>为什么抓包看不到</th><th>人工验证方法</th></tr></thead><tbody>';
+        pc.unobservable.forEach(u => {
+            html += `<tr><td>${_esc(u.category)}</td><td>${_esc(u.name)}</td>` +
+                    `<td>${u.feel.map(f => `“${_esc(f)}”`).join(' ')}</td>` +
+                    `<td>${_esc(u.why)}</td><td>${_esc(u.verify)}</td></tr>`;
+        });
+        html += '</tbody></table></div></details>';
+    }
+    return html;
+}
 
 function renderMediaQuality(mq) {
     const audioEntries = Object.entries(mq.audio || {});
