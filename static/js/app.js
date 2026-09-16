@@ -1203,9 +1203,8 @@ const QUALITY_BADGES = {
 
 // ====== 声音问题分类（对照《声音问题种类》清单） ======
 // 把各检测器结论按问题种类聚合展示：种类描述 + 用户听感词 + 证据 +
-// 排查方向。默认只展开"严重"级卡片，注意/提示级收进折叠区，点开才看
-//（没有严重级时全部直接列出，避免整块空着）。抓包看不到的听感问题
-// 单独折叠列出人工验证方法。
+// 排查方向。默认只展开"严重"级卡片，注意/提示级一律收进折叠区，
+// 点开才看。抓包看不到的听感问题单独折叠列出人工验证方法。
 const PRIO_BADGE = {P0: 'danger', P1: 'warning', P2: 'info', P3: 'secondary'};
 
 function _problemCard(p, feelNoun) {
@@ -1261,16 +1260,14 @@ function _renderProblemSection(pc, title, docName, emptyText, feelNoun) {
     const minor = pc.problems.filter(p => p.severity !== 'critical');
     severe.forEach(p => { html += _problemCard(p, feelNoun); });
     if (minor.length) {
-        if (severe.length) {
-            // 有严重级问题时，注意/提示级默认收起，点开才看
-            html += `<details class="mt-1">` +
-                    `<summary class="small text-muted user-select-none">另有 ${minor.length} 类注意/提示级问题（点开展开查看）</summary>` +
-                    '<div class="mt-2">';
-            minor.forEach(p => { html += _problemCard(p, feelNoun); });
-            html += '</div></details>';
-        } else {
-            minor.forEach(p => { html += _problemCard(p, feelNoun); });
-        }
+        // 注意/提示级一律默认收起，点开才看；无严重级卡片时仅去掉"另有"前缀
+        const label = (severe.length ? '另有 ' : '') +
+            `${minor.length} 类注意/提示级问题（点开展开查看）`;
+        html += `<details class="mt-1">` +
+                `<summary class="small text-muted user-select-none">${label}</summary>` +
+                '<div class="mt-2">';
+        minor.forEach(p => { html += _problemCard(p, feelNoun); });
+        html += '</div></details>';
     }
     if (pc.unobservable && pc.unobservable.length) {
         html += `<details class="mt-2"><summary class="small text-muted user-select-none">另有 ${pc.unobservable.length} 类${_esc(feelNoun)}问题无法仅凭抓包确认（点开看原因与人工验证方法）</summary>`;
