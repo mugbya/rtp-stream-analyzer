@@ -180,17 +180,18 @@ outputs/
 └── chart_xxx.png                 # 分析图表
 ```
 
-### 清理脚本（crontab 示例）
+### 自动清理
+
+outputs 目录（图表 + 媒体文件）由应用内置的后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，应用启动时也会先清一次历史遗留。可在 `app.py` 顶部调整 `OUTPUT_RETENTION_HOURS` / `OUTPUT_CLEANUP_INTERVAL_MINUTES` 两个配置项。
+
+uploads 目录（原始抓包文件）暂不自动清理，如需清理可配置 crontab：
 
 ```bash
-# 删除 30 天前的媒体输出（按日期目录名判断）
-find outputs/ -maxdepth 1 -type d -name "20[2-9][0-9]-[0-9][0-9]-[0-9][0-9]" -mtime +30 -exec rm -rf {} +
-
-# 同时清理对应的上传文件（按 mtime）
+# 删除 30 天前的上传文件（按 mtime）
 find uploads/ -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
 ```
 
-> 注意：会话数据存在内存中（`sessions` 字典），重启后丢失。媒体文件在磁盘上，靠上述脚本清理。
+> 注意：会话数据存在内存中（`sessions` 字典），重启后丢失。媒体文件在磁盘上，由内置线程按保留时长自动清理。
 
 ## API
 
@@ -219,3 +220,11 @@ find uploads/ -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
 - 时钟偏移：不同抓包机器时钟可能有数百毫秒偏差，跨抓包延迟会自动检测并修正，偏差过大时报告会给出警告
 - 视频流按动态 PT（96-127）识别，若实际是 Opus 等动态音频 PT 会被误分为视频
 - 重建音频时按 20ms/包 补静音，实际包长不同时会有轻微时长偏差
+
+## 问题反馈
+
+使用中有任何问题，欢迎微信扫码添加好友沟通（页面页脚也有同样的入口）：
+
+<p align="center">
+  <img src="static/images/wechat-qrcode.png" width="220" alt="微信二维码">
+</p>

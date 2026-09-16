@@ -30,7 +30,82 @@
 
     <footer class="text-center py-4 mt-5">
         <small>RTP Stream Analyzer — VoIP Audio/Video Delay & Jitter Analysis</small>
+        <div class="wechat-contact" id="wechatContact" hidden>
+            <img class="wechat-qr-thumb" alt="微信二维码"
+                 src="{{ url_for('static', filename='images/wechat-qrcode.png') }}?v=2">
+            <div class="wechat-contact-text">
+                使用上有问题？<i class="bi bi-wechat"></i> 微信扫码加我沟通
+                <span class="d-block text-muted small mt-1">点击二维码可放大</span>
+            </div>
+        </div>
     </footer>
+
+    <!-- 右下角常驻入口：不用滚动也能找到，点击打开二维码弹窗 -->
+    <button type="button" class="wechat-fab" id="wechatFab" hidden aria-label="微信扫码联系">
+        <i class="bi bi-wechat"></i>
+        <span>微信<br>联系</span>
+    </button>
+
+    <!-- 放大弹窗：自绘实现，不依赖 Bootstrap JS（CDN 不可用时照样能弹出/关闭） -->
+    <div class="wechat-modal" id="wechatQrModal" hidden>
+        <div class="wechat-modal-mask" data-wechat-close></div>
+        <div class="wechat-modal-card">
+            <div class="wechat-modal-head">
+                <span><i class="bi bi-wechat"></i> 微信联系</span>
+                <button type="button" class="wechat-modal-x" data-wechat-close aria-label="关闭">&times;</button>
+            </div>
+            <div class="wechat-modal-body">
+                <img id="wechatQrLarge" class="wechat-qr-large" alt="微信二维码（放大）">
+                <p class="wechat-modal-tip">微信扫一扫，加上好友后即可反馈使用问题</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 微信二维码：图片加载成功才显示入口（static/images/wechat-qrcode.png 还没放时整体隐藏）；
+        // png 缺失时自动尝试同名 jpg，仍没有则隐藏。页脚缩略图和悬浮按钮打开同一个放大弹窗。
+        (function () {
+            var thumb = document.querySelector('.wechat-qr-thumb');
+            if (!thumb) return;
+            var contact = document.getElementById('wechatContact');
+            var fab = document.getElementById('wechatFab');
+            var modal = document.getElementById('wechatQrModal');
+            var show = function (ok) {
+                contact.hidden = !ok;
+                fab.hidden = !ok;
+            };
+            thumb.addEventListener('load', function () { show(true); });
+            thumb.addEventListener('error', function () {
+                var url = new URL(thumb.src);
+                if (url.pathname.endsWith('.png')) {
+                    url.pathname = url.pathname.replace(/\.png$/, '.jpg');
+                    thumb.src = url.href;
+                } else {
+                    show(false);
+                }
+            });
+
+            function openModal() {
+                document.getElementById('wechatQrLarge').src = thumb.src;
+                modal.hidden = false;                 // 同步显隐，无过渡动画，不会卡在半开状态
+                document.body.style.overflow = 'hidden'; // 弹窗期间背景不滚动
+            }
+            function closeModal() {
+                modal.hidden = true;
+                document.body.style.overflow = '';
+            }
+            [thumb, fab].forEach(function (el) {
+                el.addEventListener('click', openModal);
+            });
+            // 点 ×、点遮罩、按 Esc 都能关闭
+            modal.addEventListener('click', function (e) {
+                if (e.target.closest('[data-wechat-close]')) closeModal();
+            });
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape' && !modal.hidden) closeModal();
+            });
+        })();
+    </script>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     {% block extra_scripts %}{% endblock %}

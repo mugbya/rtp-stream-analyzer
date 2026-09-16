@@ -778,6 +778,124 @@ footer {
     font-size: .85rem;
 }
 
+/* ====== 页脚微信联系入口 ====== */
+.wechat-contact {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: .9rem;
+    margin-top: .9rem;
+}
+/* 图片尚未放置时整个入口隐藏（hidden 属性会被上面的 display:flex 覆盖，需显式还原） */
+.wechat-contact[hidden] { display: none; }
+
+.wechat-qr-thumb {
+    width: 104px;
+    height: 104px;
+    padding: 5px;
+    object-fit: contain;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: .55rem;
+    box-shadow: 0 1px 4px rgba(15, 23, 42, .06);
+    cursor: zoom-in;
+}
+
+.wechat-contact-text {
+    text-align: left;
+    font-size: .92rem;
+    color: #475569;
+}
+.wechat-contact-text .bi-wechat { color: #07c160; }
+
+.wechat-qr-large {
+    width: min(300px, 72vw);
+    height: auto;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: .55rem;
+}
+
+/* 右下角常驻微信按钮：任何滚动位置都可见，点击打开二维码弹窗 */
+.wechat-fab {
+    position: fixed;
+    right: 22px;
+    bottom: 26px;
+    z-index: 1030; /* 高于页面内容，低于弹窗遮罩(1050) */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    width: 58px;
+    height: 58px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #07c160, #059f52);
+    color: #fff;
+    font-size: 12px;
+    line-height: 1.15;
+    box-shadow: 0 4px 14px rgba(7, 193, 96, .35);
+    cursor: pointer;
+    transition: transform .15s ease, box-shadow .15s ease;
+}
+.wechat-fab:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(7, 193, 96, .45);
+    color: #fff;
+}
+.wechat-fab .bi { font-size: 20px; }
+.wechat-fab[hidden] { display: none; }
+
+/* ====== 微信放大弹窗（自绘，不依赖 Bootstrap JS）====== */
+.wechat-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1060; /* 高于悬浮按钮(1030) */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: wechat-fade .15s ease-out; /* 只做入场淡入，关闭瞬时完成，不会卡在半开状态 */
+}
+.wechat-modal[hidden] { display: none; }
+.wechat-modal-mask {
+    position: absolute;
+    inset: 0;
+    background: rgba(15, 23, 42, .55);
+}
+.wechat-modal-card {
+    position: relative;
+    width: min(400px, 92vw);
+    background: #fff;
+    border-radius: .7rem;
+    box-shadow: 0 12px 48px rgba(15, 23, 42, .3);
+    overflow: hidden;
+}
+.wechat-modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .65rem 1rem;
+    border-bottom: 1px solid var(--line);
+    font-weight: 600;
+    color: #1e293b;
+}
+.wechat-modal-head .bi { color: #07c160; margin-right: .35rem; }
+.wechat-modal-x {
+    border: none;
+    background: none;
+    font-size: 1.5rem;
+    line-height: 1;
+    color: #94a3b8;
+    cursor: pointer;
+    padding: 0 .2rem;
+}
+.wechat-modal-x:hover { color: #475569; }
+.wechat-modal-body { padding: 1.1rem; text-align: center; }
+.wechat-modal-tip { color: #64748b; font-size: .85rem; margin: .7rem 0 0; }
+@keyframes wechat-fade { from { opacity: 0; } to { opacity: 1; } }
+
 /* ====== 响应式 ====== */
 @media (max-width: 991.98px) {
     .upload-box {
