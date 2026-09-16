@@ -61,11 +61,11 @@ GitHub → Actions 页面能看到工作流运行；全绿即部署完成，服�
 工作流只把服务跑在 `127.0.0.1:5050`，对外访问统一走你服务器上已有的 Nginx。HTTPS 用 acme.sh 签**一张多域名共用证书**，本服务和其他几个服务都引用它：
 
 1. 编辑 [deploy/nginx-rtp-stream-analyzer.conf](nginx-rtp-stream-analyzer.conf)，把两处 `server_name` 换成你的**全部域名**（空格分隔，都指向这一个服务）；域名 DNS 解析到服务器 IP（你自己配置）
-2. 服务器上签共用证书（所有域名都解析到这台机器，`--nginx` 模式自动完成验证）：
+2. 服务器上签共用证书（acme.sh **DNS 验证**，域名在 DNSPod/腾讯云解析时直接可用，不依赖 nginx 状态、不要求 80 端口可达）：
 
 ```bash
-~/.acme.sh/acme.sh --issue --server letsencrypt --nginx \
-  -d 主域名 -d 域名2 -d 域名3 -d 域名4
+~/.acme.sh/acme.sh --issue --server letsencrypt --dns dns_dp \
+  -d rtp-analyzer.cn -d rtp-analyzer.com -d rtp-analyzer.site
 ```
 
 3. 安装到固定路径并设置续期后自动重载（**先做这步再放配置**，否则 `nginx -t` 会因证书文件不存在而失败）：
@@ -118,3 +118,7 @@ systemctl restart rtp-stream-analyzer
 - **域名访问不通**：DNS 没生效、Nginx 没 reload，或服务器安全组没放行 80/443 端口（本机 `curl -k -H 'Host: 你的域名' https://127.0.0.1/` 可区分是 Nginx 问题还是网络问题）。
 - **`nginx -t` 报证书文件不存在**：先完成 acme.sh 的 `--issue` + `--install-cert`（README「Nginx 反代」第 2、3 步），再放这个 server 配置。
 - **`--install-cert` 报 `No such file or directory`**：acme.sh 不会自动建父目录，先 `mkdir -p /etc/nginx/ssl` 再重跑。
+- **nginx 起不来报 `no start line: Expecting: TRUSTED CERTIFICATE`**：证书文件存在但内容无效（多半是 install-cert 没装成功留下的空文件），重跑 `--install-cert`，并确认文件开头是 `-----BEGIN CERTIFICATE-----`（`head -1` 查看）。
+- **`--install-cert` 报 `fullchain.cer: No such file or directory`**：acme.sh 里的源证书残缺（上次 `--issue` 签发失败留下的），`--issue --force` 重签后再安装。
+- **`--issue --nginx` 报 `It seems that the nginx config is not correct`**：nginx 模式签发前会自检 nginx 配置，配置本身有坏文件（如引用空证书）就整个卡住。改用 `--dns dns_dp` 验证（本部署默认方式），完全不碰 nginx。
+- **DNS 验证报 `Invalid status ... NXDOMAIN looking up TXT`**：CA 在公网查不到这个域名（域名刚注册/NS 刚切到 DNSPod 还没生效，或注册商的 DNS 服务器没指向 DNSPod）。`dig NS 域名 +short` 看 NS 是否为 `*.dnspod.net`；NS 正常就等几分钟重跑，NS 不对先去注册商改 DNS 服务器。多域名签发是整单成败，可将未生效域名从列表去掉先签其余的，生效后再补签。
