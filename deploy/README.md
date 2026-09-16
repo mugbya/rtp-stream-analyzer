@@ -25,14 +25,7 @@ Nginx (80→443, 多域名共用证书) ──► 127.0.0.1:5050
 
 - root 可 SSH 登录服务器（公钥已配好）
 - 服务器有 `python3` ≥ 3.9 且带 venv 模块、已装 `rsync`（部署过 Python 服务一般都有；没有就 `dnf install -y rsync`）
-- 服务器已装 `ffmpeg`（OPUS 音频回放依赖；`media_extractor.py` 按 PATH 直接调用）：
-
-```bash
-dnf install -y epel-release
-dnf config-manager --set-enabled crb   # Rocky 8 上叫 powertools
-dnf install -y https://mirrors.ustc.edu.cn/rpmfusion/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
-dnf install -y ffmpeg
-```
+- 服务器已装 `ffmpeg`（OPUS 音频回放依赖，`media_extractor.py` 按 PATH 直接调用），安装步骤见 [docs/服务器安装-ffmpeg.md](../docs/服务器安装-ffmpeg.md)
 
 ## 一次性配置（共 3 步）
 
@@ -122,7 +115,7 @@ systemctl restart rtp-stream-analyzer
 - **挂在 rsync**：服务器没装，`dnf install -y rsync` 后重跑。
 - **健康检查失败**：`journalctl -u rtp-stream-analyzer -n 100`，常见是依赖安装失败或 5050 被占用。
 - **Nginx 上传 413**：没拷贝上面的 Nginx 配置或没 reload，`client_max_body_size` 没生效。
-- **域名访问不通**：DNS 没生效、Nginx 没 reload，或服务器安全组没放行 80/443 端口（本机 `curl -k -H 'Host: 你的域名' https://127.0.0.1/` 可区分是 Nginx 问题还是网络问题）。
+- **域名访问不通**：按顺序查——① `dig A 域名 +short` 是否返回服务器 IP（证书的 DNS 验证不需要 A 记录，所以签发成功≠A 记录已加，漏加会导致只有这个域名打不开）；② DNS 没生效、Nginx 没 reload，或安全组没放行 80/443 端口；③ 本机 `curl -k -H 'Host: 你的域名' https://127.0.0.1/` 可区分是 Nginx 问题还是网络问题。
 - **`nginx -t` 报证书文件不存在**：先完成 acme.sh 的 `--issue` + `--install-cert`（README「Nginx 反代」第 2、3 步），再放这个 server 配置。
 - **`--install-cert` 报 `No such file or directory`**：acme.sh 不会自动建父目录，先 `mkdir -p /etc/nginx/ssl` 再重跑。
 - **nginx 起不来报 `no start line: Expecting: TRUSTED CERTIFICATE`**：证书文件存在但内容无效（多半是 install-cert 没装成功留下的空文件），重跑 `--install-cert`，并确认文件开头是 `-----BEGIN CERTIFICATE-----`（`head -1` 查看）。
