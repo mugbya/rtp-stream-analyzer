@@ -35,7 +35,20 @@ function callLabel(callId) {
 document.addEventListener('DOMContentLoaded', () => {
     setupFileUploads();
     setupAnalyzeButton();
+    setupMediaTypeCards();
 });
+
+// ====== 媒体类型卡片选中态 ======
+// 卡片即 label 包住 radio，点击原生切换；这里只负责把选中样式同步到卡片边框
+function setupMediaTypeCards() {
+    const radios = document.querySelectorAll('input[name="media-type"]');
+    radios.forEach(radio => {
+        radio.addEventListener('change', () => {
+            document.querySelectorAll('.media-type-option').forEach(o => o.classList.remove('selected'));
+            radio.closest('.media-type-option').classList.add('selected');
+        });
+    });
+}
 
 // ====== 文件上传 ======
 function setupFileUploads() {

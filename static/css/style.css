@@ -303,6 +303,46 @@ body {
     background: #f8fafc;
 }
 
+/* ====== 媒体类型选项卡：纵向堆叠在"分析范围"列里 ====== */
+.media-type-option {
+    display: flex;
+    flex-direction: column;
+    gap: .35rem;
+    padding: .7rem .9rem;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: #fff;
+    cursor: pointer;
+    transition: border-color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+.media-type-option:hover {
+    border-color: #a5b4fc;
+    background: #f8faff;
+}
+.media-type-option.selected {
+    border-color: #6366f1;
+    background: #eef2ff;
+    box-shadow: inset 0 0 0 1px #6366f1;
+    color: #3730a3;
+}
+.mt-head {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-weight: 600;
+}
+.media-type-option .form-check-input {
+    flex-shrink: 0;
+    width: 1.05em;
+    height: 1.05em;
+}
+.media-type-option.selected .mt-head::after {
+    content: '\2713';
+    margin-left: auto;
+    color: #4f46e5;
+    font-weight: 800;
+}
+
 /* ====== 统计卡片（摘要，JS 动态生成） ====== */
 .stat-card {
     display: flex;

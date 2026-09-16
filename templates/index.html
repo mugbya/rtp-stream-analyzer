@@ -102,9 +102,47 @@
                         多通通话混在一起分析会使延迟/抖动结果失真，建议选择具体通话
                     </small>
                 </div>
-                <div class="mb-3">
-                    <label class="form-label fw-bold">分析内容</label>
-                    <div class="d-flex flex-wrap gap-4">
+
+                <!-- 三大组并排成三列：分析范围 | 分析内容 | 延迟方向。
+                     每列内部纵向堆叠；媒体类型卡片纵向留了说明行，以后加组
+                     就在 row 里加一列 -->
+                <div class="row g-3">
+                    <!-- ① 分析范围：先选媒体类型，决定后面分析什么流 -->
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">
+                            <i class="bi bi-collection text-primary"></i> 分析范围（先选媒体类型）
+                        </label>
+                        <div class="d-flex flex-column gap-2">
+                            <label class="media-type-option selected">
+                                <span class="mt-head">
+                                    <input class="form-check-input mt-0" type="radio"
+                                           name="media-type" id="type-audio" value="audio" checked>
+                                    <span><i class="bi bi-mic-fill text-primary"></i> 仅音频</span>
+                                </span>
+                                <small class="text-muted">杂音 / 啸叫 / 断音吞字等声音问题，只分析音频流</small>
+                            </label>
+                            <label class="media-type-option">
+                                <span class="mt-head">
+                                    <input class="form-check-input mt-0" type="radio"
+                                           name="media-type" id="type-video" value="video">
+                                    <span><i class="bi bi-camera-video-fill text-danger"></i> 仅视频</span>
+                                </span>
+                                <small class="text-muted">花屏 / 马赛克 / 卡顿冻结等画面问题，只分析视频流</small>
+                            </label>
+                            <label class="media-type-option">
+                                <span class="mt-head">
+                                    <input class="form-check-input mt-0" type="radio"
+                                           name="media-type" id="type-all" value="all">
+                                    <span><i class="bi bi-collection-fill text-success"></i> 音视频都分析</span>
+                                </span>
+                                <small class="text-muted">声音 + 画面两侧问题都查，音频流和视频流都分析</small>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- ② 分析内容：勾选要跑的检测 -->
+                    <div class="col-md-4">
+                        <label class="form-label fw-bold">分析内容</label>
                         <div class="form-check">
                             <input class="form-check-input" type="checkbox"
                                    id="check-delay" checked>
@@ -118,14 +156,15 @@
                                    id="check-quality" checked>
                             <label class="form-check-label" for="check-quality">
                                 <i class="bi bi-music-note-beamed text-success"></i> 音画质量
-                                <small class="text-muted">（杂音 / 啸叫 / 花屏）</small>
+                                <small class="text-muted">（杂音 / 啸叫 / 破音 / 电流声 / 断音吞字 / 变调；
+                                    花屏 / 马赛克 / 卡顿冻结）</small>
                             </label>
                         </div>
+                        <small class="text-muted d-none" id="check-delay-hint"></small>
                     </div>
-                    <small class="text-muted d-none" id="check-delay-hint"></small>
-                </div>
-                <div class="row g-3">
-                    <div class="col-md-6" id="direction-col">
+
+                    <!-- ③ 延迟方向：上传后按角色动态填充 -->
+                    <div class="col-md-4" id="direction-col">
                         <label class="form-label fw-bold">延迟方向</label>
                         <div id="direction-options">
                             <!-- 动态填充 -->
@@ -133,32 +172,6 @@
                         <small class="text-muted">
                             自动根据上传的抓包文件识别可用方向
                         </small>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label fw-bold">媒体类型</label>
-                        <div class="form-check">
-                            <input class="form-check-input" type="radio" name="media-type"
-                                   id="type-audio" value="audio" checked>
-                            <label class="form-check-label" for="type-audio">
-                                <i class="bi bi-mic-fill text-primary"></i> 仅音频
-                                <small class="text-muted">（杂音/啸叫类检测 + 音频流分析）</small>
-                            </label>
-                        </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="radio" name="media-type"
-                                   id="type-video" value="video">
-                            <label class="form-check-label" for="type-video">
-                                <i class="bi bi-camera-video-fill text-danger"></i> 仅视频
-                                <small class="text-muted">（花屏类检测 + 视频流分析）</small>
-                            </label>
-                        </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="radio" name="media-type"
-                                   id="type-all" value="all">
-                            <label class="form-check-label" for="type-all">
-                                <i class="bi bi-collection-fill text-success"></i> 音视频都分析
-                            </label>
-                        </div>
                     </div>
                 </div>
 
