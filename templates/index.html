@@ -140,7 +140,8 @@
                         </div>
                     </div>
 
-                    <!-- ② 分析内容：勾选要跑的检测 -->
+                    <!-- ② 分析内容：唯一可选项是延迟（单端抓包测不了，自动禁用）；
+                         音画质量随①的分析范围自动确定，无需再勾选 -->
                     <div class="col-md-4">
                         <label class="form-label fw-bold">分析内容</label>
                         <div class="form-check">
@@ -148,18 +149,13 @@
                                    id="check-delay" checked>
                             <label class="form-check-label" for="check-delay">
                                 <i class="bi bi-speedometer2 text-primary"></i> 延迟测量
-                                <small class="text-muted">（FS 内部 / 跨抓包 / 端到端）</small>
+                                <small class="text-muted">（FS 内部 / 跨抓包 / 端到端，可选）</small>
                             </label>
                         </div>
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox"
-                                   id="check-quality" checked>
-                            <label class="form-check-label" for="check-quality">
-                                <i class="bi bi-music-note-beamed text-success"></i> 音画质量
-                                <small class="text-muted">（杂音 / 啸叫 / 破音 / 电流声 / 断音吞字 / 变调；
-                                    花屏 / 马赛克 / 卡顿冻结）</small>
-                            </label>
-                        </div>
+                        <small class="text-muted d-block">
+                            <i class="bi bi-music-note-beamed text-success"></i>
+                            音画质量（杂音/啸叫/花屏等）已随「分析范围」自动包含，无需单独勾选
+                        </small>
                         <small class="text-muted d-none" id="check-delay-hint"></small>
                     </div>
 

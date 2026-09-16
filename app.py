@@ -243,8 +243,9 @@ def run_analysis():
     direction = data.get('direction', 'auto')
     media_type = data.get('media_type', 'audio')
     call_id = data.get('call_id')
-    # 分析内容开关：延迟类分析需要 ≥2 个抓包点或 FS 抓包，单端抓包时前端
-    # 会禁用该选项；音画质量分析单端即可做。未传时保持全开（兼容旧调用）。
+    # 分析内容开关：唯一可选项是延迟——延迟类分析需要 ≥2 个抓包点或 FS 抓包，
+    # 单端抓包时前端会禁用该选项。音画质量没有独立开关，随 media_type（分析
+    # 范围）恒开；这里保留 quality 字段仅为兼容旧调用，新前端不再传。
     checks = data.get('checks') or {}
     check_delay = bool(checks.get('delay', True))
     check_quality = bool(checks.get('quality', True))

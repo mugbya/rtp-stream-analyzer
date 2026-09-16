@@ -36,6 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupFileUploads();
     setupAnalyzeButton();
     setupMediaTypeCards();
+    setupDelayToggle();
 });
 
 // ====== 媒体类型卡片选中态 ======
@@ -48,6 +49,21 @@ function setupMediaTypeCards() {
             radio.closest('.media-type-option').classList.add('selected');
         });
     });
+}
+
+// ====== 延迟开关与延迟方向联动 ======
+// "延迟方向"只在分析延迟时有意义：取消勾选延迟测量（或单端抓包被禁用）时整列置灰
+function setupDelayToggle() {
+    const delayCheck = document.getElementById('check-delay');
+    if (delayCheck) delayCheck.addEventListener('change', syncDirectionCol);
+}
+
+// 方向列可用的判定：延迟测量勾选且未被禁用。showConfigPanel 与手动切换共用
+function syncDirectionCol() {
+    const delayCheck = document.getElementById('check-delay');
+    const dirCol = document.getElementById('direction-col');
+    if (!delayCheck || !dirCol) return;
+    dirCol.classList.toggle('opacity-50', !(delayCheck.checked && !delayCheck.disabled));
 }
 
 // ====== 文件上传 ======
@@ -714,7 +730,7 @@ function showConfigPanel(data) {
     section.classList.remove('d-none');
 
     // 延迟可测性：需要 ≥2 个抓包点（跨抓包传输延迟）或含 FS 抓包（FS 内部延迟）。
-    // 单端抓包测不了延迟，自动禁用"延迟测量"，但抖动/丢包与音画质量不受影响。
+    // 单端抓包测不了延迟，自动禁用"延迟测量"；抖动/丢包与音画质量不受影响。
     const files = data.files || [];
     const delayAvailable = files.length >= 2 ||
         files.some(f => (f.role || '').toLowerCase() === 'fs');
@@ -728,8 +744,7 @@ function showConfigPanel(data) {
             delayHint.textContent = delayAvailable
                 ? '' : '仅单端抓包无法测量延迟（需 ≥2 个抓包点或含 FS 抓包），已自动禁用；抖动/丢包与音画质量仍可分析';
         }
-        const dirCol = document.getElementById('direction-col');
-        if (dirCol) dirCol.classList.toggle('opacity-50', !delayAvailable);
+        syncDirectionCol();
     }
 
     const container = document.getElementById('direction-options');
@@ -943,19 +958,18 @@ let analyzing = false;
 // 已分析过的通话再切回来时直接复用历史结论，不重复分析
 const analysisCache = new Map();
 
-// 组装一次分析的完整参数（请求体与缓存 key 共用，保证口径一致）
+// 组装一次分析的完整参数（请求体与缓存 key 共用，保证口径一致）。
+// 音画质量没有独立开关：随 media_type（分析范围）恒开，后端按范围筛选的流做检测
 function currentAnalysisParams(callId) {
     const dirRadio = document.querySelector('input[name="direction"]:checked');
     const mediaRadio = document.querySelector('input[name="media-type"]:checked');
     const checkDelay = document.getElementById('check-delay');
-    const checkQuality = document.getElementById('check-quality');
     return {
         call_id: callId,
         direction: dirRadio ? dirRadio.value : 'auto',
         media_type: mediaRadio ? mediaRadio.value : 'audio',
         checks: {
             delay: checkDelay ? (checkDelay.checked && !checkDelay.disabled) : true,
-            quality: checkQuality ? checkQuality.checked : true,
         },
     };
 }
@@ -1132,7 +1146,7 @@ async function runAnalysis(callIdOverride = null) {
 
 // ====== 结果区通话切换 ======
 // 抓包里检测到多通通话时，在结果区顶部提示当前分析的是哪一通，并支持一键
-// 切换到其他通话重新分析（沿用面板当前的方向/媒体类型/分析内容设置）
+// 切换到其他通话重新分析（沿用面板当前的方向/媒体类型/延迟开关设置）
 function renderCallSwitchBanner(currentCallId) {
     const banner = document.getElementById('call-switch-banner');
     if (!banner) return;
