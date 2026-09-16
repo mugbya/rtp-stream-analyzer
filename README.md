@@ -182,16 +182,9 @@ outputs/
 
 ### 自动清理
 
-outputs 目录（图表 + 媒体文件）由应用内置的后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，应用启动时也会先清一次历史遗留。可在 `app.py` 顶部调整 `OUTPUT_RETENTION_HOURS` / `OUTPUT_CLEANUP_INTERVAL_MINUTES` 两个配置项。
+outputs 目录（图表 + 媒体文件）与 uploads 目录（上传的抓包文件）由应用内置的后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，应用启动时也会先清一次历史遗留。两处共用同一保留时长，可在 `app.py` 顶部调整 `FILE_RETENTION_HOURS` / `FILE_CLEANUP_INTERVAL_MINUTES` 两个配置项。
 
-uploads 目录（原始抓包文件）暂不自动清理，如需清理可配置 crontab：
-
-```bash
-# 删除 30 天前的上传文件（按 mtime）
-find uploads/ -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
-```
-
-> 注意：会话数据存在内存中（`sessions` 字典），重启后丢失。媒体文件在磁盘上，由内置线程按保留时长自动清理。
+> 注意：会话数据存在内存中（`sessions` 字典），重启后丢失。超过保留时长后，旧结果页的媒体/图表链接会失效，对旧会话重新分析也会因原始抓包已被清理而失败——这是保留时长的预期行为，需要更长保留就调大配置项。
 
 ## API
 

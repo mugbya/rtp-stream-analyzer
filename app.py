@@ -42,9 +42,10 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['OUTPUT_FOLDER'] = os.path.join(os.path.dirname(__file__), 'outputs')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
-# outputs 目录自动清理：输出（图表/媒体文件）超过保留时长即被后台线程删除
-app.config['OUTPUT_RETENTION_HOURS'] = 2            # 保留时长（小时）
-app.config['OUTPUT_CLEANUP_INTERVAL_MINUTES'] = 10  # 清理巡检间隔（分钟）
+# 自动清理：outputs（图表/媒体文件）与 uploads（上传的抓包）超过保留时长
+# 即被后台线程删除，两处共用同一保留时长
+app.config['FILE_RETENTION_HOURS'] = 2            # 保留时长（小时）
+app.config['FILE_CLEANUP_INTERVAL_MINUTES'] = 10  # 清理巡检间隔（分钟）
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
@@ -72,57 +73,56 @@ def _latest_mtime(path):
     return latest
 
 
-def _cleanup_outputs_once():
-    """按保留时长清理 outputs 目录：
-    - 根目录的散落文件（如图表 PNG）按文件 mtime 判断；
-    - 日期目录下的会话目录按目录树最新 mtime 判断，超时整树删除；
-    - 清空后的日期目录一并删除。
+def _cleanup_tree_once(root, cutoff):
+    """递归清理 root 下超过保留时长的内容：目录按树内最新 mtime 整树删除，
+    散落文件按自身 mtime 删除；被清空的目录一并移除。
     单个条目删除失败（被并发写入/占用）跳过即可，不影响其余清理。
     """
-    output_folder = app.config['OUTPUT_FOLDER']
-    if not os.path.isdir(output_folder):
+    if not os.path.isdir(root):
         return
-    cutoff = time.time() - app.config['OUTPUT_RETENTION_HOURS'] * 3600
-
-    for name in os.listdir(output_folder):
-        path = os.path.join(output_folder, name)
+    for name in os.listdir(root):
+        path = os.path.join(root, name)
         try:
             if os.path.isdir(path):
-                # 日期目录：逐个检查其中的会话目录
-                for sub in os.listdir(path):
-                    sub_path = os.path.join(path, sub)
-                    if os.path.isdir(sub_path):
-                        if _latest_mtime(sub_path) < cutoff:
-                            shutil.rmtree(sub_path, ignore_errors=True)
-                    elif os.path.getmtime(sub_path) < cutoff:
-                        os.remove(sub_path)
-                if not os.listdir(path):
-                    os.rmdir(path)  # 会话目录已清空，删除空日期目录
+                if _latest_mtime(path) < cutoff:
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    _cleanup_tree_once(path, cutoff)  # 目录整体未超时，清理其内部
+                    if not os.listdir(path):
+                        os.rmdir(path)  # 内部已清空，删除空目录
             elif os.path.getmtime(path) < cutoff:
                 os.remove(path)
         except OSError:
             continue
 
 
-def _start_output_cleaner():
-    """启动 outputs 清理后台线程：启动时先清一次遗留，再按间隔巡检。"""
+def _cleanup_stale_files_once():
+    """按保留时长清理 outputs（图表/媒体）与 uploads（上传的抓包），
+    超过保留时长的内容被删除，两处共用 FILE_RETENTION_HOURS。"""
+    cutoff = time.time() - app.config['FILE_RETENTION_HOURS'] * 3600
+    _cleanup_tree_once(app.config['OUTPUT_FOLDER'], cutoff)
+    _cleanup_tree_once(app.config['UPLOAD_FOLDER'], cutoff)
+
+
+def _start_file_cleaner():
+    """启动清理后台线程：启动时先清一次历史遗留，再按间隔巡检。"""
 
     def _loop():
-        interval = max(60, int(app.config['OUTPUT_CLEANUP_INTERVAL_MINUTES']) * 60)
+        interval = max(60, int(app.config['FILE_CLEANUP_INTERVAL_MINUTES']) * 60)
         while True:
             try:
-                _cleanup_outputs_once()
+                _cleanup_stale_files_once()
             except Exception:
                 pass  # 清理尽力而为，任何异常都不能影响主服务
             time.sleep(interval)
 
-    threading.Thread(target=_loop, name='output-cleaner', daemon=True).start()
+    threading.Thread(target=_loop, name='file-cleaner', daemon=True).start()
 
 
 # debug 热重载下 Werkzeug 会让父子进程各执行一遍本模块，只有真正对外
 # 提供服务的子进程带 WERKZEUG_RUN_MAIN=true，借此避免父进程重复起线程
 if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not DEBUG:
-    _start_output_cleaner()
+    _start_file_cleaner()
 
 
 @app.route('/')

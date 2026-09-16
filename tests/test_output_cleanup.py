@@ -1,7 +1,8 @@
 """
-Unit tests for the outputs auto-cleanup: retention cutoff applies to root
-chart files and per-session directory trees, empty date dirs are removed,
-and fresh trees are never touched even when their own dir mtime is old.
+Unit tests for the auto-cleanup of outputs/ and uploads/: the retention
+cutoff applies to root chart files, per-session directory trees and uploaded
+pcap session dirs; empty parent dirs are removed; fresh trees are never
+touched even when their own dir mtime is old.
 
 Run: python3 tests/test_output_cleanup.py
 """
@@ -21,36 +22,36 @@ def _backdate(path, hours_ago):
     os.utime(path, (t, t))
 
 
-def _with_tmp_outputs(retention_hours):
-    """Point OUTPUT_FOLDER at a fresh temp dir with the given retention.
-
-    Returns (folder, run_cleanup, restore) where run_cleanup() executes one
-    cleanup pass against the temp dir.
-    """
-    tmp = tempfile.mkdtemp(prefix='outputs-cleanup-test-')
-    old_folder = app_module.app.config['OUTPUT_FOLDER']
-    old_retention = app_module.app.config['OUTPUT_RETENTION_HOURS']
-    app_module.app.config['OUTPUT_FOLDER'] = tmp
-    app_module.app.config['OUTPUT_RETENTION_HOURS'] = retention_hours
+def _with_tmp_dirs(retention_hours):
+    """Point OUTPUT_FOLDER/UPLOAD_FOLDER at fresh temp dirs with the given
+    retention. Returns (dirs, run_cleanup, restore)."""
+    tmp = {
+        'outputs': tempfile.mkdtemp(prefix='outputs-cleanup-test-'),
+        'uploads': tempfile.mkdtemp(prefix='uploads-cleanup-test-'),
+    }
+    old = {k: app_module.app.config[k] for k in
+           ('OUTPUT_FOLDER', 'UPLOAD_FOLDER', 'FILE_RETENTION_HOURS')}
+    app_module.app.config['OUTPUT_FOLDER'] = tmp['outputs']
+    app_module.app.config['UPLOAD_FOLDER'] = tmp['uploads']
+    app_module.app.config['FILE_RETENTION_HOURS'] = retention_hours
 
     def restore():
-        app_module.app.config['OUTPUT_FOLDER'] = old_folder
-        app_module.app.config['OUTPUT_RETENTION_HOURS'] = old_retention
+        app_module.app.config.update(old)
 
-    return tmp, app_module._cleanup_outputs_once, restore
+    return tmp, app_module._cleanup_stale_files_once, restore
 
 
 def test_default_retention_config():
-    """两小时保留时长是默认配置项。"""
-    assert app_module.app.config['OUTPUT_RETENTION_HOURS'] == 2
+    """两小时保留时长是默认配置项，outputs 与 uploads 共用。"""
+    assert app_module.app.config['FILE_RETENTION_HOURS'] == 2
 
 
 def test_stale_root_chart_removed_fresh_kept():
     """根目录散落的图表文件超时删除、未超时保留。"""
-    folder, cleanup, restore = _with_tmp_outputs(retention_hours=2)
+    dirs, cleanup, restore = _with_tmp_dirs(retention_hours=2)
     try:
-        old_chart = os.path.join(folder, 'analysis_old.png')
-        fresh_chart = os.path.join(folder, 'analysis_new.png')
+        old_chart = os.path.join(dirs['outputs'], 'analysis_old.png')
+        fresh_chart = os.path.join(dirs['outputs'], 'analysis_new.png')
         open(old_chart, 'w').close()
         open(fresh_chart, 'w').close()
         _backdate(old_chart, hours_ago=3)
@@ -64,10 +65,10 @@ def test_stale_root_chart_removed_fresh_kept():
 
 
 def test_stale_session_tree_removed_empty_date_dir_removed():
-    """超时会话目录整树删除，清空后的日期目录一并删除。"""
-    folder, cleanup, restore = _with_tmp_outputs(retention_hours=2)
+    """outputs 超时会话目录整树删除，清空后的日期目录一并删除。"""
+    dirs, cleanup, restore = _with_tmp_dirs(retention_hours=2)
     try:
-        date_dir = os.path.join(folder, '2026-09-15')
+        date_dir = os.path.join(dirs['outputs'], '2026-09-15')
         session = os.path.join(date_dir, 'session-a')
         audio_dir = os.path.join(session, 'audio')
         os.makedirs(audio_dir)
@@ -89,9 +90,9 @@ def test_stale_session_tree_removed_empty_date_dir_removed():
 
 def test_fresh_tree_kept_despite_old_dir_mtime():
     """目录自身 mtime 很旧但树内有新文件时不能误删（正在写入的会话）。"""
-    folder, cleanup, restore = _with_tmp_outputs(retention_hours=2)
+    dirs, cleanup, restore = _with_tmp_dirs(retention_hours=2)
     try:
-        date_dir = os.path.join(folder, '2026-09-16')
+        date_dir = os.path.join(dirs['outputs'], '2026-09-16')
         session = os.path.join(date_dir, 'session-b')
         os.makedirs(os.path.join(session, 'video'))
         mp4 = os.path.join(session, 'video', 'fs_out_0002.mp4')
@@ -108,9 +109,9 @@ def test_fresh_tree_kept_despite_old_dir_mtime():
 
 def test_mixed_date_dir_keeps_fresh_session_and_date_dir():
     """同一日期目录下新会话保留时，日期目录本身也必须保留。"""
-    folder, cleanup, restore = _with_tmp_outputs(retention_hours=2)
+    dirs, cleanup, restore = _with_tmp_dirs(retention_hours=2)
     try:
-        date_dir = os.path.join(folder, '2026-09-16')
+        date_dir = os.path.join(dirs['outputs'], '2026-09-16')
         stale_session = os.path.join(date_dir, 'session-old')
         fresh_session = os.path.join(date_dir, 'session-new')
         os.makedirs(stale_session)
@@ -130,20 +131,45 @@ def test_mixed_date_dir_keeps_fresh_session_and_date_dir():
         restore()
 
 
-def test_zero_retention_clears_everything():
-    """保留时长为 0 时全部输出都被清理（配置项确实生效）。"""
-    folder, cleanup, restore = _with_tmp_outputs(retention_hours=0)
+def test_stale_upload_session_removed_fresh_kept():
+    """uploads 的会话目录（内含上传抓包）超时整树删除，未超时保留。"""
+    dirs, cleanup, restore = _with_tmp_dirs(retention_hours=2)
     try:
-        date_dir = os.path.join(folder, '2026-09-16')
-        session = os.path.join(date_dir, 'session-c')
-        os.makedirs(session)
-        open(os.path.join(session, 'a.wav'), 'w').close()
-        chart = os.path.join(folder, 'analysis_today.png')
-        open(chart, 'w').close()
+        stale_dir = os.path.join(dirs['uploads'], 'session-old')
+        fresh_dir = os.path.join(dirs['uploads'], 'session-new')
+        os.makedirs(stale_dir)
+        os.makedirs(fresh_dir)
+        old_pcap = os.path.join(stale_dir, 'old.pcap')
+        fresh_pcap = os.path.join(fresh_dir, 'new.pcap')
+        open(old_pcap, 'w').close()
+        open(fresh_pcap, 'w').close()
+        _backdate(old_pcap, hours_ago=3)
+        _backdate(stale_dir, hours_ago=3)
 
         cleanup()
 
-        assert os.listdir(folder) == []
+        assert not os.path.exists(stale_dir)
+        assert os.path.exists(fresh_pcap)
+    finally:
+        restore()
+
+
+def test_zero_retention_clears_everything():
+    """保留时长为 0 时 outputs 与 uploads 全部被清理（配置项确实生效）。"""
+    dirs, cleanup, restore = _with_tmp_dirs(retention_hours=0)
+    try:
+        session = os.path.join(dirs['outputs'], '2026-09-16', 'session-c')
+        os.makedirs(session)
+        open(os.path.join(session, 'a.wav'), 'w').close()
+        open(os.path.join(dirs['outputs'], 'analysis_today.png'), 'w').close()
+        upload = os.path.join(dirs['uploads'], 'session-d')
+        os.makedirs(upload)
+        open(os.path.join(upload, 'b.pcap'), 'w').close()
+
+        cleanup()
+
+        assert os.listdir(dirs['outputs']) == []
+        assert os.listdir(dirs['uploads']) == []
     finally:
         restore()
 
@@ -154,8 +180,9 @@ def main():
     test_stale_session_tree_removed_empty_date_dir_removed()
     test_fresh_tree_kept_despite_old_dir_mtime()
     test_mixed_date_dir_keeps_fresh_session_and_date_dir()
+    test_stale_upload_session_removed_fresh_kept()
     test_zero_retention_clears_everything()
-    print("\n=== ALL OUTPUT CLEANUP TESTS PASSED ===")
+    print("\n=== ALL FILE CLEANUP TESTS PASSED ===")
 
 
 if __name__ == '__main__':
