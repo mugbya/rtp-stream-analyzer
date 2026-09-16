@@ -4,10 +4,10 @@ RTP Stream Analyzer - Flask Web Application
 """
 import os
 import json
+import re
 import uuid
 from datetime import date
 from flask import Flask, render_template, request, jsonify, send_file, url_for
-from werkzeug.utils import secure_filename
 
 from analyzer.rtp_parser import extract_rtp_packets, get_stream_packets
 from analyzer.stream_classifier import (
@@ -65,8 +65,15 @@ def upload_files():
     for key in request.files:
         file = request.files[key]
         if file.filename:
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(session_dir, filename)
+            # 展示名保留用户上传的原始文件名（含中文）；secure_filename 会把
+            # 非 ASCII 字符全部删掉（"坐席端.pcap" → "pcap"），不能用于展示
+            filename = file.filename
+            # 磁盘存储名用 uuid 生成、仅保留原扩展名，规避路径穿越/同名互覆/
+            # 超长文件名问题；抓包解析按文件内容嗅探，不依赖文件名
+            ext = os.path.splitext(filename)[1].lower()
+            ext = ext if re.fullmatch(r'\.[A-Za-z0-9]{1,10}', ext) else ''
+            stored_name = uuid.uuid4().hex + ext
+            filepath = os.path.join(session_dir, stored_name)
             file.save(filepath)
 
             # 解析 RTP；无法解析的文件直接报错（其余文件不受影响）
@@ -86,6 +93,7 @@ def upload_files():
             files_info.append({
                 'role': key,
                 'filename': filename,
+                'stored': stored_name,
                 'total_packets': rtp_data['total_count'],
                 'ips': sorted([ip for ip in rtp_data['ips']
                               if not ip.startswith('224.') and not ip.startswith('239.')
@@ -175,7 +183,7 @@ def run_analysis():
     # _role 为规范化角色（terminal/seat/fs），供无声诊断/延迟链路按角色锚定
     captures = {}
     for fi in files_info:
-        filepath = os.path.join(session_dir, fi['filename'])
+        filepath = os.path.join(session_dir, fi['stored'])
         cap = extract_rtp_packets(filepath, include_payload=True)
         cap['_role'] = _canonical_role(fi['role'])
         captures[fi['role']] = cap
