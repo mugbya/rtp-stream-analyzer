@@ -1008,9 +1008,12 @@ async function runAnalysis(callIdOverride = null) {
             reportHtml += '</ul>';
         }
 
-        // 声音问题分类：对照《声音问题种类》清单，把检测结论对号入座
+        // 声音/视频问题分类：对照清单，把检测结论对号入座
         if (data.report.problem_classification) {
             reportHtml += renderProblemClassification(data.report.problem_classification);
+        }
+        if (data.report.video_problem_classification) {
+            reportHtml += renderVideoProblemClassification(data.report.video_problem_classification);
         }
 
         // 音画质量分析：杂音/啸叫/削波破音/底噪（音频）与花屏风险（视频）
@@ -1110,7 +1113,8 @@ const QUALITY_BADGES = {
 // 单独折叠列出人工验证方法。
 const PRIO_BADGE = {P0: 'danger', P1: 'warning', P2: 'info', P3: 'secondary'};
 
-function _problemCard(p) {
+function _problemCard(p, feelNoun) {
+    feelNoun = feelNoun || '听感';
     let html = '<div class="border rounded p-2 mb-2">';
     html += '<div class="d-flex flex-wrap align-items-center gap-2">' +
             `<span class="badge bg-${PRIO_BADGE[p.priority] || 'secondary'}">${p.priority}</span>` +
@@ -1120,7 +1124,7 @@ function _problemCard(p) {
             `<span class="badge bg-${p.severity === 'critical' ? 'danger' : p.severity === 'warning' ? 'warning' : 'secondary'}">` +
             `${p.severity === 'critical' ? '严重' : p.severity === 'warning' ? '注意' : '提示'}</span>` +
             '</div>';
-    html += `<div class="small mt-1">用户听感：` +
+    html += `<div class="small mt-1">用户${feelNoun}：` +
             p.feel.map(f => `<span class="badge bg-warning-subtle text-dark border border-warning-subtle me-1 fw-normal">“${_esc(f)}”</span>`).join('') +
             '</div>';
     html += `<div class="small text-muted mt-1">${_esc(p.description)}</div>`;
@@ -1135,36 +1139,48 @@ function _problemCard(p) {
     return html;
 }
 
+// 声音/视频问题分类共用一套卡片布局，只差标题、清单名、空态文案与
+// "听感/观感"用词
 function renderProblemClassification(pc) {
+    return _renderProblemSection(pc, '声音问题分类', '声音问题种类',
+                                 '抓包层面未发现可归类的声音问题。', '听感');
+}
+
+function renderVideoProblemClassification(pc) {
+    return _renderProblemSection(pc, '视频问题分类', '视频问题',
+                                 '抓包层面未发现可归类的视频问题。', '观感');
+}
+
+function _renderProblemSection(pc, title, docName, emptyText, feelNoun) {
     if (!pc || !pc.available) return '';
-    let html = '<h6 class="mt-3">声音问题分类' +
-        ' <span class="text-muted small fw-normal">对照《声音问题种类》清单，把检测结论对号入座</span></h6>';
+    let html = `<h6 class="mt-3">${_esc(title)}` +
+        ` <span class="text-muted small fw-normal">对照《${_esc(docName)}》清单，把检测结论对号入座</span></h6>`;
     html += `<div class="alert alert-secondary py-2 small mb-2">${_esc(pc.summary)}</div>`;
     (pc.notes || []).forEach(n => {
         html += `<p class="small text-muted mb-2">${_esc(n)}</p>`;
     });
     if (!pc.problems.length) {
-        html += '<div class="alert alert-success py-2 mb-2">抓包层面未发现可归类的声音问题。</div>';
+        html += `<div class="alert alert-success py-2 mb-2">${_esc(emptyText)}</div>`;
     }
     const severe = pc.problems.filter(p => p.severity === 'critical');
     const minor = pc.problems.filter(p => p.severity !== 'critical');
-    severe.forEach(p => { html += _problemCard(p); });
+    severe.forEach(p => { html += _problemCard(p, feelNoun); });
     if (minor.length) {
         if (severe.length) {
             // 有严重级问题时，注意/提示级默认收起，点开才看
             html += `<details class="mt-1">` +
                     `<summary class="small text-muted user-select-none">另有 ${minor.length} 类注意/提示级问题（点开展开查看）</summary>` +
                     '<div class="mt-2">';
-            minor.forEach(p => { html += _problemCard(p); });
+            minor.forEach(p => { html += _problemCard(p, feelNoun); });
             html += '</div></details>';
         } else {
-            minor.forEach(p => { html += _problemCard(p); });
+            minor.forEach(p => { html += _problemCard(p, feelNoun); });
         }
     }
     if (pc.unobservable && pc.unobservable.length) {
-        html += `<details class="mt-2"><summary class="small text-muted user-select-none">另有 ${pc.unobservable.length} 类听感问题无法仅凭抓包确认（点开看原因与人工验证方法）</summary>`;
+        html += `<details class="mt-2"><summary class="small text-muted user-select-none">另有 ${pc.unobservable.length} 类${_esc(feelNoun)}问题无法仅凭抓包确认（点开看原因与人工验证方法）</summary>`;
         html += '<div class="table-responsive mt-1"><table class="table table-sm table-bordered small mb-0">' +
-                '<thead><tr><th>类别</th><th>问题</th><th>用户听感</th><th>为什么抓包看不到</th><th>人工验证方法</th></tr></thead><tbody>';
+                '<thead><tr><th>类别</th><th>问题</th><th>用户' + _esc(feelNoun) + '</th><th>为什么抓包看不到</th><th>人工验证方法</th></tr></thead><tbody>';
         pc.unobservable.forEach(u => {
             html += `<tr><td>${_esc(u.category)}</td><td>${_esc(u.name)}</td>` +
                     `<td>${u.feel.map(f => `“${_esc(f)}”`).join(' ')}</td>` +

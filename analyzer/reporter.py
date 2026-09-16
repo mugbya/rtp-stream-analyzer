@@ -6,22 +6,26 @@ import json
 from datetime import datetime
 
 from analyzer.problem_taxonomy import classify_problems
+from analyzer.video_problem_taxonomy import classify_video_problems
 
 
 def generate_report(analysis_results: dict) -> dict:
     """生成完整的分析报告。
-    
+
     Args:
         analysis_results: 包含所有分析结果的字典
-        
+
     Returns:
         结构化报告字典
     """
+    # 问题分类按所选媒体类型门控：只选音频时不出视频分类，反之亦然；
+    # 未选中的键直接缺省，前端不渲染对应区块
+    media_type = analysis_results.get('media_type', 'audio')
     report = {
         'metadata': {
             'generated_at': datetime.now().isoformat(),
             'direction': analysis_results.get('direction', 'unknown'),
-            'media_type': analysis_results.get('media_type', 'unknown'),
+            'media_type': media_type,
             'num_captures': analysis_results.get('num_captures', 0),
             'capture_roles': analysis_results.get('capture_roles', {}),
         },
@@ -40,10 +44,15 @@ def generate_report(analysis_results: dict) -> dict:
             'video': analysis_results.get('video_quality') or {},
         },
         'conclusion': _build_conclusion(analysis_results),
+    }
+    if media_type in ('audio', 'all'):
         # 声音问题分类：对照《声音问题种类》清单，把各检测器结论聚合为
         # "问题种类 + 用户听感词 + 排查方向"，供前端单独渲染
-        'problem_classification': classify_problems(analysis_results),
-    }
+        report['problem_classification'] = classify_problems(analysis_results)
+    if media_type in ('video', 'all'):
+        # 视频问题分类：对照《视频问题》清单，同构聚合（视频流证据）
+        report['video_problem_classification'] = classify_video_problems(
+            analysis_results)
     return report
 
 

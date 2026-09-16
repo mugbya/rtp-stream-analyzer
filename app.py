@@ -257,16 +257,24 @@ def run_analysis():
         summ = rtcp_by_role[role]
         for ssrc in target_streams:
             info = cap['streams'].get(ssrc)
-            if not info or not any(pt in AUDIO_PT for pt in info.get('pt', [])):
+            if not info:
                 continue
-            silence_profiles[(role, ssrc)] = analyze_silence(cap['packets'], ssrc)
-            entry = {}
+            pts = info.get('pt', [])
+            is_audio = any(pt in AUDIO_PT for pt in pts)
+            is_video = any(pt in VIDEO_PT_RANGE for pt in pts)
+            if not is_audio and not is_video:
+                continue
+            if is_audio:
+                silence_profiles[(role, ssrc)] = analyze_silence(cap['packets'], ssrc)
+            entry = {'kind': 'audio' if is_audio else 'video'}
             if ssrc in summ['sr']:
                 entry['sr'] = summ['sr'][ssrc]
             if ssrc in summ['rr']:
                 entry['rr'] = summ['rr'][ssrc]
-            if entry:
-                rtcp_results[f"{role} (SSRC=0x{ssrc:08x})"] = entry
+            fb = summ.get('fb', {}).get(ssrc)
+            if fb:
+                entry['fb'] = fb
+            rtcp_results[f"{role} (SSRC=0x{ssrc:08x})"] = entry
     results['rtcp'] = rtcp_results
 
     if selected_call:

@@ -160,7 +160,8 @@ def test_video_only_scope():
 
 
 def test_report_wiring():
-    """generate_report 输出 problem_classification，且与直接调用一致。"""
+    """generate_report 按 media_type 门控：audio 只出声音分类；all 两类都出
+    （视频类恒有键，纯音频通话时 available=False 而不是缺键）。"""
     results = {**BASE, 'audio_health': {
         'available': True, 'p2p': False,
         'directions': [{'label': '坐席 → 主叫', 'speaker': '坐席', 'listener': '主叫',
@@ -173,7 +174,32 @@ def test_report_wiring():
     assert pc['available'], pc
     p = _find(pc['problems'], 'one_way_audio')
     assert p and p['priority'] == 'P0', pc
-    print("PASS: problem_classification wired into generate_report")
+    assert 'video_problem_classification' not in report, report.keys()
+    report_all = generate_report({**results, 'media_type': 'all'})
+    assert 'problem_classification' in report_all, report_all.keys()
+    vpc = report_all['video_problem_classification']
+    assert vpc['available'] is False and vpc['problems'] == [], vpc
+    print("PASS: problem_classification wired & gated by media_type")
+
+
+def test_video_evidence_not_in_audio():
+    """视频流证据（丢包 / RTCP kind=video）不串进声音分类。"""
+    results = {**BASE, 'media_type': 'all',
+               'classified_streams': {
+                   'audio': {0x11111111: {'pt': [0], 'count': 500}},
+                   'video': {0x22222222: {'pt': [96], 'count': 3000}}},
+               'packet_loss': {'0x22222222': {
+                   'label': 'fs (SSRC=0x22222222)', 'total_packets': 3000,
+                   'total_lost': 90, 'loss_rate_pct': 3.0, 'reorder_count': 0,
+                   'is_clean': False}},
+               'rtcp': {'fs (SSRC=0x22222222)': {
+                   'kind': 'video',
+                   'rr': {'fraction_lost_pct': 5.0, 'cum_lost': 90}}}}
+    out = classify_problems(results)
+    loss = _find(out['problems'], 'loss_artifact')
+    assert not loss, out['problems']
+    assert not out['problems'], out['problems']
+    print("PASS: video-kind evidence excluded from audio classification")
 
 
 def test_taxonomy_consistency():
@@ -196,5 +222,6 @@ if __name__ == '__main__':
     test_clean_and_unobservable()
     test_video_only_scope()
     test_report_wiring()
+    test_video_evidence_not_in_audio()
     test_taxonomy_consistency()
     print("ALL TESTS PASSED")

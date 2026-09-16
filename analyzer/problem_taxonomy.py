@@ -1,7 +1,7 @@
 """
 声音问题分类：把各检测器的原始结论翻译成"用户听得懂的问题种类"。
 
-对照仓库根目录《声音问题种类.md》清单（类别 / 用户听感词 / 工程术语 /
+对照 docs/《声音问题种类.md》清单（类别 / 用户听感词 / 工程术语 /
 常见原因 / 验证方法 / P0~P3 优先级），并补充清单里没有、但抓包分析必需
 的一个维度——**可观测性**：清单里的问题有些在 RTP 层能直接确认（单通、
 丢包、时钟异常、啸叫、削波），有些只能间接推断（窄带发闷 → 可能是蓝牙
@@ -17,10 +17,44 @@ classify_problems() 与 reporter 消费同一份分析结果，把各检测器�
 清单表格本身没有标注每行的可观测性与优先级归属，代码里以 TAXONOMY
 （可观测部分，含优先级）/ UNOBSERVABLE（抓包看不到的部分）两个表落位；
 若后续修订 md 清单，两处需同步。
+
+视频问题的同构实现见 video_problem_taxonomy（对照 docs/《视频问题.md》）。
 """
+import re
+
+from .stream_classifier import AUDIO_PT, VIDEO_PT_RANGE
+
 # 证据严重级 → 展示排序
 _SEVERITY_RANK = {'critical': 0, 'warning': 1, 'info': 2}
 _PRIORITY_RANK = {'P0': 0, 'P1': 1, 'P2': 2, 'P3': 3}
+
+# 键形态兼容：int SSRC、'0x…' 十六进制串、'fs (SSRC=0x…)' 展示标签
+_SSRC_RE = re.compile(r'0x([0-9a-fA-F]+)')
+
+
+def _ssrc_int_of(key) -> int | None:
+    """从结果字典的键里取 SSRC 整数（兼容 int / 十六进制串 / 展示标签）。"""
+    if isinstance(key, int):
+        return key
+    m = _SSRC_RE.search(str(key))
+    return int(m.group(1), 16) if m else None
+
+
+def stream_media_kind(results: dict, key) -> str:
+    """判定一个结果键（SSRC）属于 audio 还是 video。
+
+    按 classified_streams 的分桶归属判别（{'audio': {ssrc: info}, …}）；
+    老会话数据缺 classified_streams 时回退 audio（保持旧版只按音频理解
+    的口径），unknown 桶同样按 audio 处理。
+    """
+    ssrc = _ssrc_int_of(key)
+    classified = results.get('classified_streams') or {}
+    if ssrc is not None:
+        if ssrc in (classified.get('video') or {}):
+            return 'video'
+        if ssrc in (classified.get('audio') or {}):
+            return 'audio'
+    return 'audio'
 
 # 各检测器 issue kind → 问题种类 id（仅音画质量分析器的 kinds；报告层
 # 其余结论按下方各自的字段直接判定，不走 kind 路由）
@@ -254,9 +288,17 @@ def _gap_human(gap_ms: float) -> str:
 
 
 class _Collector:
-    """按问题 id 聚合证据；同一问题被多个检测器命中时合并为多条证据。"""
+    """按问题 id 聚合证据；同一问题被多个检测器命中时合并为多条证据。
 
-    def __init__(self):
+    taxonomy 缺省用音频清单，视频分类器传入 VIDEO_TAXONOMY 复用；
+    priority_by_severity 是"优先级随严重度浮动"的映射，缺省用音频表，
+    视频分类器传入自己的映射。
+    """
+
+    def __init__(self, taxonomy: dict | None = None,
+                 priority_by_severity: dict | None = None):
+        self.taxonomy = taxonomy or TAXONOMY
+        self.priority_by_severity = priority_by_severity or _PRIORITY_BY_SEVERITY
         self.found = {}
 
     def add(self, pid: str, evidence: str, severity: str = 'info',
@@ -273,12 +315,12 @@ class _Collector:
             entry['severity'] = severity
 
     def output(self) -> list:
-        """按优先级 → 严重度输出问题条目（每种类的固定字段取自 TAXONOMY）。"""
+        """按优先级 → 严重度输出问题条目（每种类的固定字段取自分类表）。"""
         problems = []
         for pid, hit in self.found.items():
-            spec = TAXONOMY[pid]
+            spec = self.taxonomy[pid]
             severity = hit['severity']
-            priority = (_PRIORITY_BY_SEVERITY.get(pid, {})
+            priority = (self.priority_by_severity.get(pid, {})
                         .get(severity, spec['priority']))
             problems.append({
                 'id': pid,
@@ -340,19 +382,23 @@ def classify_problems(results: dict) -> dict:
             col.add('one_way_audio', f"FS 媒体转发：{fs_relay.get('headline', '')}",
                     'warning', 'FS 转发判定')
 
-    # —— 流级丢包 ——
-    for label, data in (results.get('packet_loss') or {}).items():
+    # —— 流级丢包（只认音频流；视频流丢包归视频分类器） ——
+    for key, data in (results.get('packet_loss') or {}).items():
+        if stream_media_kind(results, key) == 'video':
+            continue
         if data.get('is_clean', True):
             continue
         has_audio = True
         sev = 'critical' if data.get('loss_rate_pct', 0) >= 3 else 'warning'
         col.add('loss_artifact',
-                f"{label}: 丢失 {data.get('total_lost', 0)} 包"
+                f"{data.get('label', '')}: 丢失 {data.get('total_lost', 0)} 包"
                 f"（丢包率 {data.get('loss_rate_pct', 0):.2f}%）",
                 sev, '丢包检测')
 
-    # —— RTCP RR 自报丢包（接收端亲历视角） ——
+    # —— RTCP RR 自报丢包（接收端亲历视角；kind 缺省按音频，旧数据兼容） ——
     for label, entry in (results.get('rtcp') or {}).items():
+        if entry.get('kind') == 'video':
+            continue
         rr = entry.get('rr')
         if not rr:
             continue
@@ -392,8 +438,10 @@ def classify_problems(results: dict) -> dict:
                         f"HFP/SCO 链路",
                         'info', '编码检查')
 
-    # —— 时间戳连续性（发送端媒体时钟行为） ——
+    # —— 时间戳连续性（发送端媒体时钟行为；frame 模式是视频流，跳过） ——
     for label, data in (results.get('ts_continuity') or {}).items():
+        if data.get('mode') == 'frame':
+            continue
         gap = data.get('total_media_gap_ms') or 0
         if data.get('jump_count', 0):
             has_audio = True
@@ -434,6 +482,8 @@ def classify_problems(results: dict) -> dict:
                     f"FS 内部处理延迟均值 {fs_delay['mean']:.1f}ms，偏高",
                     'warning', '延迟分析')
     for label, data in (results.get('jitter') or {}).items():
+        if stream_media_kind(results, label) == 'video':
+            continue
         if data.get('std', 0) > 10:
             has_audio = True
             col.add('latency',
