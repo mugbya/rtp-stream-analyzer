@@ -30,6 +30,7 @@ from analyzer.rtcp_parser import summarize_rtcp
 from analyzer.delay_chains import build_delay_chains
 from analyzer.quality_analyzer import analyze_audio_quality, analyze_video_quality
 from analyzer.call_detector import detect_calls, check_capture_consistency
+from analyzer.capture_integrity import merge_integrity
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -68,8 +69,12 @@ def upload_files():
             filepath = os.path.join(session_dir, filename)
             file.save(filepath)
 
-            # 解析 RTP
-            rtp_data = extract_rtp_packets(filepath)
+            # 解析 RTP；无法解析的文件直接报错（其余文件不受影响）
+            try:
+                rtp_data = extract_rtp_packets(filepath)
+            except Exception:
+                return jsonify({'error': f'文件 {filename} 无法解析为抓包文件'
+                                         '（格式不支持或已损坏）'}), 400
             rtp_captures[key] = rtp_data
 
             # 收集流信息
@@ -86,6 +91,8 @@ def upload_files():
                               if not ip.startswith('224.') and not ip.startswith('239.')
                               and ip not in ('0.0.0.0', '255.255.255.255')]),
                 'stream_count': len(rtp_data['streams']),
+                # 抓包完整性（截短/文件尾损坏）：只提示，不阻断分析
+                'integrity': rtp_data['integrity'],
             })
 
     # 自动检测服务器 IP
@@ -105,6 +112,9 @@ def upload_files():
                                                 server_ip=server_ip,
                                                 server_roles=server_roles)
 
+    # 抓包完整性汇总：哪些文件有截短包/文件尾损坏（有提示但继续分析）
+    integrity_warning = merge_integrity(files_info)
+
     # 分类流
     classified = classify_all_streams(all_streams)
 
@@ -120,6 +130,7 @@ def upload_files():
         'session_dir': session_dir,
         'calls': calls,
         'capture_warning': capture_warning,
+        'integrity_warning': integrity_warning,
     }
 
     return jsonify({
@@ -131,6 +142,7 @@ def upload_files():
         'available_directions': available_directions,
         'calls': calls,
         'capture_warning': capture_warning,
+        'integrity_warning': integrity_warning,
     })
 
 
@@ -203,6 +215,10 @@ def run_analysis():
         'detected_server_ip': server_ip,
         'streams': all_streams,
         'classified_streams': classified,
+        # 每份抓包的完整性结论（截短/文件尾损坏），报告据此加数据说明
+        'capture_integrity': {role: cap['integrity']
+                              for role, cap in captures.items()
+                              if cap.get('integrity')},
     }
     
     # === 抖动分析 ===
@@ -456,6 +472,7 @@ def get_session(session_id):
         'video_streams': len(session['classified'].get('video', {})),
         'calls': session.get('calls') or [],
         'capture_warning': session.get('capture_warning'),
+        'integrity_warning': session.get('integrity_warning'),
         'results': safe_results,
     })
 

@@ -2,13 +2,15 @@
 RTP Packet Parser
 Parse pcap/pcapng files and extract all RTP packet information.
 """
-from scapy.all import rdpcap, IP, UDP, Raw
+from scapy.all import IP, UDP, Raw
+from scapy.utils import PcapReader
 from scapy.layers.inet import defragment
 from collections import defaultdict
 import os
 import re
 
 from analyzer.rtcp_parser import parse_rtcp
+from analyzer.capture_integrity import TRUNC_MIN_BYTES, build_integrity, scan_pcap_headers
 
 # SIP requests kept for call detection and per-call signaling flow.
 # Dialog-related methods only: REGISTER/OPTIONS/SUBSCRIBE keepalives carry
@@ -236,14 +238,33 @@ def parse_rtp_header(payload: bytes):
     return (pt, seq, ts, ssrc, payload[12:])
 
 
+def _read_capture(filepath: str):
+    """读取抓包文件（等价 rdpcap），文件中途损坏时保留已解析的包。
+
+    返回 (packets, file_cut)。file_cut=True 表示读取中途出错（文件传输出错/
+    抓包被强制终止）——像 Wireshark 一样带提示继续分析，而不是整份拒收。
+    一个包都读不出时属于格式无效，交由上层报错。
+    """
+    pkts = []
+    try:
+        with PcapReader(filepath) as reader:
+            for p in reader:
+                pkts.append(p)
+        return pkts, False
+    except Exception:
+        if not pkts:
+            raise
+        return pkts, True
+
+
 def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
     """Extract all RTP packets from a pcap file.
-    
+
     Args:
         filepath: Path to pcap/pcapng file.
         include_payload: If True, store the raw RTP payload bytes for each packet.
                          Set to False for upload/preview to save memory.
-        
+
     Returns:
         {
             'packets': {(ssrc, seq): (capture_time, rtp_ts, pt, src_ip, dst_ip, src_port, dst_port, [payload])},
@@ -255,13 +276,14 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
             'capture_end': float,     # last packet time
             'sip_events': [{'time': float, 'method': str, 'reason': str,
                             'call_id': str, 'src': str, 'dst': str}],
+            'integrity': {...},       # 抓包完整性（截短/文件尾损坏），照常分析但提示
         }
     """
-    pkts = rdpcap(filepath)
+    raw_pkts, file_cut = _read_capture(filepath)
     # 大 SDP 的 SIP 消息超过 MTU 时会被 IP 分片：只有首片带 UDP 头，SDP 正文
     # 往往落在后续分片里。先重组再遍历，否则这些消息只剩半截、SDP 解析不到
     # （协商编码、媒体端点全丢，直接影响信令流程与通话归属判定）
-    pkts = defragment(pkts)
+    pkts = defragment(raw_pkts)
     packets = {}
     ips = set()
     ssrcs = set()
@@ -270,13 +292,26 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
     capture_end = None
     sip_events = []
     rtcp_events = []
+    # 抓包完整性统计：wirelen（线上原始长度）> 已捕获长度说明包被截短
+    # （快照长度不足或文件尾损坏），对应 Wireshark 的
+    # "Packet size limited during capture" 提示
+    trunc_all = trunc_rtp = 0
+    max_missing = 0
+    all_count = 0
 
     for p in pkts:
+        all_count += 1
         t = float(p.time)
         if capture_start is None or t < capture_start:
             capture_start = t
         if capture_end is None or t > capture_end:
             capture_end = t
+        wirelen = p.wirelen
+        missing = (wirelen - len(p)) if wirelen else 0
+        truncated = missing >= TRUNC_MIN_BYTES
+        if truncated:
+            trunc_all += 1
+            max_missing = max(max_missing, missing)
         if IP in p and UDP in p and Raw in p:
             # SIP signaling (completeness signal + per-call flow display)
             if p[UDP].sport == 5060 or p[UDP].dport == 5060:
@@ -290,6 +325,8 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
             rtp = parse_rtp_header(bytes(p[Raw]))
             if rtp:
                 pt, seq, ts, ssrc, payload = rtp
+                if truncated:
+                    trunc_rtp += 1
                 src_ip = p[IP].src
                 dst_ip = p[IP].dst
                 src_port = p[UDP].sport
@@ -331,6 +368,16 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
                 'port_pairs': [list(pp) for pp in info['port_pairs']],
             }
     
+    # 文件级走查：取快照长度与记录头级别的截短数（能区分“快照截短”与
+    # “文件尾半包”）；走查失败时退回按包统计
+    scan = scan_pcap_headers(filepath) or {}
+    scan['file_cut'] = file_cut
+    scan['header_truncated'] = scan.get('truncated_records')
+    scan.setdefault('truncated', trunc_all)
+    scan.setdefault('max_missing_bytes', max_missing)
+    scan['all_packets'] = all_count
+    scan['truncated_rtp'] = trunc_rtp
+
     return {
         'packets': packets,
         'total_count': len(packets),
@@ -341,6 +388,7 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
         'capture_end': capture_end,
         'sip_events': sip_events,
         'rtcp_events': rtcp_events,
+        'integrity': build_integrity(scan),
     }
 
 

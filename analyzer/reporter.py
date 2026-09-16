@@ -294,6 +294,20 @@ def _build_conclusion(results: dict) -> dict:
     issues = []
     ok_items = []
 
+    # 抓包完整性说明（截短/文件尾损坏）：数据不完整不影响继续分析，但
+    # 所有统计与媒体重建都要带着"可能有缺漏"的前提来读，放在问题列表最前
+    data_notes = []
+    for role, info in (results.get('capture_integrity') or {}).items():
+        if info.get('status') != 'warn':
+            continue
+        fname = (results.get('capture_roles') or {}).get(role, role)
+        for note in info.get('notes') or []:
+            data_notes.append({
+                'severity': 'warning',
+                'message': f'抓包可能不完整（{fname}）：{note}。'
+                           '分析已按现有数据继续，相关统计与媒体重建可能受影响。',
+            })
+
     # FS 内部延迟评估
     if fs_delay.get('count', 0) > 0:
         if fs_delay['mean'] < 20 and fs_delay['p95'] < 50:
@@ -492,7 +506,8 @@ def _build_conclusion(results: dict) -> dict:
                        '（抓包点未覆盖 RTCP 端口，或终端未启用 RTCP）',
         })
 
-    # 根因分析
+    # 根因分析（数据说明一并计入：抓包不完整本身就可能解释结论的缺口）
+    issues = data_notes + issues
     root_cause = None
     if not issues:
         root_cause = ('RTP 层面未发现明显问题。延迟可能来自应用层'
@@ -501,7 +516,7 @@ def _build_conclusion(results: dict) -> dict:
         root_cause = 'RTP 层面发现严重问题，请检查 FS 配置与网络状况。'
     else:
         root_cause = '发现轻微问题，建议持续观察，并考虑调整终端缓冲参数。'
-    
+
     return {
         'issues': issues,
         'ok_items': ok_items,

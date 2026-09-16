@@ -7,6 +7,12 @@ let uploadedCount = 0;
 let detectedCalls = [];
 let detectedServerIp = null;
 let ipRoleMap = {};  // ip -> 角色名（用于 SIP 流程里把 IP 显示为端点名）
+// 抓包完整性警告（上传响应的 integrity_warning，null = 完整）。
+// 点击"开始分析"时若存在则弹窗让用户确认：继续分析 / 放弃分析；
+// 本会话内确认过一次后不再重复弹窗
+let integrityWarning = null;
+let integrityConfirmed = false;
+let pendingCallIdOverride = null;   // 弹窗确认期间暂存的通话切换参数
 
 // ====== 展示常量 ======
 const ROLE_NAMES = { seat: '坐席端', fs: 'FS 服务器端', terminal: '终端 / 主叫端' };
@@ -95,6 +101,9 @@ async function uploadFiles() {
 
         sessionId = data.session_id;
         detectedCalls = data.calls || [];
+        // 新上传 = 新会话：记录完整性警告并重置确认状态（重新弹窗）
+        integrityWarning = data.integrity_warning || null;
+        integrityConfirmed = false;
         status.innerHTML = '<span class="text-success">✓ 上传成功，已识别 ' + data.files.length + ' 个文件</span>';
 
         // 显示识别结果
@@ -155,6 +164,8 @@ function showDetectionResults(data) {
         </tr>`;
     });
     detail += '</tbody></table>';
+    // 抓包完整性提醒（截短包/文件尾损坏）：像 Wireshark 一样提示但继续分析
+    detail += _integrityWarningHtml(data.files);
     document.getElementById('streams-detail').innerHTML = detail;
 
     // 通话列表 + 完整性状态 + 跨抓包一致性提醒
@@ -755,6 +766,83 @@ function showConfigPanel(data) {
     renderCallSelector(data.calls || [], data.capture_warning);
 }
 
+// 抓包完整性提醒（截短包/文件尾损坏）：像 Wireshark 的提示——只告知数据
+// 受限，不阻断分析。files 来自上传响应/会话接口，元素带 integrity 字段
+function _integrityWarningHtml(files) {
+    const rows = (files || []).filter(f => f.integrity && f.integrity.status === 'warn')
+        .map(f => `<li><strong>${ROLE_NAMES[f.role] || f.role}</strong>（${_esc(f.filename)}）：` +
+            `<ul class="list-unstyled mb-0 ms-3 text-muted">${(f.integrity.notes || [])
+                .map(n => `<li>${_esc(n)}</li>`).join('')}</ul></li>`);
+    if (!rows.length) return '';
+    return `<div class="alert alert-warning w-100 mb-2 py-2 small mt-2">
+        <strong><i class="bi bi-crop me-1"></i>抓包可能不完整（已按现有数据继续分析）</strong>
+        <ul class="mb-1 mt-2 ps-3">${rows.join('')}</ul>
+        <div class="text-muted">截短的包缺失部分载荷，可能影响媒体重建与统计精度；建议确认抓包快照长度，必要时重新抓包或重新导出文件。</div>
+    </div>`;
+}
+
+// 抓包不完整确认弹窗：点击"开始分析"时拦截，让用户明确选择继续分析或
+// 放弃。确认过一次后本会话内不再重复弹窗（被动横幅仍保留作说明）
+function showIntegrityConfirmModal() {
+    let el = document.getElementById('integrity-confirm-modal');
+    if (!el) {
+        el = document.createElement('div');
+        el.className = 'modal fade';
+        el.id = 'integrity-confirm-modal';
+        el.tabIndex = -1;
+        el.setAttribute('aria-hidden', 'true');
+        el.innerHTML = `
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">
+                            <i class="bi bi-exclamation-triangle text-warning me-1"></i>抓包可能不完整
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                    </div>
+                    <div class="modal-body small">
+                        <ul id="integrity-confirm-files" class="mb-2 ps-3"></ul>
+                        <div class="text-muted">截短的包缺失部分载荷，可能影响媒体重建与统计精度；建议确认抓包快照长度，必要时重新抓包或重新导出文件。</div>
+                        <div class="mt-2 fw-bold">是否仍要继续分析？</div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">
+                            <i class="bi bi-x-circle me-1"></i>放弃分析
+                        </button>
+                        <button type="button" class="btn btn-warning" id="integrity-confirm-go">
+                            <i class="bi bi-play-circle me-1"></i>继续分析
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(el);
+        el.querySelector('#integrity-confirm-go').addEventListener('click', () => {
+            integrityConfirmed = true;
+            const override = pendingCallIdOverride;
+            pendingCallIdOverride = null;
+            bootstrap.Modal.getOrCreateInstance(el).hide();
+            runAnalysis(override);
+        });
+    }
+    // 填充逐文件明细（integrity_warning.files: {role, filename, notes}）
+    const files = (integrityWarning && integrityWarning.files) || [];
+    el.querySelector('#integrity-confirm-files').innerHTML = files.map(f =>
+        `<li class="mb-1"><strong>${ROLE_NAMES[f.role] || f.role}</strong>（${_esc(f.filename)}）：` +
+        `<ul class="list-unstyled ms-3 text-muted mb-0">${(f.notes || [])
+            .map(n => `<li>${_esc(n)}</li>`).join('')}</ul></li>`).join('');
+    if (window.bootstrap && window.bootstrap.Modal) {
+        bootstrap.Modal.getOrCreateInstance(el).show();
+    } else {
+        // Bootstrap JS 不可用时的兜底：原生确认框
+        if (window.confirm('抓包可能不完整，是否仍要继续分析？（确定=继续，取消=放弃）')) {
+            integrityConfirmed = true;
+            const override = pendingCallIdOverride;
+            pendingCallIdOverride = null;
+            runAnalysis(override);
+        }
+    }
+}
+
 // 跨抓包一致性提醒——纵向列表：每份抓包一行，先给总体时间段，再缩进列出
 // 每通通话的时间段。kind='p2p'（点对点直连）不是错误，用 info 样式区分于
 // kind='mismatch'（疑似传错文件）的警告样式
@@ -878,6 +966,13 @@ async function runAnalysis(callIdOverride = null) {
         return;
     }
     if (analyzing) return;
+
+    // 抓包不完整：先弹窗让用户确认（继续分析 / 放弃分析），确认过不再重复
+    if (integrityWarning && !integrityConfirmed) {
+        pendingCallIdOverride = callIdOverride;
+        showIntegrityConfirmModal();
+        return;
+    }
 
     // 获取选中的通话（多通时；"all" = 全部混合）。
     // 结果区"切换通话"会直接传入 callIdOverride，优先于面板当前选择

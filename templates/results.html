@@ -80,6 +80,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     renderCalls(data.calls, data.capture_warning);
                     renderCallSwitcher(data.calls, data.results.call_id, data.results);
                 }
+                // 抓包完整性提醒（截短包/文件尾损坏）：无通话也展示
+                const integrityHtml = _integrityWarningHtml(data.files);
+                if (integrityHtml) {
+                    document.getElementById('calls-card').classList.remove('d-none');
+                    document.getElementById('calls-container')
+                        .insertAdjacentHTML('beforeend', integrityHtml);
+                }
             } else {
                 document.getElementById('result-loading').innerHTML =
                     '<p class="text-warning">No results found for this session.</p>';
@@ -930,6 +937,22 @@ function buildIpRoleMap(files, serverIp) {
 
 function _ipName(ip) {
     return ipRoleMap[ip] || ip;
+}
+
+// 抓包完整性提醒（截短包/文件尾损坏）：与首页同款——只提示数据受限，
+// 分析照常。files 为 /api/session 返回的上传文件列表（元素带 integrity）
+function _integrityWarningHtml(files) {
+    const rows = (files || []).filter(f => f.integrity && f.integrity.status === 'warn')
+        .map(f => `<li><strong>${ROLE_NAMES[f.role] || f.role}</strong>（${_esc(f.filename)}）：` +
+            `<ul class="list-unstyled mb-0 ms-3 text-muted">${(f.integrity.notes || [])
+                .map(n => `<li>${_esc(n)}</li>`).join('')}</ul></li>`);
+    if (!rows.length) return '';
+    return `
+        <div class="alert alert-warning mb-2 py-2 small">
+            <strong><i class="bi bi-crop me-1"></i>抓包可能不完整（已按现有数据继续分析）</strong>
+            <ul class="mb-1 mt-2 ps-3">${rows.join('')}</ul>
+            <div class="text-muted">截短的包缺失部分载荷，可能影响媒体重建与统计精度；建议确认抓包快照长度，必要时重新抓包或重新导出文件。</div>
+        </div>`;
 }
 
 function _captureWarningHtml(w) {
