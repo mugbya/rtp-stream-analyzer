@@ -50,7 +50,7 @@ def generate_report(analysis_results: dict) -> dict:
         # "问题种类 + 用户听感词 + 排查方向"，供前端单独渲染
         report['problem_classification'] = classify_problems(analysis_results)
     if media_type in ('video', 'all'):
-        # 视频问题分类：对照《视频问题》清单，同构聚合（视频流证据）
+        # 视频问题分类：对照《视频问题种类》清单，同构聚合（视频流证据）
         report['video_problem_classification'] = classify_video_problems(
             analysis_results)
     return report
@@ -64,7 +64,7 @@ def _build_topology(results: dict) -> dict:
         'server': None,
         'connections': [],
     }
-    
+
     for role, info in ips_info.items():
         if 'ips' in info:
             for ip in info['ips']:
@@ -74,11 +74,11 @@ def _build_topology(results: dict) -> dict:
                         'ip': ip,
                         'stream_count': info.get('stream_count', 0),
                     })
-    
+
     server_ip = results.get('detected_server_ip')
     if server_ip:
         topology['server'] = server_ip
-    
+
     return topology
 
 
@@ -86,7 +86,7 @@ def _build_stream_summary(results: dict) -> dict:
     """构建流摘要。"""
     streams = results.get('streams', {})
     classified = results.get('classified_streams', {})
-    
+
     summary = {
         'total_audio': len(classified.get('audio', {})),
         'total_video': len(classified.get('video', {})),
@@ -94,7 +94,7 @@ def _build_stream_summary(results: dict) -> dict:
         'audio_streams': [],
         'video_streams': [],
     }
-    
+
     for ssrc, info in classified.get('audio', {}).items():
         summary['audio_streams'].append({
             'ssrc': f'0x{ssrc:08x}',
@@ -102,7 +102,7 @@ def _build_stream_summary(results: dict) -> dict:
             'packet_count': info.get('count', 0),
             'ips': info.get('ips', []),
         })
-    
+
     for ssrc, info in classified.get('video', {}).items():
         summary['video_streams'].append({
             'ssrc': f'0x{ssrc:08x}',
@@ -110,7 +110,7 @@ def _build_stream_summary(results: dict) -> dict:
             'packet_count': info.get('count', 0),
             'ips': info.get('ips', []),
         })
-    
+
     return summary
 
 
@@ -119,7 +119,7 @@ def _build_delay_summary(results: dict) -> dict:
     fs_delay = results.get('fs_delay', {})
     cross_delays = results.get('cross_delays', [])
     e2e = results.get('end_to_end', {})
-    
+
     return {
         'fs_internal': {
             'mean': fs_delay.get('mean', 0),
@@ -150,7 +150,7 @@ def _build_jitter_summary(results: dict) -> dict:
     """构建抖动摘要。"""
     jitter = results.get('jitter', {})
     summary = {}
-    
+
     for label, data in (jitter or {}).items():
         summary[label] = {
             'mean': data.get('mean', 0),
@@ -160,7 +160,7 @@ def _build_jitter_summary(results: dict) -> dict:
             'abnormal_count': data.get('abnormal_count', 0),
             'expected_interval': data.get('expected_interval', 0),
         }
-    
+
     return summary
 
 

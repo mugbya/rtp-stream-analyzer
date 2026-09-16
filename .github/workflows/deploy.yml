@@ -1,0 +1,99 @@
+name: Deploy
+
+# 推送到 main 自动部署；也可在 Actions 页面手动触发（workflow_dispatch）
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 测试为独立脚本风格（python3 tests/test_x.py 直接运行），逐个执行
+      - name: Run tests
+        run: |
+          set -e
+          for f in tests/test_*.py; do
+            echo "::group::运行 $f"
+            python3 "$f"
+            echo "::endgroup::"
+          done
+
+  deploy:
+    name: Deploy to server
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # 同步代码到服务器；uploads/ outputs/ 为运行时数据，既不覆盖也不删除
+      - name: Sync code
+        run: |
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc' \
+            --exclude '.venv/' \
+            --exclude 'venv/' \
+            --exclude 'uploads/' \
+            --exclude 'outputs/' \
+            --exclude 'tests/' \
+            --exclude '.DS_Store' \
+            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT -o BatchMode=yes" \
+            ./ "$SSH_USER@$SSH_HOST":/opt/rtp-stream-analyzer/app/
+
+      - name: Install deps & restart service
+        # 首次部署也会自举：venv 不存在则创建；systemd 单元随代码同步过来，
+        # 有变化就更新到 /etc/systemd/system 并 reload，无需登录服务器手动初始化
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          APP=/opt/rtp-stream-analyzer/app
+          VENV=/opt/rtp-stream-analyzer/venv
+          if [ ! -x "$VENV/bin/pip" ]; then
+            for py in python3.12 python3.11 python3; do
+              command -v "$py" >/dev/null 2>&1 || continue
+              "$py" -m venv "$VENV" && break
+            done
+          fi
+          "$VENV/bin/pip" install -q --upgrade pip
+          "$VENV/bin/pip" install -q -r "$APP/requirements.txt"
+          if ! cmp -s "$APP/deploy/rtp-stream-analyzer.service" /etc/systemd/system/rtp-stream-analyzer.service; then
+            install -m 644 "$APP/deploy/rtp-stream-analyzer.service" /etc/systemd/system/rtp-stream-analyzer.service
+            systemctl daemon-reload
+          fi
+          systemctl enable rtp-stream-analyzer >/dev/null 2>&1 || true
+          systemctl restart rtp-stream-analyzer
+          sleep 2
+          systemctl is-active rtp-stream-analyzer
+          curl -fsS -m 15 -o /dev/null http://127.0.0.1:5050/
+          echo "✅ 部署完成：服务已重启并通过健康检查"
+          REMOTE

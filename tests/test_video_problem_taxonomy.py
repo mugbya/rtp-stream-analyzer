@@ -1,6 +1,6 @@
 """
 视频问题分类测试：classify_video_problems 把各检测器结论聚合为
-《视频问题》清单里的问题种类（含用户观感词、优先级、排查方向），
+《视频问题种类》清单里的问题种类（含用户观感词、优先级、排查方向），
 按流类别过滤证据，并按 media_type 门控接入 generate_report。
 
 Run: python3 tests/test_video_problem_taxonomy.py

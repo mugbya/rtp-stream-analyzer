@@ -1,0 +1,22 @@
+[Unit]
+Description=RTP Stream Analyzer (Flask/gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/rtp-stream-analyzer/app
+# 生产模式：关闭 debug 热重载（app.py 读取 FLASK_DEBUG）
+Environment=FLASK_DEBUG=0
+# matplotlib 缓存目录，避免写到 $HOME/.config
+Environment=MPLCONFIGDIR=/opt/rtp-stream-analyzer/mplcache
+# 单 worker 多线程：分析会话存在进程内存里（app.py 的 sessions 字典），
+# 多 worker 会各存一份导致请求间丢失会话；大文件上传/分析慢，超时放宽到 300s。
+# 只监听回环地址：对外统一由 Nginx 80 端口反代，5050 不暴露公网
+ExecStart=/opt/rtp-stream-analyzer/venv/bin/gunicorn --workers 1 --threads 8 --timeout 300 --bind 127.0.0.1:5050 app:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -35,8 +35,8 @@ from analyzer.quality_analyzer import analyze_audio_quality, analyze_video_quali
 from analyzer.call_detector import detect_calls, check_capture_consistency
 from analyzer.capture_integrity import merge_integrity
 
-# 置 False 可关闭 debug 热重载（生产部署时）
-DEBUG = True
+# 默认 True（本地 python app.py 调试）；systemd 部署设 FLASK_DEBUG=0 走 gunicorn 生产模式
+DEBUG = os.environ.get('FLASK_DEBUG', '1') == '1'
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')

@@ -198,7 +198,7 @@ VIDEO_LOSS_CRITICAL_PCT = 1.0
 
 
 def classify_video_problems(results: dict) -> dict:
-    """把分析结果归类到《视频问题》清单，输出面向用户的分类报告。
+    """把分析结果归类到《视频问题种类》清单，输出面向用户的分类报告。
 
     Returns:
         {'available': 是否适用（有视频流且做过分析）,
