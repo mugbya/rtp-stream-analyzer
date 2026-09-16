@@ -749,7 +749,7 @@ def get_media_urls(manifest: dict, session_id: str, output_date: str) -> dict:
 
 # 兜底角色短名：无 SIP 信令可依时，抓包点自己的 IP（非服务器）用此称呼。
 # FS 抓包里的其他 IP 无法区分坐席/终端，不命名，直接显示原始 IP
-_PARTY_ROLE_NAMES = {'seat': '坐席端', 'terminal': '终端', 'fs': 'FS'}
+_PARTY_ROLE_NAMES = {'seat': '被叫端（坐席）', 'terminal': '主叫端（终端）', 'fs': 'FS'}
 
 
 # base64 形态的 SIP 身份 token（平台/话机把号码编码成 base64 当分机号）

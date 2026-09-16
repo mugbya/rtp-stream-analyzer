@@ -30,18 +30,18 @@ def test_one_way_audio_p0():
     """无声诊断 blocked → 单通 P0，听感词与排查方向齐备。"""
     results = {**BASE, 'audio_health': {
         'available': True, 'p2p': False,
-        'directions': [{'label': '主叫 → 坐席', 'speaker': '主叫', 'listener': '坐席',
+        'directions': [{'label': '主叫 → 被叫', 'speaker': '主叫', 'listener': '被叫',
                         'verdict': 'blocked',
                         'verdict_text': '链路断裂，声音没有传到听者',
                         'legs': []}],
-        'summary': '主叫 → 坐席：链路断裂'}}
+        'summary': '主叫 → 被叫：链路断裂'}}
     out = classify_problems(results)
     p = _find(out['problems'], 'one_way_audio')
     assert p, out
     assert p['priority'] == 'P0' and p['severity'] == 'critical', p
     assert '我听不到对方' in p['feel'] and '对方听不到我' in p['feel'], p['feel']
     assert p['category'] == '无声 / 连通'
-    assert any('主叫 → 坐席' in e for e in p['evidence']), p['evidence']
+    assert any('主叫 → 被叫' in e for e in p['evidence']), p['evidence']
     assert p['causes'] and p['verify'], p
     # P0 应排在最前
     assert out['problems'][0]['id'] == 'one_way_audio'
@@ -164,11 +164,11 @@ def test_report_wiring():
     （视频类恒有键，纯音频通话时 available=False 而不是缺键）。"""
     results = {**BASE, 'audio_health': {
         'available': True, 'p2p': False,
-        'directions': [{'label': '坐席 → 主叫', 'speaker': '坐席', 'listener': '主叫',
+        'directions': [{'label': '被叫 → 主叫', 'speaker': '被叫', 'listener': '主叫',
                         'verdict': 'silent_source',
                         'verdict_text': '发声端上行有人声能量但整段近乎静音',
                         'legs': []}],
-        'summary': '坐席 → 主叫：发声端静音'}}
+        'summary': '被叫 → 主叫：发声端静音'}}
     report = generate_report(results)
     pc = report['problem_classification']
     assert pc['available'], pc

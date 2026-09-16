@@ -15,7 +15,7 @@ let integrityConfirmed = false;
 let pendingCallIdOverride = null;   // 弹窗确认期间暂存的通话切换参数
 
 // ====== 展示常量 ======
-const ROLE_NAMES = { seat: '坐席端', fs: 'FS 服务器端', terminal: '终端 / 主叫端' };
+const ROLE_NAMES = { seat: '被叫端（坐席）', fs: 'FS 服务器端', terminal: '主叫端（终端）' };
 const ROLE_ICONS = { seat: 'bi-headset', fs: 'bi-server', terminal: 'bi-phone' };
 const DIR_NAMES = { inbound: '呼入（接收）', outbound: '呼出（发送）', unknown: '方向未知' };
 const DIR_BADGE = { inbound: 'bg-info', outbound: 'bg-success', unknown: 'bg-secondary' };

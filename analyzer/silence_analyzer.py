@@ -215,8 +215,8 @@ def diagnose_audio(captures: dict, call: dict, server_ip: str,
             'listener_role': listener_role,
             'speaker_ip': parties.get(spk_key),
             'listener_ip': parties.get(lst_key),
-            'speaker_name': '主叫' if speaker_role == 'terminal' else '坐席',
-            'listener_name': '坐席' if listener_role == 'seat' else '主叫',
+            'speaker_name': '主叫' if speaker_role == 'terminal' else '被叫',
+            'listener_name': '被叫' if listener_role == 'seat' else '主叫',
         })
 
     directions = []
@@ -329,7 +329,7 @@ def _diagnose_direction(spk_cap, lst_cap, fs_cap, call_ssrcs, server_ip,
             'verdict': verdict, 'verdict_text': text, 'legs': legs}
 
 
-_ROLE_DISPLAY = {'terminal': '主叫', 'seat': '坐席', 'fs': 'FS'}
+_ROLE_DISPLAY = {'terminal': '主叫', 'seat': '被叫', 'fs': 'FS'}
 
 
 def _judge_leg(leg_name, src_ssrc, src_at, dst_ssrc, dst_at,

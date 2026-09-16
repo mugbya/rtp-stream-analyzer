@@ -152,9 +152,9 @@ def test_fallback_without_sip_flow():
     ])
     describe_media_parties(manifest, captures, [call], SERVER, FILES_INFO)
 
-    assert manifest['audio'][0]['flow']['from']['label'] == '终端'
+    assert manifest['audio'][0]['flow']['from']['label'] == '主叫端（终端）'
     assert manifest['audio'][0]['flow']['to']['label'] == 'FS'
-    assert manifest['audio'][1]['flow']['from']['label'] == '坐席端'
+    assert manifest['audio'][1]['flow']['from']['label'] == '被叫端（坐席）'
     # FS 抓包里的非主被叫 IP 无法命名
     assert manifest['audio'][2]['flow']['from']['label'] == '10.9.9.9'
     assert manifest['parties'] == []   # 无信令就没有拓扑行

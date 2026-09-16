@@ -654,7 +654,7 @@ def _canonical_role(role):
     r = (role or '').strip().lower()
     if r == 'fs':
         return 'fs'
-    if r in ('seat', 'zuoxi', '坐席'):
+    if r in ('seat', 'zuoxi', '坐席', '被叫'):
         return 'seat'
     if r in ('terminal', 'caller', '终端', '主叫'):
         return 'terminal'
@@ -667,31 +667,31 @@ def _detect_available_directions(files_info, server_ip, classified):
     directions = []
     
     has_fs = 'fs' in roles or 'FS' in roles
-    has_seat = 'seat' in roles or '坐席' in roles or 'zuoxi' in roles
+    has_seat = 'seat' in roles or '坐席' in roles or 'zuoxi' in roles or '被叫' in roles
     has_terminal = 'terminal' in roles or '终端' in roles or 'caller' in roles or '主叫' in roles
     
     if has_seat and has_fs:
         directions.append({
             'id': 'seat_to_fs',
-            'label': '坐席 → FS 传输延迟',
+            'label': '被叫 → FS 传输延迟',
             'available': True,
-            'requires': ['坐席端', 'FS端'],
+            'requires': ['被叫端（坐席）', 'FS端'],
         })
-    
+
     if has_fs and has_terminal:
         directions.append({
             'id': 'fs_to_terminal',
-            'label': 'FS → 终端 传输延迟',
+            'label': 'FS → 主叫 传输延迟',
             'available': True,
-            'requires': ['FS端', '终端'],
+            'requires': ['FS端', '主叫端（终端）'],
         })
-    
+
     if has_seat and has_fs and has_terminal:
         directions.append({
             'id': 'seat_to_terminal',
-            'label': '坐席 → 终端 端到端延迟',
+            'label': '被叫 → 主叫 端到端延迟',
             'available': True,
-            'requires': ['坐席端', 'FS端', '终端'],
+            'requires': ['被叫端（坐席）', 'FS端', '主叫端（终端）'],
         })
     
     if has_fs:

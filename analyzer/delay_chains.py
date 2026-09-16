@@ -26,7 +26,7 @@ FS_INTERNAL_HIGH_MS = 50.0
 # 往返参考值（上+下两段均值之和）超过此值提示链路整体偏慢
 ROUNDTRIP_HIGH_MS = 300.0
 
-_ROLE_NAMES = {'terminal': '主叫', 'seat': '坐席'}
+_ROLE_NAMES = {'terminal': '主叫', 'seat': '被叫'}
 
 
 def build_delay_chains(captures: dict, call: dict, server_ip: str,

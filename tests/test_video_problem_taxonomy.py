@@ -247,7 +247,7 @@ def test_report_gating():
     视频分类、all 两个都出。"""
     results = {**BASE, 'audio_health': {
         'available': True, 'p2p': False,
-        'directions': [{'label': '主叫 → 坐席', 'verdict': 'blocked',
+        'directions': [{'label': '主叫 → 被叫', 'verdict': 'blocked',
                         'verdict_text': '链路断裂', 'legs': []}],
         'summary': ''}}
     r_audio = generate_report({**results, 'media_type': 'audio'})

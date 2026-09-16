@@ -388,8 +388,8 @@ def test_report_wiring():
     assert report['media_quality']['audio']['seat (SSRC=0x01010101)']['verdict'] \
         == 'bad', report['media_quality']
     msgs = [i['message'] for i in report['conclusion']['issues']]
-    assert any('检测到啸叫' in m and '坐席端' in m for m in msgs), msgs
-    assert any('视频帧数据破损' in m and '坐席端' in m for m in msgs), msgs
+    assert any('检测到啸叫' in m and '被叫端（坐席）' in m for m in msgs), msgs
+    assert any('视频帧数据破损' in m and '被叫端（坐席）' in m for m in msgs), msgs
     assert report['conclusion']['overall'] == 'critical', report['conclusion']
     print("PASS: quality issues wired into report conclusion")
 

@@ -216,7 +216,7 @@ def test_diagnose_no_source_when_source_capture_present():
                          SRV, profiles, {},
                          {'caller_ip': CALLER, 'answerer_ip': SEAT})
     d0 = res['directions'][0]
-    assert d0['label'] == '主叫 → 坐席', res['directions']
+    assert d0['label'] == '主叫 → 被叫', res['directions']
     assert d0['verdict'] == 'no_source', d0
     assert d0['legs'][0]['status'] == 'no_source', d0
     print("PASS: diagnose no_source with source capture present")
@@ -236,7 +236,7 @@ def test_diagnose_one_sided_profile_no_crash():
     dn = d0['legs'][1]
     assert dn['presence'] == {'sent_at_source': False,
                               'arrived_at_next': True}, dn
-    assert '坐席侧实测有人声' in dn['note'], dn
+    assert '被叫侧实测有人声' in dn['note'], dn
     assert '源端抓包未见发出' in dn['note'], dn
     print("PASS: diagnose one-sided profile (listener capture only)")
 
@@ -298,7 +298,7 @@ def test_delay_chains_segments_and_roundtrip():
                              {'caller_ip': CALLER, 'answerer_ip': SEAT})
     assert res['available'] and not res['p2p'], res
     d0, d1 = res['directions']
-    assert d0['label'] == '主叫 → 坐席' and d1['label'] == '坐席 → 主叫', d0
+    assert d0['label'] == '主叫 → 被叫' and d1['label'] == '被叫 → 主叫', d0
     s_up, s_fs, s_down = d0['segments']
     # 跨抓包：均值=传播+时钟差；恒定时延被中位数吸收进偏移（无法区分）
     assert abs(s_up['mean'] - 210.0) < 1.0 and s_up['available'], s_up
@@ -310,7 +310,7 @@ def test_delay_chains_segments_and_roundtrip():
     # 往返参考值：时钟偏移两两抵消，等于真实往返（10+10=20ms）
     rt = {r['pair']: r for r in res['roundtrip']}
     assert abs(rt['主叫端往返（主叫→FS→主叫）']['ms'] - 20.0) < 1.0, rt
-    assert abs(rt['坐席端往返（坐席→FS→坐席）']['ms'] - 20.0) < 1.0, rt
+    assert abs(rt['被叫端往返（被叫→FS→被叫）']['ms'] - 20.0) < 1.0, rt
     assert all(r['status'] == 'ok' for r in res['roundtrip']), rt
     print("PASS: delay chains segments + offset-free roundtrip")
 
@@ -362,7 +362,7 @@ def test_report_new_sections_and_conclusion():
     audio_health = {
         'available': True, 'p2p': False,
         'directions': [
-            {'label': '主叫 → 坐席', 'speaker': '主叫', 'listener': '坐席',
+            {'label': '主叫 → 被叫', 'speaker': '主叫', 'listener': '被叫',
              'verdict': 'silent_path',
              'verdict_text': '听者收到的是静音：链路中某一段把人声换成了静音',
              'legs': [{'leg': '主叫上行', 'ssrc': '0x01010101', 'status': 'ok',
@@ -370,12 +370,12 @@ def test_report_new_sections_and_conclusion():
                                     'arrived_at_next': True},
                        'profiles': [], 'rr': None, 'note': '正常'}]},
         ],
-        'summary': '主叫 → 坐席：静音',
+        'summary': '主叫 → 被叫：静音',
     }
     delay_chains = {
         'available': True, 'p2p': False,
         'directions': [
-            {'label': '主叫 → 坐席', 'verdict': 'high',
+            {'label': '主叫 → 被叫', 'verdict': 'high',
              'verdict_text': '以下段延迟/波动偏高：主叫 → FS',
              'segments': [{'kind': 'cross', 'name': '主叫 → FS',
                            'ssrc': '0x01010101', 'available': True,
@@ -405,8 +405,8 @@ def test_report_new_sections_and_conclusion():
     issues = report['conclusion']['issues']
     sev = {i['severity'] for i in issues}
     assert 'critical' in sev and 'warning' in sev, sev   # 静音=critical、延迟=warning
-    assert any(i['message'].startswith('无声诊断·主叫 → 坐席') for i in issues), issues
-    assert any('延迟链路·主叫 → 坐席' in i['message'] for i in issues), issues
+    assert any(i['message'].startswith('无声诊断·主叫 → 被叫') for i in issues), issues
+    assert any('延迟链路·主叫 → 被叫' in i['message'] for i in issues), issues
     assert any('往返 420.0ms' in i['message'] for i in issues), issues
     assert any('RTCP RR 自报丢包 5.1%' in i['message'] for i in issues), issues
 

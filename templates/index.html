@@ -26,21 +26,21 @@
 
                 <div class="row g-3">
                     <div class="col-md-4">
-                        <div class="upload-box" id="box-seat">
-                            <label class="upload-label" for="file-seat">
-                                <i class="bi bi-headset"></i>
-                                <span class="d-block mt-2">坐席端抓包</span>
+                        <div class="upload-box" id="box-terminal">
+                            <label class="upload-label" for="file-terminal">
+                                <i class="bi bi-phone"></i>
+                                <span class="d-block mt-2">主叫端抓包（终端）</span>
                                 <small class="text-muted">（可选项）</small>
                             </label>
-                            <input type="file" id="file-seat" class="file-input" accept=".pcap,.pcapng,.cap" data-role="seat">
-                            <div class="file-name" id="name-seat"></div>
+                            <input type="file" id="file-terminal" class="file-input" accept=".pcap,.pcapng,.cap" data-role="terminal">
+                            <div class="file-name" id="name-terminal"></div>
                         </div>
                     </div>
                     <div class="col-md-4">
                         <div class="upload-box" id="box-fs">
                             <label class="upload-label" for="file-fs">
                                 <i class="bi bi-server"></i>
-                                <span class="d-block mt-2">FS / 服务器端抓包</span>
+                                <span class="d-block mt-2">服务端抓包（FS）</span>
                                 <small class="text-muted">（可选项）</small>
                             </label>
                             <input type="file" id="file-fs" class="file-input" accept=".pcap,.pcapng,.cap" data-role="fs">
@@ -48,14 +48,14 @@
                         </div>
                     </div>
                     <div class="col-md-4">
-                        <div class="upload-box" id="box-terminal">
-                            <label class="upload-label" for="file-terminal">
-                                <i class="bi bi-phone"></i>
-                                <span class="d-block mt-2">终端 / 主叫端抓包</span>
+                        <div class="upload-box" id="box-seat">
+                            <label class="upload-label" for="file-seat">
+                                <i class="bi bi-headset"></i>
+                                <span class="d-block mt-2">被叫端抓包（坐席）</span>
                                 <small class="text-muted">（可选项）</small>
                             </label>
-                            <input type="file" id="file-terminal" class="file-input" accept=".pcap,.pcapng,.cap" data-role="terminal">
-                            <div class="file-name" id="name-terminal"></div>
+                            <input type="file" id="file-seat" class="file-input" accept=".pcap,.pcapng,.cap" data-role="seat">
+                            <div class="file-name" id="name-seat"></div>
                         </div>
                     </div>
                 </div>

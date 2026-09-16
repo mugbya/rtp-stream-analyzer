@@ -453,7 +453,7 @@ def test_capture_consistency_mismatch():
                for p in warning['pairs']), warning
     # 纵向列表结构：每个角色一行——总体时间段 + 每通通话时间段
     by_role = {r['role']: r for r in warning['roles']}
-    assert by_role['seat']['display'] == '坐席端'
+    assert by_role['seat']['display'] == '被叫端（坐席）'
     assert by_role['seat']['overall'] == {'start': by_role['seat']['calls'][0]['start'],
                                           'end': by_role['seat']['calls'][-1]['end'],
                                           'count': 1}

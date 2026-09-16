@@ -1423,7 +1423,7 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
 
 
 # 上传角色 → 展示名（跨抓包一致性提示用）
-ROLE_DISPLAY = {'seat': '坐席端', 'fs': 'FS 端', 'terminal': '终端（主叫端）'}
+ROLE_DISPLAY = {'seat': '被叫端（坐席）', 'fs': 'FS 端', 'terminal': '主叫端（终端）'}
 
 
 def check_capture_consistency(calls: list, roles, server_ip: str = None,

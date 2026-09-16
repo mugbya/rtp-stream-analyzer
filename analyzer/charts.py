@@ -30,9 +30,9 @@ plt.rcParams['axes.unicode_minus'] = False
 # 面向图表展示的方向/媒体类型中文名
 _DIRECTION_NAMES = {
     'auto': '自动',
-    'seat_to_fs': '坐席 → FS',
-    'fs_to_terminal': 'FS → 终端',
-    'seat_to_terminal': '坐席 → 终端',
+    'seat_to_fs': '被叫 → FS',
+    'fs_to_terminal': 'FS → 主叫',
+    'seat_to_terminal': '被叫 → 主叫',
     'fs_internal': 'FS 内部',
     'single_capture': '单抓包',
 }
