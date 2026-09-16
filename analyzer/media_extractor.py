@@ -33,13 +33,17 @@ SUPPORTED_AUDIO = {PT_PCMU, PT_PCMA}
 # Audio codecs that need external tools
 UNSUPPORTED_AUDIO = {PT_G722, PT_GSM, PT_G729, 0, 3, 8, 9, 18}
 
+# OPUS：RTP 载荷就是 Opus 包本身（RFC 7587），ffmpeg 不能直接读裸 Opus 包，
+# 需要先封成 Ogg Opus 容器再交给 ffmpeg 解码。RTP 时钟固定 48kHz。
+OPUS_CLOCK = 48000
+
 
 def _endpoint_direction(dst_ip: str, server_ip: str, role: str) -> str:
     """Determine stream direction relative to the capture point's endpoint.
-    
+
     Semantics: 'outbound' = media SENT by the endpoint where the capture was taken,
                'inbound'  = media RECEIVED by that endpoint.
-    
+
     - Capture at the server (fs): dst==server means arriving at FS -> inbound;
       src==server means FS sent it -> outbound.
     - Capture at an endpoint (seat/terminal): dst==server means this endpoint sent
@@ -53,17 +57,179 @@ def _endpoint_direction(dst_ip: str, server_ip: str, role: str) -> str:
     return 'outbound' if dst_ip == server_ip else 'inbound'
 
 
+# ---------- Ogg Opus 封装（供 ffmpeg 解码 RTP 里的 OPUS 音频） ----------
+
+def _ogg_crc32(data: bytes) -> int:
+    """Ogg 页校验：CRC-32 多项式 0x04c11db7，MSB 先行，初值 0，无终值取反。"""
+    crc = 0
+    for b in data:
+        crc ^= b << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x04C11DB7) if crc & 0x80000000 else crc << 1
+            crc &= 0xFFFFFFFF
+    return crc
+
+
+def _ogg_page(serial: int, seq: int, granule: int, header_type: int,
+              pkts: list) -> bytes:
+    """把一组完整包封成一个 Ogg 页（调用方保证段表 ≤255 项）。"""
+    segments = []
+    for pkt in pkts:
+        full, rem = divmod(len(pkt), 255)
+        segments.extend([255] * full)
+        segments.append(rem)
+    body = b''.join(pkts)
+    header = (b'OggS' + bytes([0, header_type])
+              + struct.pack('<qII', granule, serial, seq)
+              + b'\x00\x00\x00\x00'          # CRC 占位
+              + bytes([len(segments)]) + bytes(segments))
+    crc = _ogg_crc32(header + body)
+    header = header[:22] + struct.pack('<I', crc) + header[26:]
+    return header + body
+
+
+def _write_ogg_opus(stream_pkts: dict, pt: int, path: str) -> dict:
+    """按 seq 顺序把 RTP 载荷封装成 Ogg Opus 文件。
+
+    丢包（seq 缺口）与 DTX 静音不插入占位包：granule 按 RTP 时间戳推进，
+    缺口对解码器表现为"该时间段没有包"，libopus 会做 PLC 掩盖，时长保持
+    与真实通话一致。时间戳倒退（发送端重置）时按单包时长前推，保证 granule
+    单调（Ogg 要求）。
+
+    Returns {'packets': int, 'lost_packets': int, 'spp': int}，spp 为单包
+    采样数（48kHz 时钟）。
+    """
+    seqs = sorted(stream_pkts)
+    ts_list = [stream_pkts[s][1] for s in seqs]
+    deltas = [signed32(b - a) for a, b in zip(ts_list, ts_list[1:])]
+    positive = sorted(d for d in deltas if d > 0)
+    spp = positive[len(positive) // 2] if positive else 960
+    if not (0 < spp <= OPUS_CLOCK):     # 单包不超过 1s，异常时间戳回退 20ms
+        spp = 960
+
+    base_ts = stream_pkts[seqs[0]][1]
+    serial = 0x524152  # 任意固定 serial，单流文件无需唯一
+    pages = []
+    buf, buf_segments, page_seq = [], 0, 0
+
+    def _flush(granule, header_type):
+        nonlocal buf, buf_segments, page_seq
+        if not buf:
+            return
+        pages.append(_ogg_page(serial, page_seq, granule, header_type, buf))
+        page_seq += 1
+        buf, buf_segments = [], 0
+
+    def _add(pkt, granule, last):
+        nonlocal buf, buf_segments
+        segs = len(pkt) // 255 + 1
+        if buf_segments + segs > 255:
+            _flush(prev_granule[0], 0)
+        buf.append(pkt)
+        buf_segments += segs
+        if last:
+            _flush(granule, 0x04)   # EOS
+
+    # ID 头（OpusHead）+ 注释头（OpusTags）：各占一个 BOS 起始页
+    id_header = (b'OpusHead' + bytes([1, 1])
+                 + struct.pack('<H', 0)             # pre-skip
+                 + struct.pack('<I', OPUS_CLOCK)    # 输入采样率（信息性）
+                 + struct.pack('<h', 0)             # output gain
+                 + bytes([0]))                      # mapping family
+    comment_header = b'OpusTags' + struct.pack('<I', 0) + struct.pack('<I', 0)
+    pages.append(_ogg_page(serial, page_seq, 0, 0x02, [id_header]))
+    page_seq += 1
+    pages.append(_ogg_page(serial, page_seq, 0, 0x00, [comment_header]))
+    page_seq += 1
+
+    prev_granule = [0]
+    prev_seq = seqs[0] - 1
+    lost = 0
+    for i, seq in enumerate(seqs):
+        gap = (seq - prev_seq - 1) & 0xFFFF
+        if 0 < gap < 100:
+            lost += gap
+        ts = stream_pkts[seq][1]
+        granule = max(prev_granule[0], signed32(ts - base_ts) + spp)
+        payload = stream_pkts[seq][7]
+        # 非主 PT 包（如 RFC 4733 DTMF）不是 Opus 包，跳过（granule 缺口由 PLC 补）
+        if payload and stream_pkts[seq][2] == pt:
+            _add(payload, granule, i == len(seqs) - 1)
+            prev_granule[0] = granule
+        prev_seq = seq
+    if buf:
+        _flush(prev_granule[0], 0x04)   # 末包是非主 PT 被跳过时也要收尾
+
+    with open(path, 'wb') as f:
+        f.write(b''.join(pages))
+    return {'packets': len(seqs) - lost, 'lost_packets': lost, 'spp': spp}
+
+
+def _decode_opus_to_wav(ogg_path: str, wav_path: str) -> dict:
+    """用 ffmpeg 把 Ogg Opus 解码成 8kHz 单声道 WAV（与 G.711 重建同规格）。"""
+    result = {'success': False, 'error': None}
+    try:
+        proc = subprocess.run(
+            ['ffmpeg', '-y', '-i', ogg_path, '-ac', '1', '-ar', '8000',
+             '-f', 'wav', wav_path],
+            capture_output=True, text=True, timeout=300)
+        if proc.returncode == 0:
+            result['success'] = True
+        else:
+            result['error'] = (proc.stderr.strip()[-200:]
+                               if proc.stderr else 'ffmpeg returned non-zero')
+    except FileNotFoundError:
+        result['error'] = 'OPUS 音频需要 ffmpeg 解码（未检测到 ffmpeg）'
+    except subprocess.TimeoutExpired:
+        result['error'] = 'ffmpeg 解码超时'
+    except Exception as e:
+        result['error'] = str(e)
+    return result
+
+
+def _reconstruct_opus_audio(stream_pkts: dict, pt: int, result: dict) -> dict:
+    """OPUS 流的音频重建：RTP 载荷 → Ogg Opus → ffmpeg → 8kHz WAV。
+
+    result 为 reconstruct_audio 初始化好的骨架，就地补全后返回。
+    """
+    seqs = sorted(stream_pkts)
+    result['total_packets'] = len(seqs)
+    ogg_path = result['path'] + '.tmp.opus'
+    try:
+        info = _write_ogg_opus(stream_pkts, pt, ogg_path)
+        result['samples_per_packet'] = info['spp']
+        result['packet_duration_ms'] = round(info['spp'] / OPUS_CLOCK * 1000, 1)
+        result['lost_packets'] = info['lost_packets']
+        result['silence_filled'] = info['lost_packets']
+        dec = _decode_opus_to_wav(ogg_path, result['path'])
+        if not dec['success']:
+            result['error'] = dec['error']
+            return result
+        with wave.open(result['path']) as wf:
+            frames = wf.getnframes()
+        result['duration_ms'] = round(frames / G711_SAMPLE_RATE * 1000, 1)
+        result['success'] = True
+        return result
+    finally:
+        try:
+            os.remove(ogg_path)
+        except OSError:
+            pass
+
+
 def reconstruct_audio(packets: dict, ssrc: int, output_path: str, server_ip: str = None,
-                      role: str = None) -> dict:
+                      role: str = None, codec_name: str = None) -> dict:
     """Reconstruct an audio WAV file from RTP packets for a given SSRC.
-    
+
     Args:
         packets: RTP packets dict from extract_rtp_packets (with include_payload=True).
         ssrc: The SSRC to reconstruct.
         output_path: Path to write the output WAV file.
         server_ip: Optional server IP to determine direction.
         role: Capture point role ('seat'/'fs'/'terminal') for endpoint-relative direction.
-        
+        codec_name: SDP rtpmap 解析出的编码名（动态 PT 只看号码判不出编码，
+            如 OPUS@96）；None 时按静态 PT 表取名。
+
     Returns:
         {
             'path': str, 'ssrc': str, 'pt': int, 'codec': str,
@@ -90,34 +256,38 @@ def reconstruct_audio(packets: dict, ssrc: int, output_path: str, server_ip: str
         'direction': 'unknown',
         'error': None,
     }
-    
+
     # Collect packets for this SSRC, sorted by sequence number
     stream_pkts = {}
     for (k_ssrc, seq), v in packets.items():
         if k_ssrc == ssrc and len(v) >= 8:  # Has payload
             stream_pkts[seq] = v
-    
+
     if not stream_pkts:
         result['error'] = 'No packets with payload found for this SSRC'
         return result
-    
+
     # Determine payload type (use most common PT)
     pt_counts = defaultdict(int)
     for v in stream_pkts.values():
         pt_counts[v[2]] += 1  # v[2] is pt
     pt = max(pt_counts, key=pt_counts.get)
     result['pt'] = pt
-    result['codec'] = get_pt_name(pt)
-    
+    result['codec'] = codec_name or get_pt_name(pt)
+
     # Determine direction from first packet
     first_pkt = next(iter(stream_pkts.values()))
     result['direction'] = _endpoint_direction(first_pkt[4], server_ip, role)
-    
+
     # Check if codec is supported
-    if pt not in SUPPORTED_AUDIO:
-        result['error'] = f'Codec {get_pt_name(pt)} is not supported for direct reconstruction. ' \
-                          f'Supported: PCMU, PCMA. Use ffmpeg for other codecs.'
+    is_opus = (result['codec'] or '').upper().startswith('OPUS')
+    if pt not in SUPPORTED_AUDIO and not is_opus:
+        result['error'] = f'Codec {result["codec"]} is not supported for direct reconstruction. ' \
+                          f'Supported: PCMU, PCMA, OPUS. Use ffmpeg for other codecs.'
         return result
+
+    if is_opus:
+        return _reconstruct_opus_audio(stream_pkts, pt, result)
     
     # Sort by sequence number
     sorted_seqs = sorted(stream_pkts.keys())
@@ -431,22 +601,27 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
         for ssrc in audio_streams:
             if ssrc_filter is not None and ssrc not in ssrc_filter:
                 continue
+            # SDP rtpmap 解析出的编码名：动态 PT（如 OPUS@96）只看 PT 号
+            # 识别不出编码，重建与展示都靠它
+            codec_name = (audio_streams.get(ssrc) or {}).get('codec')
             for role in roles:
                 if ssrc not in captures[role]['streams']:
                     continue
                 packets = captures[role]['packets']
-                
+
                 # Peek direction first (needed for the filename)
                 direction = 'unknown'
                 for (k_ssrc, seq), v in packets.items():
                     if k_ssrc == ssrc:
                         direction = _endpoint_direction(v[4], server_ip, role)
                         break
-                
+
                 filename = f"{role}_{direction}_{ssrc:08x}.wav"
                 filepath = os.path.join(audio_dir, filename)
-                
-                audio_result = reconstruct_audio(packets, ssrc, filepath, server_ip, role)
+
+                audio_result = reconstruct_audio(packets, ssrc, filepath,
+                                                 server_ip, role,
+                                                 codec_name=codec_name)
                 
                 if audio_result['success']:
                     manifest['audio'].append({
@@ -483,6 +658,7 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
         for ssrc in video_streams:
             if ssrc_filter is not None and ssrc not in ssrc_filter:
                 continue
+            codec_name = (video_streams.get(ssrc) or {}).get('codec')
             for role in roles:
                 if ssrc not in captures[role]['streams']:
                     continue
@@ -510,7 +686,7 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
                         'role': role,
                         'direction': video_result['direction'],
                         'ssrc': video_result['ssrc'],
-                        'codec': video_result['codec'],
+                        'codec': codec_name or video_result['codec'],
                         'pt': video_result['pt'],
                         'total_packets': video_result['total_packets'],
                         'nal_units': video_result['nal_units'],

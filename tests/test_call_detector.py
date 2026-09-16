@@ -333,6 +333,10 @@ def test_sip_sdp_parsing():
         'full': {'audio': [{'name': 'PCMU', 'rate': 8000},
                            {'name': 'PCMA', 'rate': 8000}],
                  'video': [{'name': 'H264', 'rate': 90000}]},
+        # map_full：按 PT 直查名字与时钟率，供流种类/重建时钟解析
+        'map_full': {'audio': {'0': {'name': 'PCMU', 'rate': 8000},
+                               '8': {'name': 'PCMA', 'rate': 8000}},
+                     'video': {'96': {'name': 'H264', 'rate': 90000}}},
         # 无 c= 行则没有宣告端点
         'endpoints': [],
     }, ev['sdp']
@@ -386,6 +390,12 @@ def test_sip_sdp_parsing():
                            {'name': 'PCMU', 'rate': 8000},
                            {'name': 'PCMA', 'rate': 8000}],
                  'video': []},
+        'map_full': {'audio': {'96': {'name': 'OPUS', 'rate': 48000},
+                               '97': {'name': 'SPEEX', 'rate': 16000},
+                               '98': {'name': 'SPEEX', 'rate': 8000},
+                               '0': {'name': 'PCMU', 'rate': 8000},
+                               '8': {'name': 'PCMA', 'rate': 8000}},
+                     'video': {}},
         'endpoints': [],
     }, ev3['sdp']
 

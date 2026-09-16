@@ -11,7 +11,7 @@ from flask import Flask, render_template, request, jsonify, send_file, url_for
 
 from analyzer.rtp_parser import extract_rtp_packets, get_stream_packets
 from analyzer.stream_classifier import (
-    classify_all_streams, get_pt_name, detect_server_ip, AUDIO_PT, VIDEO_PT_RANGE
+    classify_all_streams, get_pt_name, detect_server_ip
 )
 from analyzer.delay_analyzer import (
     calc_fs_internal_delay, calc_cross_capture_delay,
@@ -259,7 +259,15 @@ def run_analysis():
         for ssrc in target_streams:
             if ssrc in cap['streams']:
                 label = f"{role} (SSRC=0x{ssrc:08x})"
-                ts_result = check_ts_continuity(cap['packets'], ssrc)
+                # 种类/时钟率来自解析结果：动态 PT 音频（OPUS@96）按 48kHz
+                # 时钟逐包核对，否则会被当视频流（90kHz、帧级）漏检
+                kind_info = (classified.get('audio', {}).get(ssrc)
+                             or classified.get('video', {}).get(ssrc) or {})
+                ts_result = check_ts_continuity(
+                    cap['packets'], ssrc,
+                    clock_rate=kind_info.get('clock'),
+                    full_mode=(kind_info.get('kind') == 'audio')
+                    if kind_info.get('kind') else None)
                 if ts_result['packet_count'] > 0:
                     ts_result['label'] = label
                     ts_results[label] = ts_result
@@ -283,9 +291,10 @@ def run_analysis():
             info = cap['streams'].get(ssrc)
             if not info:
                 continue
-            pts = info.get('pt', [])
-            is_audio = any(pt in AUDIO_PT for pt in pts)
-            is_video = any(pt in VIDEO_PT_RANGE for pt in pts)
+            # 流种类用分类结果（SDP 端口绑定/时钟率解析），动态 PT 音频
+            # （如 OPUS@96）只看 PT 号会被误判成视频
+            is_audio = ssrc in classified.get('audio', {})
+            is_video = ssrc in classified.get('video', {})
             if not is_audio and not is_video:
                 continue
             if is_audio:
@@ -353,9 +362,9 @@ def run_analysis():
                 if not info:
                     continue
                 label = f"{role} (SSRC=0x{ssrc:08x})"
-                if any(pt in AUDIO_PT for pt in info.get('pt', [])):
+                if ssrc in classified.get('audio', {}):
                     audio_quality[label] = analyze_audio_quality(cap['packets'], ssrc)
-                elif any(pt in VIDEO_PT_RANGE for pt in info.get('pt', [])):
+                elif ssrc in classified.get('video', {}):
                     entry = next((e for e in media_manifest.get('video', [])
                                   if e.get('role') == role
                                   and e.get('ssrc') == f'0x{ssrc:08x}'), None)

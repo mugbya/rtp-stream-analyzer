@@ -1139,19 +1139,19 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
                 'advice': '', 'redirects': [], 'devices': [], 'notes': []}
 
     # 每台设备与 FS 之间按媒体类别的上下行实测
+    stream_kinds = _stream_kinds(captures)
     stats = {}   # device_ip -> {'up': {kind: agg}, 'down': {kind: agg}}
     for leg in call['legs']:
         if server_ip not in leg['ips']:
             continue
-        for st in leg['streams'].values():
+        for ssrc, st in leg['streams'].items():
             if st['src_ip'] == server_ip:
                 direction, dev = 'down', st['dst_ip']
             elif st['dst_ip'] == server_ip:
                 direction, dev = 'up', st['src_ip']
             else:
                 continue
-            kind = ('audio' if st['pt'] in AUDIO_PT
-                    else 'video' if 96 <= st['pt'] <= 127 else None)
+            kind = _pt_kind(stream_kinds, ssrc, st['pt'])
             if not kind:
                 continue
             agg = (stats.setdefault(dev, {'up': {}, 'down': {}})[direction]
@@ -1280,6 +1280,27 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
             'notes': notes}
 
 
+def _stream_kinds(captures: dict) -> dict:
+    """收集各抓包解析出的流种类（{ssrc: 'audio'|'video'}）。
+
+    动态 PT（96-127）按媒体种类独立分配（audio 96=OPUS 与 video 96=H264 可
+    同号并存），媒体种类以解析阶段按 SDP 端口绑定/时钟率判定的 kind 为准。
+    """
+    kinds = {}
+    for rd in captures.values():
+        for ssrc, info in (rd.get('streams') or {}).items():
+            kind = info.get('kind')
+            if kind and ssrc not in kinds:
+                kinds[ssrc] = kind
+    return kinds
+
+
+def _pt_kind(kinds: dict, ssrc, pt: int) -> str | None:
+    """一条流的媒体种类：解析标注优先，静态 PT 表兜底。"""
+    return kinds.get(ssrc) or ('audio' if pt in AUDIO_PT
+                               else 'video' if 96 <= pt <= 127 else None)
+
+
 def detect_calls(captures: dict, server_ip: str = None) -> list:
     """Detect calls across all uploaded captures.
 
@@ -1313,35 +1334,42 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
     build_sip_flows(raw_calls, captures, server_ip)
 
     results = []
+    stream_kinds = _stream_kinds(captures)
     for idx, call in enumerate(raw_calls):
         completeness = assess_call_completeness(call, file_info, server_ip)
 
-        pts = set()
+        stream_pts = {}
         for leg in call['legs']:
-            for st in leg['streams'].values():
-                pts.add(st['pt'])
+            for ssrc, st in leg['streams'].items():
+                stream_pts.setdefault(ssrc, st['pt'])
+        kinds = {ssrc: _pt_kind(stream_kinds, ssrc, pt)
+                 for ssrc, pt in stream_pts.items()}
         media_types = []
-        if any(pt in AUDIO_PT for pt in pts):
+        if any(k == 'audio' for k in kinds.values()):
             media_types.append('audio')
-        if any(96 <= pt <= 127 for pt in pts):
+        if any(k == 'video' for k in kinds.values()):
             media_types.append('video')
 
-        # 实际使用的编码：由 RTP 流里真实出现的 PT 反查（静态 PT 名优先，
-        # 动态 PT 96~127 靠 SDP rtpmap 解析；SDP 列出的是候选，不代表在用）。
-        # 视频动态 PT 连 SDP 都没有时只能标注 PT 并说明 SDP 未抓到。
+        # 实际使用的编码：由 RTP 流真实出现的 PT 反查（静态 PT 名优先，动态
+        # PT 96~127 靠 SDP rtpmap 解析；SDP 列出的是候选，不代表在用）。
+        # 动态 PT 音频（如 OPUS@96）按解析出的种类归侧，不能只看 PT 号。
         sdp_map = (call.get('sdp_codecs') or {}).get('map') or {}
 
         def _pt_codec(kind, pt):
             return PT_NAMES.get(pt) or (sdp_map.get(kind) or {}).get(str(pt))
 
         codecs = {
-            'audio': sorted({n for pt in pts if pt in AUDIO_PT
+            'audio': sorted({n for ssrc, pt in stream_pts.items()
+                             if kinds[ssrc] == 'audio'
                              for n in [_pt_codec('audio', pt)] if n}),
-            'video': sorted({n for pt in pts if 96 <= pt <= 127
+            'video': sorted({n for ssrc, pt in stream_pts.items()
+                             if kinds[ssrc] == 'video'
                              for n in [_pt_codec('video', pt)] if n}),
         }
         if not codecs['video']:
-            codecs['video'] = sorted({f'PT {pt}（SDP 未抓到）' for pt in pts if 96 <= pt <= 127})
+            codecs['video'] = sorted({f'PT {pt}（SDP 未抓到）'
+                                      for ssrc, pt in stream_pts.items()
+                                      if kinds[ssrc] == 'video'})
 
         # 接通后媒体区间（通话区间 ≠ 通话媒体区间）：FS 从主叫一呼叫就可能开始
         # 收录 RTP（含回铃音等早期媒体），这里只统计被叫应答之后、首条 BYE 之前

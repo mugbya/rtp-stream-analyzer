@@ -39,8 +39,13 @@ def signed32(x: int) -> int:
     return x - TS_MOD if x >= (1 << 31) else x
 
 
-def check_ts_continuity(packets: dict, ssrc: int) -> dict:
+def check_ts_continuity(packets: dict, ssrc: int, clock_rate: int = None,
+                        full_mode: bool = None) -> dict:
     """检测指定 SSRC 流的 RTP 时间戳连续性（按捕获时间序）。
+
+    clock_rate / full_mode：调用方已按 SDP/时钟率解析出流种类时直接传入
+    （动态 PT 音频如 OPUS@96 只看 PT 号会被当视频、时钟率也会取错）；缺省
+    按静态 PT 表推断。
 
     Returns:
         {
@@ -71,14 +76,16 @@ def check_ts_continuity(packets: dict, ssrc: int) -> dict:
     result['packet_count'] = len(pkts)
     pt = Counter(p[3] for p in pkts).most_common(1)[0][0]
     result['pt'] = pt
-    clock_rate = get_clock_rate(pt)
+    if clock_rate is None:
+        clock_rate = get_clock_rate(pt)
     result['clock_rate'] = clock_rate
 
     # 检查模式：静态音频 PT 每包自带独立媒体时间，逐包核对；视频/动态 PT
     # 流一帧拆多个包、同帧时间戳相同（RFC 6184），DTMF 事件重传同样共用
     # 时间戳（RFC 4733）——这些流只查倒退/乱序/回绕，重复与逐包跳变不算
     # 异常，否则正常视频流会被刷爆告警
-    full_mode = pt in AUDIO_PT
+    if full_mode is None:
+        full_mode = pt in AUDIO_PT
     result['mode'] = 'packet' if full_mode else 'frame'
 
     # 第一遍：带符号的时间戳增量 → 中位数即实测每包时长（中位数对个别
