@@ -178,11 +178,6 @@ function showResults(results) {
             html += renderDelayChains(report.delay_chains);
         }
 
-        // 音画质量分析：杂音/啸叫/削波破音/底噪（音频）与花屏风险（视频）
-        if (report.media_quality) {
-            html += renderMediaQuality(report.media_quality);
-        }
-
         if (report.conclusion) {
             html += '<h6>结论</h6>';
             html += `<p><strong>${report.conclusion.root_cause}</strong></p>`;
@@ -208,12 +203,15 @@ function showResults(results) {
             }
         }
 
-        // 声音/视频问题分类：对照清单，把检测结论对号入座
+        // 声音/视频问题分类：区块开头带"流质量速览"（每条流的结论徽章与关键
+        // 指标）。原独立"音画质量分析"块与之重复，已并入不再单独展示
         if (report.problem_classification) {
-            html += renderProblemClassification(report.problem_classification);
+            html += renderProblemClassification(
+                report.problem_classification, report.media_quality);
         }
         if (report.video_problem_classification) {
-            html += renderVideoProblemClassification(report.video_problem_classification);
+            html += renderVideoProblemClassification(
+                report.video_problem_classification, report.media_quality);
         }
 
         // RTCP 收发报告：接收端视角的丢包/抖动佐证
@@ -385,6 +383,8 @@ function renderDelayChains(dc) {
     return html;
 }
 
+// ====== 流质量速览（并入声音/视频问题分类区块）======
+// 原独立"音画质量分析"块与问题分类展示的是同一批检测结论，已并入避免重复。
 // 音画质量专用徽章（音频 clean/noisy/bad，视频 ok/risk/bad）
 const QUALITY_BADGES = {
     clean: ['success', '干净'],
@@ -394,41 +394,10 @@ const QUALITY_BADGES = {
     risk: ['warning', '花屏风险'],
 };
 
-function renderMediaQuality(mq) {
-    const audioEntries = Object.entries(mq.audio || {});
-    const videoEntries = Object.entries(mq.video || {});
-    if (!audioEntries.length && !videoEntries.length) return '';
-    let html = '<h6 class="mt-3">音画质量分析（杂音 / 啸叫 / 花屏）</h6>';
-    html += '<p class="small text-muted mb-2">对重建媒体做针对性检测：音频查啸叫/持续单频音、削波破音、爆点、低频嗡声、底噪与音量，' +
-        '并核对 RTP 序号/时间戳秩序（序号每包 +1、时间戳单调递增是重建与检测可信的前提）；' +
-        '视频把丢包映射为花屏影响（破损帧数据、关键帧间隔、ffmpeg 解码校验）。事件时间为相对该流开始的秒数。</p>';
-    audioEntries.forEach(([label, q]) => { html += _audioQualityCard(label, q); });
-    videoEntries.forEach(([label, q]) => { html += _videoQualityCard(label, q); });
-    return html;
-}
-
-function _qualityCard(label, q, badge, chips, issues) {
-    let html = '<div class="border rounded p-2 mb-2">' +
-        '<div class="d-flex flex-wrap align-items-center gap-2">' +
-        `<strong>${_esc(label)}</strong>` +
-        `<span class="badge bg-${badge[0]}">${_esc(badge[1])}</span>`;
-    chips.forEach(c => {
-        html += `<span class="badge bg-light text-dark border">${_esc(c)}</span>`;
-    });
-    html += '</div>';
-    (issues || []).forEach(i => {
-        const sev = i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'secondary';
-        html += `<div class="mt-1 small"><span class="badge bg-${sev} me-1">${i.severity === 'critical' ? '严重' : i.severity === 'warning' ? '注意' : '提示'}</span>${_esc(i.message)}</div>`;
-    });
-    html += '</div>';
-    return html;
-}
-
-function _audioQualityCard(label, q) {
-    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
+// 音频流关键指标徽章（原每流卡片的指标行，速览复用）
+function _audioQualityChips(q) {
     if (q.verdict === 'unknown') {
-        return _qualityCard(label, q, badge,
-            [`${q.codec || ''} 编码不可解（仅 PCMU/PCMA 支持音质检测）`], []);
+        return [`${q.codec || ''} 编码不可解（仅 PCMU/PCMA 支持音质检测）`];
     }
     const chips = [];
     if (q.tones?.howl_count) chips.push(`啸叫/单频音 ${q.tones.howl_count} 处`);
@@ -449,11 +418,11 @@ function _audioQualityCard(label, q) {
         if (integ.other_pt_packets) chips.push(`其他PT包 ${integ.other_pt_packets} 个（DTMF 事件等，不参与秩序判定）`);
     }
     if (!chips.length) chips.push('未检测到异常');
-    return _qualityCard(label, q, badge, chips, q.issues);
+    return chips;
 }
 
-function _videoQualityCard(label, q) {
-    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
+// 视频流关键指标徽章（原每流卡片的指标行，速览复用）
+function _videoQualityChips(q) {
     const chips = [];
     if (q.total_lost) chips.push(`丢包 ${q.total_lost} 包（${q.loss_rate_pct}%)`);
     if (q.rtp_integrity?.ts_backward) chips.push(`时间戳倒退 ${q.rtp_integrity.ts_backward} 处`);
@@ -464,7 +433,43 @@ function _videoQualityCard(label, q) {
     if (q.decode_check === 'ok') chips.push('解码校验通过');
     else if (q.decode_check === 'errors') chips.push(`解码错误 ${q.decode_errors} 处`);
     else if (q.decode_check === 'unavailable') chips.push('解码校验跳过（无 ffmpeg）');
-    return _qualityCard(label, q, badge, chips, q.issues);
+    return chips;
+}
+
+// 流质量速览：一条流一行——流名 + 结论徽章 + 关键指标；检测提示默认收起
+function _qualityOverviewRow(label, q, kind) {
+    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
+    const chips = kind === 'video' ? _videoQualityChips(q) : _audioQualityChips(q);
+    let html = '<div class="border rounded p-2 mb-1">' +
+        '<div class="d-flex flex-wrap align-items-center gap-1">' +
+        `<strong class="me-1">${_esc(label)}</strong>` +
+        `<span class="badge bg-${badge[0]}">${_esc(badge[1])}</span>`;
+    chips.forEach(c => {
+        html += `<span class="badge bg-light text-dark border">${_esc(c)}</span>`;
+    });
+    html += '</div>';
+    if (q.issues && q.issues.length) {
+        html += `<details class="mt-1"><summary class="small text-muted user-select-none">${q.issues.length} 条检测提示（点开展开）</summary>`;
+        q.issues.forEach(i => {
+            const sev = i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'secondary';
+            html += `<div class="mt-1 small"><span class="badge bg-${sev} me-1">${i.severity === 'critical' ? '严重' : i.severity === 'warning' ? '注意' : '提示'}</span>${_esc(i.message)}</div>`;
+        });
+        html += '</details>';
+    }
+    html += '</div>';
+    return html;
+}
+
+// 某类媒体（audio/video）的速览条，插在对应问题分类区块开头；没有流时整体省略
+function _qualityOverview(mq, kind) {
+    const entries = Object.entries((mq && mq[kind]) || {});
+    if (!entries.length) return '';
+    let html = '<div class="mb-2">' +
+        '<div class="small text-muted mb-1">流质量速览（每条流的检测结论与关键指标，' +
+        '详细归因与排查方向见下方问题卡片）：</div>';
+    entries.forEach(([label, q]) => { html += _qualityOverviewRow(label, q, kind); });
+    html += '</div>';
+    return html;
 }
 
 // ====== 声音问题分类（对照《声音问题种类》清单） ======
@@ -501,20 +506,22 @@ function _problemCard(p, feelNoun) {
 
 // 声音/视频问题分类共用一套卡片布局，只差标题、清单名、空态文案与
 // "听感/观感"用词
-function renderProblemClassification(pc) {
+function renderProblemClassification(pc, mq) {
     return _renderProblemSection(pc, '声音问题分类', '声音问题种类',
-                                 '抓包层面未发现可归类的声音问题。', '听感');
+                                 '抓包层面未发现可归类的声音问题。', '听感', mq, 'audio');
 }
 
-function renderVideoProblemClassification(pc) {
+function renderVideoProblemClassification(pc, mq) {
     return _renderProblemSection(pc, '视频问题分类', '视频问题',
-                                 '抓包层面未发现可归类的视频问题。', '观感');
+                                 '抓包层面未发现可归类的视频问题。', '观感', mq, 'video');
 }
 
-function _renderProblemSection(pc, title, docName, emptyText, feelNoun) {
+function _renderProblemSection(pc, title, docName, emptyText, feelNoun, mq, kind) {
     if (!pc || !pc.available) return '';
     let html = `<h6 class="mt-3">${_esc(title)}` +
         ` <span class="text-muted small fw-normal">对照《${_esc(docName)}》清单，把检测结论对号入座</span></h6>`;
+    // 区块开头放"流质量速览"：每条流的结论徽章 + 关键指标，替代原独立块
+    html += _qualityOverview(mq, kind);
     html += `<div class="alert alert-secondary py-2 small mb-2">${_esc(pc.summary)}</div>`;
     (pc.notes || []).forEach(n => {
         html += `<p class="small text-muted mb-2">${_esc(n)}</p>`;
