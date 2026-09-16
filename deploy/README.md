@@ -1,13 +1,10 @@
 # 自动部署说明
 
-推送 `main` 分支后，GitHub Actions 自动：跑测试 → rsync 同步代码到服务器 → 首次部署自举（建 venv、装 systemd 单元）→ 更新依赖 → 重启服务 → 健康检查。失败会在 Actions 页面标红并保留现场。
+推送 `main` 分支后，GitHub Actions 自动：rsync 同步代码到服务器 → 首次部署自举（建 venv、装 systemd 单元）→ 更新依赖 → 重启服务 → 健康检查。失败会在 Actions 页面标红并保留现场。
 
 ```
 git push origin main
         │
-        ▼
-GitHub Actions: test（跑 tests/ 下全部用例）
-        │ 通过
         ▼
 rsync 代码 ──► /opt/rtp-stream-analyzer/app
                 │  （venv 不存在则自动创建；systemd 单元随代码同步，有变化自动更新）
@@ -22,10 +19,20 @@ Nginx (80→443, 多域名共用证书) ──► 127.0.0.1:5050
 
 **服务器上不需要任何手动初始化**：SSH 免密、Python 环境你已就绪，venv 和 systemd 单元由工作流在首次部署时自举完成。
 
+> 按你的选择，CI 不跑测试：部署后的健康检查（服务起得来、首页能访问）是唯一自动门禁。推送前想验证代码，本地跑一遍测试：`for f in tests/test_*.py; do python3 "$f"; done`
+
 ## 前置条件（都已满足/仅核对）
 
 - root 可 SSH 登录服务器（公钥已配好）
 - 服务器有 `python3` ≥ 3.9 且带 venv 模块、已装 `rsync`（部署过 Python 服务一般都有；没有就 `dnf install -y rsync`）
+- 服务器已装 `ffmpeg`（OPUS 音频回放依赖；`media_extractor.py` 按 PATH 直接调用）：
+
+```bash
+dnf install -y epel-release
+dnf config-manager --set-enabled crb   # Rocky 8 上叫 powertools
+dnf install -y https://mirrors.ustc.edu.cn/rpmfusion/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
+dnf install -y ffmpeg
+```
 
 ## 一次性配置（共 3 步）
 
@@ -88,7 +95,7 @@ nginx -t && systemctl reload nginx
 
 ## 日常发布
 
-改完代码 `git push origin main` 即可，测试不通过会自动拦下不部署。
+改完代码 `git push origin main` 即可。CI 不跑测试；测试套件还在 `tests/` 里，推送前想验证就在本地跑：`for f in tests/test_*.py; do python3 "$f"; done`。
 
 ## 运维命令
 

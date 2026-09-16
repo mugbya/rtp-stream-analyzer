@@ -11,33 +11,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    name: Run tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      # 测试为独立脚本风格（python3 tests/test_x.py 直接运行），逐个执行
-      - name: Run tests
-        run: |
-          set -e
-          for f in tests/test_*.py; do
-            echo "::group::运行 $f"
-            python3 "$f"
-            echo "::endgroup::"
-          done
-
   deploy:
     name: Deploy to server
-    needs: test
     runs-on: ubuntu-latest
     env:
       SSH_HOST: ${{ secrets.SSH_HOST }}
