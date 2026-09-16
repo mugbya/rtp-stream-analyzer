@@ -117,6 +117,8 @@ python3 app.py
 
 浏览器访问 **http://localhost:5050**
 
+outputs 目录（分析图表与音视频文件）由后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，可在 `app.py` 顶部的 `OUTPUT_RETENTION_HOURS` / `OUTPUT_CLEANUP_INTERVAL_MINUTES` 配置项调整。
+
 ## 使用流程
 
 1. **上传**：选择 1~3 个抓包文件（pcap/pcapng），点击「上传并识别」
