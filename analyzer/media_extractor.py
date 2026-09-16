@@ -7,8 +7,6 @@ import json
 import struct
 import wave
 import audioop
-import base64
-import binascii
 import re
 import subprocess
 from datetime import datetime
@@ -752,29 +750,12 @@ def get_media_urls(manifest: dict, session_id: str, output_date: str) -> dict:
 _PARTY_ROLE_NAMES = {'seat': '被叫端（坐席）', 'terminal': '主叫端（终端）', 'fs': 'FS'}
 
 
-# base64 形态的 SIP 身份 token（平台/话机把号码编码成 base64 当分机号）
-_B64_TOKEN_RE = re.compile(r'[A-Za-z0-9+/]{16,}={0,2}')
-
-
-def _decode_ident_tokens(label: str) -> str:
-    """解出身份串里 base64 token 的可读内容（"Extension LTU4NT..." 里的号码），
-    解不出（非法 base64 或含不可打印字符）保持原样。"""
-    def _dec(m):
-        tok = m.group(0)
-        try:
-            raw = base64.b64decode(tok + '=' * (-len(tok) % 4), validate=True)
-            txt = raw.decode('ascii')
-        except (binascii.Error, UnicodeDecodeError, ValueError):
-            return tok
-        return txt if all(32 <= ord(ch) < 127 for ch in txt) else tok
-    return _B64_TOKEN_RE.sub(_dec, label)
-
-
 def _ident_label(ident: dict) -> str:
     """SIP From/To 头的可读称呼：'张三（1002）' / '1002' / 显示名。
 
-    话机自报的超长单 token（base64 设备串等，From 的显示名与 user 常是同
-    一串）没有可读性，不采用——端点由展示层以 IP 标注。
+    身份串按抓包原文展示，不做 base64 解码——平台分机号本身可能就是这种
+    串，解码反而得到错误内容。话机自报的超长无空格单 token（From 的显示
+    名与 user 常是同一串）没有可读性，不采用——端点由展示层以 IP 标注。
     """
     if not ident:
         return ''
@@ -784,7 +765,6 @@ def _ident_label(ident: dict) -> str:
         label = f'{name}（{user}）'
     else:
         label = name or user
-    label = _decode_ident_tokens(label)
     if len(label) > 20 and ' ' not in label:
         return ''
     return label

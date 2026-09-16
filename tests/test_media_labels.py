@@ -206,13 +206,13 @@ def test_two_calls_distinct_parties():
 
 def test_ident_label_format():
     # 话机自报的超长 base64 设备串（显示名与 user 同串）不采用：
-    # 解码后仍是超过 20 字符的无空格单 token
+    # 超过 20 字符的无空格单 token 没有可读性
     b64 = 'LTU4NTcyODU2NjAwZWYwN2MxMzZkYjIxYzk0NQ'
     assert _ident_label({'name': b64, 'user': b64}) == ''
     assert _ident_label({'name': '', 'user': b64}) == ''
-    # base64 分机号解出可读内容
+    # 身份串按抓包原文展示，不做 base64 解码（解码反而得到错误内容）
     assert _ident_label({'name': 'Extension ' + b64, 'user': b64}) == \
-        'Extension -58572856600ef07c136db21c945'
+        'Extension ' + b64
     # 解不出（含不可打印字节）保持原样
     assert _ident_label({'name': '', 'user': 'abcdefgh1234567'}) == 'abcdefgh1234567'
     assert _ident_label({'name': '张三', 'user': '1001'}) == '张三（1001）'
@@ -269,9 +269,10 @@ def test_unanswered_call_callee_fallback():
     assert parties['caller_ip'] == SERVER
     assert parties['answerer_ip'] == SEAT
     assert parties['answerer_ident'] == CALLEE_IDENT
-    # FS 转报的主叫身份解出可读内容（base64 里的号码）
-    assert _ident_label(relayed_caller) == 'Extension -5857285660046daf8f0ef087549'
-    print("PASS: unanswered call keeps callee via peer fallback; relayed caller decoded")
+    # FS 转报的主叫身份按抓包原文保留（不做 base64 解码）
+    assert _ident_label(relayed_caller) == \
+        'Extension LTU4NTcyODU2NjAwNDZkYWY4ZjBlZjA4NzU0OQ'
+    print("PASS: unanswered call keeps callee via peer fallback; relayed caller kept verbatim")
 
 
 if __name__ == '__main__':

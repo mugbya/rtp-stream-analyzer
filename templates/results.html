@@ -642,22 +642,13 @@ function _sipIdents(msgs, caller, answerer) {
     return idents;
 }
 
+// SIP 身份按抓包原文展示，不做 base64 解码——平台分机号本身可能就是这种
+// 串（"LTE2Nzcx..."），解码反而得到错误内容
 function _identLabel(id) {
     if (!id) return '';
     if (id.name && id.user && id.name !== id.user && !id.name.includes(id.user))
-        return _decodeIdents(`${id.name}（${id.user}）`);
-    return _decodeIdents(id.name || id.user || '');
-}
-
-// 平台/话机常把号码编码成 base64 当分机号：能解出可读 ASCII 的 token 就地替换
-function _decodeIdents(s) {
-    return String(s).replace(/[A-Za-z0-9+/]{16,}={0,2}/g, tok => {
-        try {
-            const bin = atob(tok);
-            if (/^[\x20-\x7e]+$/.test(bin)) return bin;
-        } catch (e) { /* 不是 base64，按原样保留 */ }
-        return tok;
-    });
+        return `${id.name}（${id.user}）`;
+    return id.name || id.user || '';
 }
 
 // 时序阶梯图：只保留「谁打给谁」—— 经服务器为左(主叫)/中(FS)/右(被叫)三列，
@@ -914,7 +905,7 @@ function _callPartyChain(flow) {
     const seg = (badge, badgeCls, ip, id) => {
         const name = _esc(_identLabel(id) || _ipName(ip));
         return `<span class="badge ${badgeCls}">${badge}</span>` +
-            `<span class="text-truncate d-inline-block align-bottom" style="max-width:240px" title="${name}">${name}</span>` +
+            `<span class="text-truncate d-inline-block align-bottom" style="max-width:380px" title="${name}">${name}</span>` +
             `<span class="text-muted">${ip}</span>`;
     };
     const arrow = '<i class="bi bi-arrow-right text-muted"></i>';
