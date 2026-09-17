@@ -39,7 +39,8 @@
                 </div>
                 <div class="card-body">
                     <p class="text-muted small mb-3">
-                        从 RTP 流重建的音频/视频。按抓包文件分组，<strong>呼出</strong>为该端发送的媒体，<strong>呼入</strong>为该端接收的媒体。
+                        从 RTP 流重建的音频/视频，按链路方向分组（点对点通话链路里没有 FS）。
+                        每条流的<strong>质量结论与问题</strong>直接挂在对应播放器下面：严重的默认展开，注意/提示级点击展开。
                     </p>
                     <div id="media-container"></div>
                 </div>
@@ -123,6 +124,9 @@ function showResults(results) {
         statCard(summary.packet_loss_clean ? 'bi-shield-check' : 'bi-shield-x',
                  '丢包状态', summary.packet_loss_clean ? '无丢包' : '有丢包', '',
                  summary.packet_loss_clean ? 'success' : 'danger') +
+        statCard('bi-clock-history', '时间戳',
+                 summary.ts_clean === false ? '异常' : '连续', '',
+                 summary.ts_clean === false ? 'warning' : 'success') +
         (summary.media_quality && summary.media_quality.checked
             ? statCard(summary.media_quality.clean ? 'bi-music-note-beamed' : 'bi-exclamation-diamond',
                        '音画质量', summary.media_quality.clean ? '正常' : '有异常',
@@ -186,17 +190,19 @@ function showResults(results) {
                 });
                 html += '</ul>';
             }
+            if (report.conclusion.ok_items && report.conclusion.ok_items.length > 0) {
+                html += '<h6 class="mt-3">正常项</h6><ul class="list-group mb-3">';
+                report.conclusion.ok_items.forEach(item => {
+                    html += `<li class="list-group-item list-group-item-success">✓ ${_esc(item)}</li>`;
+                });
+                html += '</ul>';
+            }
         }
 
-        // 声音/视频问题分类：区块开头带"流质量速览"（每条流的结论徽章与关键
-        // 指标）。原独立"音画质量分析"块与之重复，已并入不再单独展示
-        if (report.problem_classification) {
-            html += renderProblemClassification(
-                report.problem_classification, report.media_quality);
-        }
-        if (report.video_problem_classification) {
-            html += renderVideoProblemClassification(
-                report.video_problem_classification, report.media_quality);
+        // 音频/视频问题展示：回放区有媒体时问题挂在各播放器卡片下（见
+        // showMedia）；回放区没有可展示的媒体时在这里兜底，避免问题没地方看
+        if (!_hasMediaEntries(results.media_manifest)) {
+            html += renderMediaSections(report);
         }
 
         // RTCP 收发报告：接收端视角的丢包/抖动佐证
@@ -207,10 +213,18 @@ function showResults(results) {
         detail.innerHTML = html;
     }
     
-    // 音视频回放
+    // 音视频回放（质量结论与问题直接挂在各播放器卡片下）
     if (results.media_manifest) {
-        showMedia(results.media_manifest);
+        showMedia(results.media_manifest, report);
     }
+}
+
+// 回放区是否有可展示的媒体条目（含未能重建的流）
+function _hasMediaEntries(manifest) {
+    return !!(manifest &&
+        ((manifest.audio || []).length +
+         (manifest.video || []).length +
+         (manifest.unsupported || []).length));
 }
 
 // ====== 时间戳异常逐包明细（点击 issue 展开"前后相关内容"）======
@@ -292,11 +306,14 @@ function renderAudioHealth(h) {
     if (!h.directions || !h.directions.length) {
         return html + `<p class="text-muted small mb-3">${_esc(h.summary || '数据不足，无法做无声诊断')}</p>`;
     }
-    html += `<p class="small text-muted mb-2">按方向逐腿检查"发声端 → FS → 听者"：流是否发出、是否到达、内容是否有人声，用于定位"没听到声音"。</p>`;
+    // 点对点通话链路里没有 FS，方向头与腿名都不再带 FS
+    const p2p = h.p2p || _p2pFallback(h.directions);
+    html += `<p class="small text-muted mb-2">按方向逐腿检查"${p2p ? '发声端 → 听者' : '发声端 → FS → 听者'}"：流是否发出、是否到达、内容是否有人声，用于定位"没听到声音"。</p>`;
     h.directions.forEach(d => {
         html += `<div class="border rounded p-2 mb-2">` +
             `<div class="d-flex flex-wrap align-items-center gap-2">` +
-            `<strong>${_esc(d.label)}</strong>${_healthBadge(d.verdict)}` +
+            _chainHtml(d.speaker, d.listener, p2p) +
+            _healthBadge(d.verdict) +
             `<span class="small">${_esc(d.verdict_text)}</span></div>`;
         (d.legs || []).forEach(l => {
             const p = l.presence || {};
@@ -324,12 +341,16 @@ function renderDelayChains(dc) {
         const note = (dc.notes && dc.notes[0]) || '数据不足，无法测量链路延迟';
         return html + `<p class="text-muted small mb-3">${_esc(note)}</p>`;
     }
-    html += `<p class="small text-muted mb-2">把每个方向拆成 发声端→FS、FS 内部、FS→听者 三段测量。` +
+    // 点对点通话链路只有一段网络路径，方向头不带 FS
+    const p2p = dc.p2p || (dc.directions || []).some(d =>
+        (d.segments || []).some(s => (s.name || '').includes('直连')));
+    html += `<p class="small text-muted mb-2">把每个方向拆成 ${p2p ? '发声端 → 听者 一段' : '发声端→FS、FS 内部、FS→听者 三段'}测量。` +
         `跨抓包段包含抓包机时钟差，绝对值仅供参考；两段往返之和可抵消时钟差。</p>`;
     dc.directions.forEach(d => {
         html += `<div class="border rounded p-2 mb-2">` +
             `<div class="d-flex flex-wrap align-items-center gap-2">` +
-            `<strong>${_esc(d.label)}</strong>${_healthBadge(d.verdict)}` +
+            _chainHtml(d.speaker, d.listener, p2p) +
+            _healthBadge(d.verdict) +
             (d.total_mean != null
                 ? `<span class="small text-muted">合计 ${d.total_mean}ms` +
                   (d.total_note ? `（${_esc(d.total_note)}）` : '') + `</span>`
@@ -423,46 +444,293 @@ function _videoQualityChips(q) {
     return chips;
 }
 
-// 流质量速览：一条流一行——流名 + 结论徽章 + 关键指标；检测提示默认收起
-function _qualityOverviewRow(label, q, kind) {
-    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
-    const chips = kind === 'video' ? _videoQualityChips(q) : _audioQualityChips(q);
-    let html = '<div class="border rounded p-2 mb-1">' +
-        '<div class="d-flex flex-wrap align-items-center gap-1">' +
-        `<strong class="me-1">${_esc(label)}</strong>` +
-        `<span class="badge bg-${badge[0]}">${_esc(badge[1])}</span>`;
-    chips.forEach(c => {
-        html += `<span class="badge bg-light text-dark border">${_esc(c)}</span>`;
+// ====== 音/视频区块：按链路方向分组，问题挂到具体流 ======
+// 原"流质量速览 + 声音/视频问题分类"两个平铺区块重组为：音频/视频各一个
+// 区块，区内按链路方向分组（主叫 → FS → 被叫；点对点去掉 FS），每组下流
+// 卡片两列并排，问题挂在对应流卡片下——严重（critical）默认展开，注意/
+// 提示级收进折叠区。旧会话数据的问题条目没有 streams/directions 字段时，
+// 回退按证据文本前缀/包含关系匹配归属。
+
+// 链路节点徽章：主叫=蓝、被叫=绿、FS=黑，其余名字深灰
+function _chainNodeBadge(name) {
+    const cls = name === '主叫' ? 'bg-primary'
+        : name === '被叫' ? 'bg-success' : 'bg-dark';
+    return `<span class="badge ${cls}">${_esc(name)}</span>`;
+}
+
+// 链路：主叫 → FS → 被叫；点对点（p2p=true）时中间的 FS 不展示
+function _chainHtml(speaker, listener, p2p) {
+    const arrow = '<i class="bi bi-arrow-right text-muted mx-1"></i>';
+    let html = _chainNodeBadge(speaker || '主叫');
+    if (!p2p) html += arrow + '<span class="badge bg-dark">FS</span>';
+    html += arrow + _chainNodeBadge(listener || '被叫');
+    return `<span class="chain-line d-inline-flex align-items-center flex-wrap">${html}</span>`;
+}
+
+// 旧会话数据的 p2p 兜底：无声诊断的直连腿名带"直连"字样
+function _p2pFallback(directions) {
+    return (directions || []).some(d =>
+        (d.legs || []).some(l => (l.leg || '').includes('直连')));
+}
+
+// 流展示标签形如 "seat (SSRC=0x00ff2b3a)"，解析角色与 SSRC
+function _parseStreamLabel(label) {
+    const m = /^(terminal|seat|fs)\s*\(SSRC=0x([0-9a-fA-F]+)\)/.exec(label || '');
+    return m ? { role: m[1], ssrc: '0x' + m[2].toLowerCase().padStart(8, '0') }
+             : { role: null, ssrc: null };
+}
+
+// 收集一个链路方向涉及的 SSRC 集合：无声诊断各腿的 ssrc + 分段延迟同方向
+// 各段的 ssrc（跨段形态 '0xA → 0xB' 两头都收）。同一路媒体经 FS 时上下行
+// SSRC 不同，方向归属靠这两个来源配齐
+function _dirSsrcs(ahDir, dcDir) {
+    const set = new Set();
+    const grab = v => {
+        if (!v) return;
+        String(v).toLowerCase().replace(/0x[0-9a-f]+/g, h => (set.add(h), h));
+    };
+    ((ahDir && ahDir.legs) || []).forEach(l => grab(l.ssrc));
+    ((dcDir && dcDir.segments) || []).forEach(s => grab(s.ssrc));
+    return set;
+}
+
+// 组装链路方向分组。audio 优先以无声诊断的方向为准（缺失时退回延迟链路
+// 的方向定义）；video 没有方向级检测，按流角色前缀归组（FS 中转流方向
+// 无法判定，单独归一组）。labels 是流展示标签数组（回放区传播放条目、
+// 详细报告传 media_quality 的键）。
+function _buildDirGroups(labels, report, kind, p2p) {
+    const bySsrc = {};
+    labels.forEach(lb => {
+        const { ssrc } = _parseStreamLabel(lb);
+        if (ssrc) (bySsrc[ssrc] = bySsrc[ssrc] || []).push(lb);
     });
-    html += '</div>';
-    if (q.issues && q.issues.length) {
-        html += `<details class="mt-1"><summary class="small text-muted user-select-none">${q.issues.length} 条检测提示（点开展开）</summary>`;
-        q.issues.forEach(i => {
-            const sev = i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'secondary';
-            html += `<div class="mt-1 small"><span class="badge bg-${sev} me-1">${i.severity === 'critical' ? '严重' : i.severity === 'warning' ? '注意' : '提示'}</span>${_esc(i.message)}</div>`;
+    const groups = [];
+    const used = new Set();
+
+    const takeBySsrc = ssrcs => {
+        const gl = [];
+        ssrcs.forEach(s => (bySsrc[s] || []).forEach(lb => {
+            if (!used.has(lb)) { used.add(lb); gl.push(lb); }
+        }));
+        return gl;
+    };
+
+    const ahDirs = (report.audio_health && report.audio_health.directions) || [];
+    const dcDirs = (report.delay_chains && report.delay_chains.directions) || [];
+    if (ahDirs.length) {
+        ahDirs.forEach(d => {
+            const dc = dcDirs.find(x => x.label === d.label);
+            groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
+                          verdict: d.verdict, verdictText: d.verdict_text, p2p,
+                          labels: takeBySsrc(_dirSsrcs(d, dc)) });
         });
-        html += '</details>';
+    } else if (dcDirs.length) {
+        dcDirs.forEach(d => {
+            groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
+                          verdict: d.verdict, verdictText: d.verdict_text, p2p,
+                          labels: takeBySsrc(_dirSsrcs(null, d)) });
+        });
+    } else {
+        // 视频流（或方向级检测全缺）：按角色前缀归组
+        [{ role: 'terminal', speaker: '主叫', listener: '被叫' },
+         { role: 'seat', speaker: '被叫', listener: '主叫' }].forEach(rg => {
+            const gl = labels.filter(lb => !used.has(lb) &&
+                _parseStreamLabel(lb).role === rg.role);
+            gl.forEach(lb => used.add(lb));
+            if (gl.length) groups.push({ label: `${rg.speaker} → ${rg.listener}`,
+                speaker: rg.speaker, listener: rg.listener, p2p, labels: gl });
+        });
+        const fsLabels = labels.filter(lb => !used.has(lb) &&
+            _parseStreamLabel(lb).role === 'fs');
+        if (fsLabels.length) {
+            fsLabels.forEach(lb => used.add(lb));
+            groups.push({ label: '', fsRelay: true, p2p: false, labels: fsLabels });
+        }
     }
-    html += '</div>';
+    // SSRC 没配上、角色也不认识的剩余流兜底成"其他流"组
+    const rest = labels.filter(lb => !used.has(lb));
+    if (rest.length) groups.push({ label: '', rest: true, labels: rest });
+    return groups;
+}
+
+// 一条流的问题列表：严重（critical）与 P0（摘要点名的"最需要先处理"，
+// 如全程无人声的单通）展开直出，注意/提示级收进折叠区
+const _isSevere = p => p.severity === 'critical' || p.priority === 'P0';
+
+function _problemList(problems, feelNoun) {
+    if (!problems || !problems.length) return '';
+    const severe = problems.filter(_isSevere);
+    const minor = problems.filter(p => !_isSevere(p));
+    let html = '';
+    severe.forEach(p => { html += _problemCard(p, feelNoun); });
+    if (minor.length) {
+        const label = (severe.length ? '另有 ' : '') +
+            `${minor.length} 条注意/提示级问题（点开展开查看）`;
+        html += `<details class="mt-1">` +
+                `<summary class="small text-muted user-select-none">${label}</summary>` +
+                `<div class="mt-2">${minor.map(p => _problemCard(p, feelNoun)).join('')}</div></details>`;
+    }
     return html;
 }
 
-// 某类媒体（audio/video）的速览条，插在对应问题分类区块开头；没有流时整体省略
-function _qualityOverview(mq, kind) {
-    const entries = Object.entries((mq && mq[kind]) || {});
-    if (!entries.length) return '';
-    let html = '<div class="mb-2">' +
-        '<div class="small text-muted mb-1">流质量速览（每条流的检测结论与关键指标，' +
-        '详细归因与排查方向见下方问题卡片）：</div>';
-    entries.forEach(([label, q]) => { html += _qualityOverviewRow(label, q, kind); });
-    html += '</div>';
+const STREAM_ROLE_BADGE = {
+    terminal: ['bg-primary', '主叫端'],
+    seat: ['bg-success', '被叫端'],
+    fs: ['bg-dark', 'FS 端'],
+};
+
+// 流卡片：角色 + SSRC + 质量结论徽章 + 关键指标 chips + 挂在本流下的问题
+function _streamCard(label, q, kind, problems, feelNoun) {
+    const { role, ssrc } = _parseStreamLabel(label);
+    const rb = STREAM_ROLE_BADGE[role] || ['bg-secondary', '流'];
+    const badge = QUALITY_BADGES[q.verdict] ||
+        ['secondary', q.verdict === 'unknown' ? '无法判定' : (q.verdict || '—')];
+    const chips = kind === 'video' ? _videoQualityChips(q) : _audioQualityChips(q);
+    const bad = (problems || []).some(_isSevere);
+    let html = `<div class="col-md-6"><div class="stream-card border rounded p-2 h-100${bad ? ' stream-card-bad' : ''}">`;
+    html += '<div class="d-flex flex-wrap align-items-center gap-1">' +
+        `<span class="badge ${rb[0]}">${rb[1]}</span>` +
+        `<span class="stream-ssrc small">${_esc(ssrc || label)}</span>` +
+        `<span class="badge bg-${badge[0]}">${_esc(badge[1])}</span>` +
+        (q.codec ? `<span class="badge bg-light text-dark border">${_esc(q.codec)}</span>` : '') +
+        '</div>';
+    html += '<div class="mt-1">' + chips.map(c =>
+        `<span class="badge bg-light text-dark border me-1 mb-1 fw-normal">${_esc(c)}</span>`
+    ).join('') + '</div>';
+    html += _problemList(problems, feelNoun);
+    html += '</div></div>';
     return html;
 }
 
-// ====== 声音问题分类（对照《声音问题种类》清单） ======
-// 把详细报告里各检测器的结论按问题种类聚合展示：种类描述 + 用户听感词 +
-// 证据 + 排查方向。默认只展开"严重"级卡片，注意/提示级一律收进折叠区，
-// 点开才看。抓包看不到的听感问题单独折叠列出人工验证方法。
+// 问题归属：先按流（p.streams / 旧数据证据前缀）挂到流卡片，挂不上流
+// 再按方向（p.directions / 证据包含方向标签）挂到链路头；两头都不中的
+// 是全局问题，返回值挂在区块尾部。归属结果直接写进 groups（streamProblems
+// 按 label 索引，problems 挂组头）。
+function _attributeProblems(pc, groups) {
+    const globalProblems = [];
+    (pc.problems || []).forEach(p => {
+        let hit = false;
+        groups.forEach(g => {
+            const ownStreams = lb =>
+                (p.streams || []).includes(lb) ||
+                (p.streams == null && (p.evidence || []).some(e => e.startsWith(lb)));
+            const streamHits = g.labels.filter(ownStreams);
+            if (streamHits.length) {
+                hit = true;
+                streamHits.forEach(lb => {
+                    // 证据按流过滤：同一问题挂到多条流时，每张卡片只列自己
+                    // 这条流的证据，避免 A 流卡片下出现 B 流的丢包数字误导
+                    const ev = (p.evidence || []).filter(e => e.startsWith(lb));
+                    const card = ev.length ? { ...p, evidence: ev } : p;
+                    (g.streamProblems = g.streamProblems || {})[lb] =
+                        (g.streamProblems[lb] || []).concat(card);
+                });
+                return;
+            }
+            if (!g.rest && !g.fsRelay && g.label) {
+                const dirHit = (p.directions || []).some(d =>
+                    d === g.label || d.includes(g.label) || g.label.includes(d)) ||
+                    (p.directions == null &&
+                     (p.evidence || []).some(e => e.includes(g.label)));
+                if (dirHit) {
+                    hit = true;
+                    (g.problems = g.problems || []).push(p);
+                }
+            }
+        });
+        if (!hit) globalProblems.push(p);
+    });
+    return globalProblems;
+}
+
+// 方向组头：链路徽章 + 方向判定 + 挂组头的方向级问题
+function _dirGroupHead(g, mq, kind, feelNoun) {
+    let html = '<div class="d-flex flex-wrap align-items-center gap-2">';
+    if (g.rest) {
+        html += '<strong class="small">其他流</strong>' +
+            '<span class="text-muted small">（未能归入链路方向）</span>';
+    } else if (g.fsRelay) {
+        html += _chainHtml(g.speaker || '主叫', g.listener || '被叫', false) +
+            '<span class="text-muted small">（FS 转发流，方向无法判定）</span>';
+    } else {
+        html += _chainHtml(g.speaker, g.listener, g.p2p);
+        if (g.verdict) html += _healthBadge(g.verdict);
+        if (g.verdictText) {
+            html += `<span class="small text-muted">${_esc(g.verdictText)}</span>`;
+        }
+    }
+    html += '</div>' + _problemList(g.problems, feelNoun);
+    return html;
+}
+
+// 区块尾部：全局问题 + 无法仅凭抓包确认的问题清单（折叠表）
+function _mediaSectionFooter(pc, globalProblems, feelNoun) {
+    let html = '';
+    if (globalProblems.length) {
+        html += '<div class="mt-2"><div class="small text-muted mb-1">全局问题（无法归属到单条流或方向）：</div>' +
+            _problemList(globalProblems, feelNoun) + '</div>';
+    }
+    if (pc.unobservable && pc.unobservable.length) {
+        html += `<details class="mt-2"><summary class="small text-muted user-select-none">另有 ${pc.unobservable.length} 类${_esc(feelNoun)}问题无法仅凭抓包确认（点开看原因与人工验证方法）</summary>`;
+        html += '<div class="table-responsive mt-1"><table class="table table-sm table-bordered small mb-0">' +
+                '<thead><tr><th>类别</th><th>问题</th><th>用户' + _esc(feelNoun) + '</th><th>为什么抓包看不到</th><th>人工验证方法</th></tr></thead><tbody>';
+        pc.unobservable.forEach(u => {
+            html += `<tr><td>${_esc(u.category)}</td><td>${_esc(u.name)}</td>` +
+                    `<td>${u.feel.map(f => `“${_esc(f)}”`).join(' ')}</td>` +
+                    `<td>${_esc(u.why)}</td><td>${_esc(u.verify)}</td></tr>`;
+        });
+        html += '</tbody></table></div></details>';
+    }
+    return html;
+}
+
+// 音/视频区块入口（回放区没有任何媒体条目时的兜底，避免问题没地方展示）
+function renderMediaSections(report) {
+    return _renderMediaSection(report, 'audio') + _renderMediaSection(report, 'video');
+}
+
+function _renderMediaSection(report, kind) {
+    const pc = kind === 'audio' ? report.problem_classification
+                                : report.video_problem_classification;
+    if (!pc || !pc.available) return '';
+    const meta = kind === 'audio'
+        ? { title: '音频', icon: 'bi-music-note-beamed', docName: '声音问题种类',
+            feelNoun: '听感', empty: '抓包层面未发现可归类的声音问题。' }
+        : { title: '视频', icon: 'bi-camera-video', docName: '视频问题',
+            feelNoun: '观感', empty: '抓包层面未发现可归类的视频问题。' };
+    const mq = (report.media_quality || {})[kind] || {};
+    const p2p = _mediaP2p(report);
+    const groups = _buildDirGroups(Object.keys(mq), report, kind, p2p);
+    const globalProblems = _attributeProblems(pc, groups);
+
+    let html = `<h6 class="mt-3"><i class="bi ${meta.icon} text-primary"></i> ${meta.title}` +
+        ` <span class="text-muted small fw-normal">对照《${_esc(meta.docName)}》清单，问题挂在对应的流下面</span></h6>`;
+    if (pc.summary) {
+        html += `<div class="alert alert-secondary py-2 small mb-2">${_esc(pc.summary)}</div>`;
+    }
+    (pc.notes || []).forEach(n => {
+        html += `<p class="small text-muted mb-2">${_esc(n)}</p>`;
+    });
+    if (!groups.length) {
+        html += `<div class="alert alert-success py-2 mb-2">${_esc(meta.empty)}</div>`;
+    }
+    groups.forEach(g => {
+        html += '<div class="dir-group border rounded p-2 mb-3">';
+        html += _dirGroupHead(g, mq, kind, meta.feelNoun);
+        if (g.labels.length) {
+            html += '<div class="row g-2 mt-1">' + g.labels.map(lb =>
+                _streamCard(lb, mq[lb] || {}, kind, (g.streamProblems || {})[lb], meta.feelNoun)
+            ).join('') + '</div>';
+        }
+        html += '</div>';
+    });
+    html += _mediaSectionFooter(pc, globalProblems, meta.feelNoun);
+    return html;
+}
+
+// ====== 问题卡片（供上方音/视频区块的流卡片、链路头复用） ======
+// 每张卡片：优先级/严重度徽章 + 种类描述 + 用户听感词 + 证据 + 排查方向 +
+// 验证方法
 const PRIO_BADGE = {P0: 'danger', P1: 'warning', P2: 'info', P3: 'secondary'};
 
 function _problemCard(p, feelNoun) {
@@ -488,58 +756,6 @@ function _problemCard(p, feelNoun) {
     html += `<div class="small mt-1"><strong>排查方向：</strong>${_esc((p.causes || []).join('；'))}</div>`;
     html += `<div class="small"><strong>验证方法：</strong>${_esc((p.verify || []).join('；'))}</div>`;
     html += '</div>';
-    return html;
-}
-
-// 声音/视频问题分类共用一套卡片布局，只差标题、清单名、空态文案与
-// "听感/观感"用词
-function renderProblemClassification(pc, mq) {
-    return _renderProblemSection(pc, '声音问题分类', '声音问题种类',
-                                 '抓包层面未发现可归类的声音问题。', '听感', mq, 'audio');
-}
-
-function renderVideoProblemClassification(pc, mq) {
-    return _renderProblemSection(pc, '视频问题分类', '视频问题',
-                                 '抓包层面未发现可归类的视频问题。', '观感', mq, 'video');
-}
-
-function _renderProblemSection(pc, title, docName, emptyText, feelNoun, mq, kind) {
-    if (!pc || !pc.available) return '';
-    let html = `<h6 class="mt-3">${_esc(title)}` +
-        ` <span class="text-muted small fw-normal">对照《${_esc(docName)}》清单，把检测结论对号入座</span></h6>`;
-    // 区块开头放"流质量速览"：每条流的结论徽章 + 关键指标，替代原独立块
-    html += _qualityOverview(mq, kind);
-    html += `<div class="alert alert-secondary py-2 small mb-2">${_esc(pc.summary)}</div>`;
-    (pc.notes || []).forEach(n => {
-        html += `<p class="small text-muted mb-2">${_esc(n)}</p>`;
-    });
-    if (!pc.problems.length) {
-        html += `<div class="alert alert-success py-2 mb-2">${_esc(emptyText)}</div>`;
-    }
-    const severe = pc.problems.filter(p => p.severity === 'critical');
-    const minor = pc.problems.filter(p => p.severity !== 'critical');
-    severe.forEach(p => { html += _problemCard(p, feelNoun); });
-    if (minor.length) {
-        // 注意/提示级一律默认收起，点开才看；无严重级卡片时仅去掉"另有"前缀
-        const label = (severe.length ? '另有 ' : '') +
-            `${minor.length} 类注意/提示级问题（点开展开查看）`;
-        html += `<details class="mt-1">` +
-                `<summary class="small text-muted user-select-none">${label}</summary>` +
-                '<div class="mt-2">';
-        minor.forEach(p => { html += _problemCard(p, feelNoun); });
-        html += '</div></details>';
-    }
-    if (pc.unobservable && pc.unobservable.length) {
-        html += `<details class="mt-2"><summary class="small text-muted user-select-none">另有 ${pc.unobservable.length} 类${_esc(feelNoun)}问题无法仅凭抓包确认（点开看原因与人工验证方法）</summary>`;
-        html += '<div class="table-responsive mt-1"><table class="table table-sm table-bordered small mb-0">' +
-                '<thead><tr><th>类别</th><th>问题</th><th>用户' + _esc(feelNoun) + '</th><th>为什么抓包看不到</th><th>人工验证方法</th></tr></thead><tbody>';
-        pc.unobservable.forEach(u => {
-            html += `<tr><td>${_esc(u.category)}</td><td>${_esc(u.name)}</td>` +
-                    `<td>${u.feel.map(f => `“${_esc(f)}”`).join(' ')}</td>` +
-                    `<td>${_esc(u.why)}</td><td>${_esc(u.verify)}</td></tr>`;
-        });
-        html += '</tbody></table></div></details>';
-    }
     return html;
 }
 
@@ -584,7 +800,6 @@ function renderRtcp(rtcp) {
 
 // ====== 音视频回放展示 ======
 const ROLE_NAMES = { seat: '被叫端（坐席）', fs: 'FS 服务器端', terminal: '主叫端（终端）' };
-const ROLE_ICONS = { seat: 'bi-headset', fs: 'bi-server', terminal: 'bi-phone' };
 const DIR_NAMES = { inbound: '呼入（接收）', outbound: '呼出（发送）', unknown: '方向未知' };
 const DIR_BADGE = { inbound: 'bg-info', outbound: 'bg-success', unknown: 'bg-secondary' };
 
@@ -1098,26 +1313,34 @@ function renderCalls(calls, captureWarning) {
     container.innerHTML = html;
 }
 
-function showMedia(manifest) {
+// 回放条目的流展示标签，与 media_quality / 问题归属里的键同构
+// （"fs (SSRC=0xeeb01cef)"），据此把质量结论与问题挂到对应播放器下
+function _entryLabel(e) {
+    const ssrc = String(e.ssrc || '').toLowerCase().replace(/^0x/, '').padStart(8, '0');
+    return `${e.role || '?'} (SSRC=0x${ssrc})`;
+}
+
+// 媒体路径是否点对点（链路里去掉 FS）：无声诊断/延迟链路的 p2p 标记
+function _mediaP2p(report) {
+    return !!(report && ((report.audio_health && report.audio_health.p2p) ||
+        (report.delay_chains && report.delay_chains.p2p)));
+}
+
+const MEDIA_KIND_META = {
+    audio: { title: '音频', icon: 'bi-music-note-beamed', feelNoun: '听感' },
+    video: { title: '视频', icon: 'bi-camera-video', feelNoun: '观感' },
+};
+
+function showMedia(manifest, report) {
     const card = document.getElementById('media-card');
     const container = document.getElementById('media-container');
 
     if (!manifest || (!manifest.audio?.length && !manifest.video?.length && !manifest.unsupported?.length)) {
         card.classList.add('d-none');
-        return;
+        return false;
     }
     card.classList.remove('d-none');
-
-    // 按角色分组
-    const byRole = {};
-    (manifest.audio || []).forEach(e => {
-        if (!byRole[e.role]) byRole[e.role] = { audio: [], video: [] };
-        byRole[e.role].audio.push(e);
-    });
-    (manifest.video || []).forEach(e => {
-        if (!byRole[e.role]) byRole[e.role] = { audio: [], video: [] };
-        byRole[e.role].video.push(e);
-    });
+    report = report || {};
 
     let html = '';
     // 所属通话标注（分析限定在某通通话时）
@@ -1127,28 +1350,48 @@ function showMedia(manifest) {
             <span class="text-muted small">以下媒体流均来自该通话</span>
         </div>`;
     }
-    // 通话拓扑：先一句话说清每条腿谁到谁（主叫 ↔ FS ↔ 被叫），细节在每条流开头标注
+    // 通话拓扑：先一句话说清每条腿谁到谁（主叫 ↔ FS ↔ 被叫，点对点时
+    // 媒体不经 FS、链路里去掉 FS），细节在每条流开头标注
     const parties = manifest.parties || [];
     if (parties.length) {
         html += `<div class="mb-3 small d-flex flex-wrap align-items-center gap-1">` +
             `<i class="bi bi-diagram-3 text-primary"></i>` +
-            parties.map(_partyChainHtml).join('<span class="text-muted mx-1">；</span>') +
+            parties.map(p => _partyChainHtml(p, _mediaP2p(report))).join('<span class="text-muted mx-1">；</span>') +
             `<span class="text-muted ms-1">—— 每条媒体流的收发双方标注在各流开头</span></div>`;
     }
-    for (const [role, media] of Object.entries(byRole)) {
-        const roleName = ROLE_NAMES[role] || role;
-        const roleIcon = ROLE_ICONS[role] || 'bi-question-circle';
-        html += `
-            <div class="mb-4">
-                <h6 class="mb-3">
-                    <i class="bi ${roleIcon} text-primary"></i>
-                    ${roleName}
-                    <span class="badge bg-light text-dark">${media.audio.length + media.video.length} 个媒体流</span>
-                </h6>`;
-        media.audio.forEach(a => { html += _mediaItem(a, 'audio'); });
-        media.video.forEach(v => { html += _mediaItem(v, 'video'); });
-        html += '</div>';
-    }
+    // 音频/视频各一个子区块：按链路方向分组（点对点时组头链路无 FS），
+    // 每个播放器卡片下面直接挂该流的质量结论与问题——听音频时即可对号入座
+    ['audio', 'video'].forEach(kind => {
+        const entries = manifest[kind] || [];
+        if (!entries.length) return;
+        const pc = kind === 'audio' ? report.problem_classification
+                                    : report.video_problem_classification;
+        const meta = MEDIA_KIND_META[kind];
+        const mq = (report.media_quality || {})[kind] || {};
+        const labels = entries.map(_entryLabel);
+        const groups = _buildDirGroups(labels, report, kind, _mediaP2p(report));
+        const globalProblems = pc ? _attributeProblems(pc, groups) : [];
+        const byLabel = {};
+        entries.forEach(e => { byLabel[_entryLabel(e)] = e; });
+
+        html += `<h6 class="mt-3 mb-2"><i class="bi ${meta.icon} text-primary"></i> ${meta.title}` +
+            ` <span class="badge bg-light text-dark">${entries.length} 个媒体流</span></h6>`;
+        if (pc && pc.summary) {
+            html += `<div class="alert alert-secondary py-2 small mb-2">${_esc(pc.summary)}</div>`;
+        }
+        groups.forEach(g => {
+            html += '<div class="dir-group border rounded p-2 mb-3">';
+            html += _dirGroupHead(g, mq, kind, meta.feelNoun);
+            if (g.labels.length) {
+                html += '<div class="row g-2 mt-1">' + g.labels.map(lb =>
+                    _mediaItem(byLabel[lb], kind, mq[lb] || {},
+                               (g.streamProblems || {})[lb], meta.feelNoun)
+                ).join('') + '</div>';
+            }
+            html += '</div>';
+        });
+        if (pc) html += _mediaSectionFooter(pc, globalProblems, meta.feelNoun);
+    });
 
     if (manifest.unsupported && manifest.unsupported.length > 0) {
         html += '<div class="alert alert-warning small mt-2"><strong>未能重建的流：</strong><ul class="mb-0">';
@@ -1160,23 +1403,30 @@ function showMedia(manifest) {
     }
 
     container.innerHTML = html;
+    return true;
 }
 
-// 通话拓扑链：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），来自后端 SIP 信令识别
-function _partyChainHtml(p) {
+// 通话拓扑链：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），来自后端 SIP 信令识别；
+// 媒体点对点（p2p）时中间的 FS 不展示——信令虽经 FS，媒体却是两端直连
+function _partyChainHtml(p, p2p) {
     const seg = s => s ? `<strong>${_esc(s.label || '')}</strong>` +
         (s.ip ? `<span class="text-muted ms-1">${s.ip}</span>` : '') : '';
+    const arrow = p2p
+        ? ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> `
+        : ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` +
+          `<span class="badge bg-dark">FS</span>` +
+          (p.server_ip ? `<span class="text-muted ms-1">${p.server_ip}</span>` : '');
     let html = seg(p.caller);
-    html += ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` +
-        `<span class="badge bg-dark">FS</span>` +
-        (p.server_ip ? `<span class="text-muted ms-1">${p.server_ip}</span>` : '');
+    html += arrow;
     if (p.answerer) {
-        html += ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` + seg(p.answerer);
+        html += seg(p.answerer);
     }
     return html;
 }
 
-function _mediaItem(entry, kind) {
+// 回放卡片：播放器在上，下面直接挂该流的质量结论徽章、关键指标与问题——
+// 听音频/看画面时即可对号入座；有严重问题时卡片左侧红线强调
+function _mediaItem(entry, kind, q, problems, feelNoun) {
     const dirName = DIR_NAMES[entry.direction] || entry.direction;
     const dirBadge = DIR_BADGE[entry.direction] || 'bg-secondary';
     const dur = entry.duration_ms ? (entry.duration_ms / 1000).toFixed(1) + 's' : '';
@@ -1188,6 +1438,13 @@ function _mediaItem(entry, kind) {
             (s.ip && s.label !== s.ip ? `<span class="text-muted small ms-1">${s.ip}</span>` : '');
         head += side(entry.flow.from) +
             ` <i class="bi bi-arrow-right text-muted mx-1"></i> ` + side(entry.flow.to) + ' ';
+    }
+    // 质量结论徽章跟在头部，一眼可见这条流有没有问题
+    let verdictBadge = '';
+    if (q && q.verdict) {
+        const badge = QUALITY_BADGES[q.verdict] ||
+            ['secondary', q.verdict === 'unknown' ? '无法判定' : q.verdict];
+        verdictBadge = `<span class="badge bg-${badge[0]}">${_esc(badge[1])}</span>`;
     }
 
     let meta = `<span class="badge bg-dark me-1">${entry.codec || ''}</span>
@@ -1210,15 +1467,27 @@ function _mediaItem(entry, kind) {
                   </video>`;
     }
 
+    // 关键指标 chips（原"流质量速览"行，现挂在播放器下方）
+    let chipsHtml = '';
+    if (q && q.verdict) {
+        const chips = kind === 'video' ? _videoQualityChips(q) : _audioQualityChips(q);
+        chipsHtml = '<div class="mt-1">' + chips.map(c =>
+            `<span class="badge bg-light text-dark border me-1 mb-1 fw-normal">${_esc(c)}</span>`
+        ).join('') + '</div>';
+    }
+
+    const bad = (problems || []).some(_isSevere);
     return `
-        <div class="border rounded p-2 mb-2 bg-light">
-            <div>${head}</div>
+        <div class="col-md-6"><div class="stream-card border rounded p-2 h-100${bad ? ' stream-card-bad' : ''}">
+            <div class="d-flex flex-wrap align-items-center gap-1">${head}${verdictBadge}</div>
             <div class="mt-1">${meta}</div>
             ${player}
+            ${chipsHtml}
+            ${_problemList(problems, feelNoun)}
             <a href="${entry.url}" download class="btn btn-sm btn-outline-secondary mt-1">
                 <i class="bi bi-download"></i> 下载
             </a>
-        </div>
+        </div></div>
     `;
 }
 </script>

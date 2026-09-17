@@ -275,6 +275,26 @@ def test_taxonomy_consistency():
     print("PASS: video taxonomy tables self-consistent")
 
 
+def test_video_streams_attribution():
+    """视频问题条目带 streams 归属：video_quality/RTCP 命中挂到对应流；
+    FS 转发判定是全局证据，streams/directions 皆空。"""
+    label = 'fs (SSRC=0x22222222)'
+    results = {**BASE,
+               'video_quality': {label: {
+                   'total_lost': 50, 'loss_rate_pct': 2.0,
+                   'rtp_integrity': {'ts_backward': 2},
+                   'issues': [{'kind': 'broken_nal', 'severity': 'critical',
+                               'message': '破损帧 4 个'}]}},
+               'fs_relay': {'available': True, 'verdict': 'same',
+                            'headline': '两腿媒体齐', 'devices': []}}
+    out = classify_video_problems(results)
+    corrupt = _find(out['problems'], 'corrupt_video')
+    assert corrupt and corrupt['streams'] == [label], corrupt
+    clock = _find(out['problems'], 'video_clock_anomaly')
+    assert clock and clock['streams'] == [label], clock
+    print("PASS: video problems carry stream attribution")
+
+
 if __name__ == '__main__':
     test_one_way_video_p0()
     test_relay_redirect_not_one_way()
@@ -286,5 +306,6 @@ if __name__ == '__main__':
     test_packet_loss_kind_routing()
     test_audio_only_call()
     test_report_gating()
+    test_video_streams_attribution()
     test_taxonomy_consistency()
     print("ALL TESTS PASSED")

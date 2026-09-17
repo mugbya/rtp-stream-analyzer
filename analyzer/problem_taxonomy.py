@@ -305,15 +305,30 @@ class _Collector:
         self.found = {}
 
     def add(self, pid: str, evidence: str, severity: str = 'info',
-            source: str = ''):
+            source: str = '', streams: list | None = None,
+            directions: list | None = None):
+        """记录一条命中证据。
+
+        streams/directions 是该证据的归属：streams 传流展示标签（如
+        'seat (SSRC=0x…)'），directions 传方向标签（如 '主叫 → 被叫'）；
+        两者都不传表示全局性证据（如 FS 内部延迟），前端归到区块级展示。
+        同一问题被多条证据命中时归属并集去重。
+        """
         if severity not in _SEVERITY_RANK:
             severity = 'info'
         entry = self.found.setdefault(pid, {'evidence': [], 'sources': [],
+                                            'streams': [], 'directions': [],
                                             'severity': 'info'})
         if evidence not in entry['evidence']:
             entry['evidence'].append(evidence)
         if source and source not in entry['sources']:
             entry['sources'].append(source)
+        for s in streams or []:
+            if s and s not in entry['streams']:
+                entry['streams'].append(s)
+        for d in directions or []:
+            if d and d not in entry['directions']:
+                entry['directions'].append(d)
         if _SEVERITY_RANK[severity] < _SEVERITY_RANK[entry['severity']]:
             entry['severity'] = severity
 
@@ -336,6 +351,8 @@ class _Collector:
                 'description': spec['description'],
                 'evidence': hit['evidence'][:10],
                 'sources': hit['sources'],
+                'streams': hit['streams'],
+                'directions': hit['directions'],
                 'causes': spec['causes'],
                 'verify': spec['verify'],
             })
@@ -366,10 +383,10 @@ def classify_problems(results: dict) -> dict:
             v = d.get('verdict')
             if v in ('blocked', 'no_source', 'silent_source'):
                 col.add('one_way_audio', f"{d.get('label', '')}：{d.get('verdict_text', '')}",
-                        'critical', '无声诊断')
+                        'critical', '无声诊断', directions=[d.get('label', '')])
             elif v == 'silent_path':
                 col.add('one_way_audio', f"{d.get('label', '')}：{d.get('verdict_text', '')}",
-                        'warning', '无声诊断')
+                        'warning', '无声诊断', directions=[d.get('label', '')])
     elif results.get('audio_health') is not None:
         notes.append('无声诊断不可用（未选中通话或缺对应抓包点），单通/无声'
                      '只能靠流存在性间接判断')
@@ -396,7 +413,7 @@ def classify_problems(results: dict) -> dict:
         col.add('loss_artifact',
                 f"{data.get('label', '')}: 丢失 {data.get('total_lost', 0)} 包"
                 f"（丢包率 {data.get('loss_rate_pct', 0):.2f}%）",
-                sev, '丢包检测')
+                sev, '丢包检测', streams=[data.get('label') or key])
 
     # —— RTCP RR 自报丢包（接收端亲历视角；kind 缺省按音频，旧数据兼容） ——
     for label, entry in (results.get('rtcp') or {}).items():
@@ -411,7 +428,7 @@ def classify_problems(results: dict) -> dict:
             col.add('loss_artifact',
                     f"{label}: 接收端 RTCP RR 自报丢包 {lost_pct}%"
                     f"（累计 {rr.get('cum_lost', 0)} 包）",
-                    'warning', 'RTCP')
+                    'warning', 'RTCP', streams=[label])
 
     # —— 音画质量分析（DSP 检测 + RTP 秩序） ——
     for label, q in (results.get('audio_quality') or {}).items():
@@ -421,17 +438,18 @@ def classify_problems(results: dict) -> dict:
             col.add('clock_anomaly',
                     f"{label}: RTP 时间戳倒退 {integ['ts_backward']} 处"
                     f"——发送端时钟异常，播放重排会变调、忽快忽慢",
-                    'critical', '音画质量')
+                    'critical', '音画质量', streams=[label])
         if integ.get('ts_duplicate'):
             col.add('dup_audio',
                     f"{label}: RTP 时间戳重复 {integ['ts_duplicate']} 处"
                     f"——同一段声音会被播两遍",
-                    'warning', '音画质量')
+                    'warning', '音画质量', streams=[label])
         for issue in q.get('issues') or []:
             pid = _KIND_TO_PROBLEM.get(issue.get('kind'))
             if pid:
                 col.add(pid, f"{label}: {issue.get('message', '')}",
-                        issue.get('severity', 'info'), '音画质量')
+                        issue.get('severity', 'info'), '音画质量',
+                        streams=[label])
         if q.get('decodable'):
             codec = q.get('codec', '')
             if 'PCMU' in codec or 'PCMA' in codec or 'G.711' in codec:
@@ -439,7 +457,7 @@ def classify_problems(results: dict) -> dict:
                         f"{label}: 编码为 {codec}（8kHz 窄带），3.4kHz 以上"
                         f"频段没有声音——听感发闷属编码特性，若走蓝牙则很可能是"
                         f"HFP/SCO 链路",
-                        'info', '编码检查')
+                        'info', '编码检查', streams=[label])
 
     # —— 时间戳连续性（发送端媒体时钟行为；frame 模式是视频流，跳过） ——
     for label, data in (results.get('ts_continuity') or {}).items():
@@ -459,18 +477,18 @@ def classify_problems(results: dict) -> dict:
                     f"累计缺少约 {_gap_human(gap)}的声音"
                     + ('（含静音抑制的正常缺口，断点落在说话段才是问题）'
                        if gap >= 50 else '（量很小，基本无感）'),
-                    sev, '时间戳连续性')
+                    sev, '时间戳连续性', streams=[label])
         if data.get('backward_count', 0):
             has_audio = True
             col.add('clock_anomaly',
                     f"{label}: 声音时间往回走 {data['backward_count']} 处"
                     f"（发送端时钟异常）",
-                    'critical', '时间戳连续性')
+                    'critical', '时间戳连续性', streams=[label])
         if data.get('duplicate_count', 0):
             has_audio = True
             col.add('dup_audio',
                     f"{label}: 同一时刻声音重复 {data['duplicate_count']} 处",
-                    'warning', '时间戳连续性')
+                    'warning', '时间戳连续性', streams=[label])
 
     # —— 延迟 / 抖动 ——
     fs_delay = results.get('fs_delay') or {}
@@ -492,20 +510,20 @@ def classify_problems(results: dict) -> dict:
             col.add('latency',
                     f"{label}: 包间隔抖动偏大（标准差 {data['std']:.1f}ms）"
                     f"——播放缓冲压力大，会加剧断续",
-                    'warning', '抖动分析')
+                    'warning', '抖动分析', streams=[label])
     delay_chains = results.get('delay_chains') or {}
     if delay_chains.get('available'):
         for d in delay_chains.get('directions', []):
             if d.get('verdict') == 'high':
                 col.add('latency',
                         f"延迟链路·{d.get('label', '')}: {d.get('verdict_text', '')}",
-                        'warning', '延迟链路')
+                        'warning', '延迟链路', directions=[d.get('label', '')])
         for r in delay_chains.get('roundtrip', []):
             if r.get('status') == 'high':
                 col.add('latency',
                         f"延迟链路·{r.get('pair', '')}: 往返 {r.get('ms', 0)}ms，"
                         f"链路整体偏慢",
-                        'warning', '延迟链路')
+                        'warning', '延迟链路', directions=[r.get('pair', '')])
 
     # —— 适用范围与说明 ——
     if results.get('media_type') == 'video':

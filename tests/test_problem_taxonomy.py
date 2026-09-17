@@ -202,6 +202,41 @@ def test_video_evidence_not_in_audio():
     print("PASS: video-kind evidence excluded from audio classification")
 
 
+def test_streams_and_directions_attribution():
+    """问题条目带 streams/directions 归属：流级证据挂流、方向级证据挂方向、
+    全局证据（fs_delay）两者皆空——前端据此把问题挂到对应流卡片下。"""
+    results = {**BASE,
+               'audio_health': {
+                   'available': True, 'p2p': False,
+                   'directions': [{'label': '主叫 → 被叫', 'speaker': '主叫',
+                                   'listener': '被叫', 'verdict': 'blocked',
+                                   'verdict_text': '链路断裂', 'legs': []}],
+                   'summary': ''},
+               'packet_loss': {'0x11111111': {
+                   'label': 'seat (SSRC=0x11111111)', 'total_packets': 1000,
+                   'total_lost': 50, 'loss_rate_pct': 5.0, 'reorder_count': 0,
+                   'is_clean': False}},
+               'audio_quality': {'terminal (SSRC=0x22222222)': {
+                   'verdict': 'bad', 'codec': 'PCMU', 'decodable': True,
+                   'tones': {}, 'clipping': {}, 'clicks': {},
+                   'rtp_integrity': {'ts_backward': 3},
+                   'issues': [{'kind': 'howling', 'severity': 'critical',
+                               'message': '啸叫 2 处'}]}},
+               'fs_delay': {'count': 100, 'mean': 80.0, 'p95': 120.0}}
+    out = classify_problems(results)
+    loss = _find(out['problems'], 'loss_artifact')
+    assert loss and loss['streams'] == ['seat (SSRC=0x11111111)'], loss
+    assert not loss['directions'], loss
+    howl = _find(out['problems'], 'howling')
+    assert howl and howl['streams'] == ['terminal (SSRC=0x22222222)'], howl
+    one_way = _find(out['problems'], 'one_way_audio')
+    assert one_way and one_way['directions'] == ['主叫 → 被叫'], one_way
+    assert not one_way['streams'], one_way
+    latency = _find(out['problems'], 'latency')
+    assert latency and not latency['streams'] and not latency['directions'], latency
+    print("PASS: problems carry stream/direction attribution")
+
+
 def test_taxonomy_consistency():
     """分类表本身的自洽：id 唯一、优先级合法、听感词/描述/验证方法非空。"""
     assert len(TAXONOMY) == len(set(TAXONOMY))
@@ -223,5 +258,6 @@ if __name__ == '__main__':
     test_video_only_scope()
     test_report_wiring()
     test_video_evidence_not_in_audio()
+    test_streams_and_directions_attribution()
     test_taxonomy_consistency()
     print("ALL TESTS PASSED")

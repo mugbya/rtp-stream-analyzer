@@ -16,9 +16,6 @@ let pendingCallIdOverride = null;   // 弹窗确认期间暂存的通话切换�
 
 // ====== 展示常量 ======
 const ROLE_NAMES = { seat: '被叫端（坐席）', fs: 'FS 服务器端', terminal: '主叫端（终端）' };
-const ROLE_ICONS = { seat: 'bi-headset', fs: 'bi-server', terminal: 'bi-phone' };
-const DIR_NAMES = { inbound: '呼入（接收）', outbound: '呼出（发送）', unknown: '方向未知' };
-const DIR_BADGE = { inbound: 'bg-info', outbound: 'bg-success', unknown: 'bg-secondary' };
 
 // 通话完整性状态：完整=绿 / 缺头/缺尾=黄 / 首尾都不完整=红
 const CALL_STATUS = {
@@ -370,60 +367,6 @@ const SIP_KIND_CLASS = { request: 'sip-req', provisional: 'sip-prov', success: '
 function _esc(s) {
     return String(s).replace(/[&<>"']/g,
         c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-// ====== 报告 issue：时间戳异常逐包明细（点击展开"前后相关内容"）======
-// 现象的直白名称（kind 来自 ts_continuity 检测器）
-const TS_KIND_TXT = {
-    ts_jump: '声音断开',
-    ts_backward: '时间倒退',
-    reorder: '包晚到(乱序)',
-    duplicate: '声音重复',
-};
-
-// 切换某条 issue 的逐包明细展开/收起，箭头随之转向
-function toggleIssueDetail(headEl) {
-    const li = headEl.closest('li');
-    const detail = li.querySelector('.issue-detail');
-    if (!detail) return;
-    detail.classList.toggle('d-none');
-    const chevron = headEl.querySelector('.issue-chevron');
-    if (chevron) chevron.classList.toggle('open');
-}
-
-function renderTsEventTable(streamData) {
-    // 时间戳增量换算成毫秒（音频流有时钟率；视频等 frame 模式只有 ts 单位）。
-    // 发送端中途重置时间戳基准时增量会是天文数字，直接罗列没有意义，按幅度归为
-    // "大幅跳变/倒退"
-    const rate = streamData.clock_rate;
-    const deltaTxt = ev => {
-        if (ev.ts_delta === undefined || ev.ts_delta === null) return '—';
-        if (!rate) return `${ev.ts_delta} (ts)`;
-        const ms = ev.ts_delta / rate * 1000;
-        if (Math.abs(ms) >= 60000) return ms > 0 ? '大幅跳变' : '大幅倒退';
-        return `${ms.toFixed(0)}ms`;
-    };
-    const gapTxt = ev => (ev.media_gap_ms === null || ev.media_gap_ms === undefined)
-        ? '—' : `${ev.media_gap_ms}ms`;
-    let rows = '';
-    streamData.events.forEach(ev => {
-        rows += `<tr>` +
-            `<td class="text-nowrap">${ev.time_str}</td>` +
-            `<td>${TS_KIND_TXT[ev.kind] || ev.kind}</td>` +
-            `<td class="text-nowrap">#${ev.prev_seq ?? '—'} / ${ev.prev_ts ?? '—'}</td>` +
-            `<td class="text-nowrap">#${ev.seq} / ${ev.ts ?? '—'}</td>` +
-            `<td>${deltaTxt(ev)}</td>` +
-            `<td>${gapTxt(ev)}</td>` +
-            `</tr>`;
-    });
-    const truncated = streamData.event_count > streamData.events.length
-        ? `<div class="text-muted small mb-1">仅列出前 ${streamData.events.length} 处（本流共 ${streamData.event_count} 处），完整计数见上方文字。</div>`
-        : '';
-    return `${truncated}` +
-        `<div class="table-responsive"><table class="table table-sm table-bordered issue-table mb-0">` +
-        `<thead><tr><th>时间</th><th>现象</th><th>前一个包 seq / 时间戳</th>` +
-        `<th>本包 seq / 时间戳</th><th>时间戳增量</th><th>缺失声音</th></tr></thead>` +
-        `<tbody>${rows}</tbody></table></div>`;
 }
 
 // 每列设备 IP 的 SIP 身份（分机号/显示名）：
@@ -951,14 +894,10 @@ function setupAnalyzeButton() {
     document.getElementById('btn-analyze').addEventListener('click', () => runAnalysis());
 }
 
-// 分析进行中标志：防止面板按钮与结果区切换通话并发触发两次分析
+// 分析进行中标志：防止面板按钮并发触发两次分析
 let analyzing = false;
 
-// 分析结果缓存（本会话内）：key = 会话 + 通话 + 方向 + 媒体类型 + 分析项。
-// 已分析过的通话再切回来时直接复用历史结论，不重复分析
-const analysisCache = new Map();
-
-// 组装一次分析的完整参数（请求体与缓存 key 共用，保证口径一致）。
+// 组装一次分析的完整参数（请求体口径统一）。
 // 音画质量没有独立开关：随 media_type（分析范围）恒开，后端按范围筛选的流做检测
 function currentAnalysisParams(callId) {
     const dirRadio = document.querySelector('input[name="direction"]:checked');
@@ -974,9 +913,6 @@ function currentAnalysisParams(callId) {
     };
 }
 
-const _analysisCacheKey = params =>
-    JSON.stringify({ session_id: sessionId, ...params });
-
 async function runAnalysis(callIdOverride = null) {
     if (!sessionId) {
         alert('请先上传抓包文件');
@@ -991,8 +927,7 @@ async function runAnalysis(callIdOverride = null) {
         return;
     }
 
-    // 获取选中的通话（多通时；"all" = 全部混合）。
-    // 结果区"切换通话"会直接传入 callIdOverride，优先于面板当前选择
+    // 获取选中的通话（多通时；"all" = 全部混合）
     let callId = callIdOverride;
     if (callId === null) {
         const callRadio = document.querySelector('input[name="call-select"]:checked');
@@ -1001,15 +936,6 @@ async function runAnalysis(callIdOverride = null) {
         }
     }
     const params = currentAnalysisParams(callId);
-    const cacheKey = _analysisCacheKey(params);
-
-    // 相同参数已分析过：直接使用历史结论，不重复分析
-    if (analysisCache.has(cacheKey)) {
-        document.getElementById('analyze-status').innerHTML =
-            '<span class="text-success">✓ 该通话此前已分析过，已直接使用历史结论（未重新分析）</span>';
-        showResults(analysisCache.get(cacheKey));
-        return;
-    }
 
     analyzing = true;
     const btn = document.getElementById('btn-analyze');
@@ -1030,499 +956,17 @@ async function runAnalysis(callIdOverride = null) {
             return;
         }
 
-        analysisCache.set(cacheKey, data);
-        status.innerHTML = '<span class="text-success">✓ 分析完成</span>';
-        showResults(data);
+        // 结果页（/results/<会话id>）是唯一的结果展示入口：分析结论由后端
+        // 存进会话，跳转过去统一展示。首页不再内嵌渲染结果，避免两套展示
+        // 逻辑各自维护（展示逻辑只存在于 templates/results.html）
+        status.innerHTML = '<span class="text-success">✓ 分析完成，正在打开结果页…</span>';
+        window.location.href = `/results/${sessionId}`;
 
     } catch (err) {
         status.innerHTML = `<span class="text-danger">分析失败: ${err.message}</span>`;
     } finally {
-        // 分析结束后恢复按钮：同一会话可换一通通话再次分析，无需重新上传
+        // 跳转完成前恢复按钮；导航成功后页面随即卸载
         analyzing = false;
         btn.disabled = false;
     }
-}
-
-    // ====== 结果展示 ======
-    function showResults(data) {
-    const section = document.getElementById('result-section');
-    section.classList.remove('d-none');
-
-    // 摘要
-    const summary = data.summary;
-    let summaryHtml = '<div class="row g-3">';
-    // 未勾选延迟分析或缺少 FS 抓包时，FS 内部延迟未测——如实显示，不用 0.0ms 误导
-    summaryHtml += (summary.fs_delay_mean != null)
-        ? _summaryCard('bi-speedometer2', 'FS 内部延迟',
-                       summary.fs_delay_mean.toFixed(1) + '<span class="stat-unit">ms</span>',
-                       'P95 ' + summary.fs_delay_p95.toFixed(1) + 'ms', 'primary')
-        : _summaryCard('bi-speedometer2', 'FS 内部延迟', '未测量',
-                       summary.delay_checked === false ? '未勾选延迟分析' : '缺少 FS 端抓包',
-                       'secondary');
-    summaryHtml += _summaryCard('bi-activity', '抖动流数', summary.jitter_streams, '已分析', 'success');
-    summaryHtml += _summaryCard('bi-shield-exclamation', '丢包状态',
-                                summary.packet_loss_clean ? '无丢包' : '有丢包',
-                                '', summary.packet_loss_clean ? 'success' : 'danger');
-    summaryHtml += _summaryCard('bi-clock-history', '时间戳',
-                                summary.ts_clean === false ? '异常' : '连续',
-                                '', summary.ts_clean === false ? 'warning' : 'success');
-    if (summary.media_quality && summary.media_quality.checked) {
-        summaryHtml += _summaryCard(summary.media_quality.clean ? 'bi-music-note-beamed' : 'bi-exclamation-diamond',
-                                    '音画质量', summary.media_quality.clean ? '正常' : '有异常',
-                                    '杂音/啸叫/花屏检测', summary.media_quality.clean ? 'success' : 'danger');
-    }
-    summaryHtml += _summaryCard('bi-clipboard2-pulse', '综合评估',
-                                summary.overall === 'healthy' ? '健康' :
-                                summary.overall === 'warning' ? '注意' : '异常',
-                                '', summary.overall === 'healthy' ? 'success' :
-                                summary.overall === 'warning' ? 'warning' : 'danger');
-    summaryHtml += '</div>';
-    document.getElementById('result-summary').innerHTML = summaryHtml;
-
-    // 报告
-    if (data.report && data.report.conclusion) {
-        const c = data.report.conclusion;
-        let reportHtml = `<div class="alert alert-${c.overall === 'healthy' ? 'success' : c.overall === 'warning' ? 'warning' : 'danger'}">`;
-        reportHtml += `<strong>根因分析：</strong>${c.root_cause}</div>`;
-
-        if (c.issues && c.issues.length > 0) {
-            reportHtml += '<h6>发现的问题</h6><ul class="list-group mb-3">';
-            c.issues.forEach(i => {
-                const sev = i.severity === 'critical' ? 'danger' :
-                           i.severity === 'warning' ? 'warning' : 'info';
-                const streamData = i.stream && data.report.timestamp_continuity &&
-                    data.report.timestamp_continuity.streams[i.stream];
-                const hasEvents = !!(streamData && streamData.events && streamData.events.length);
-                reportHtml += `<li class="list-group-item list-group-item-${sev}">`;
-                if (hasEvents) {
-                    reportHtml += `<div class="issue-clickable" onclick="toggleIssueDetail(this)" title="点击展开/收起逐包明细">` +
-                                  `<i class="bi bi-chevron-right issue-chevron"></i>${_esc(i.message)}</div>`;
-                } else {
-                    reportHtml += _esc(i.message);
-                }
-                if (i.explain) reportHtml += `<div class="issue-explain">${_esc(i.explain).replace(/\n/g, '<br>')}</div>`;
-                if (hasEvents) reportHtml += `<div class="issue-detail d-none">${renderTsEventTable(streamData)}</div>`;
-                reportHtml += '</li>';
-            });
-            reportHtml += '</ul>';
-        }
-
-        if (c.ok_items && c.ok_items.length > 0) {
-            reportHtml += '<h6>正常项</h6><ul class="list-group mb-3">';
-            c.ok_items.forEach(item => {
-                reportHtml += `<li class="list-group-item list-group-item-success">✓ ${item}</li>`;
-            });
-            reportHtml += '</ul>';
-        }
-
-        // 声音/视频问题分类：区块开头带"流质量速览"（每条流的结论徽章与关键
-        // 指标）。原独立"音画质量分析"块与之重复，已并入不再单独展示
-        if (data.report.problem_classification) {
-            reportHtml += renderProblemClassification(
-                data.report.problem_classification, data.report.media_quality);
-        }
-        if (data.report.video_problem_classification) {
-            reportHtml += renderVideoProblemClassification(
-                data.report.video_problem_classification, data.report.media_quality);
-        }
-
-        document.getElementById('result-report').innerHTML = reportHtml;
-    }
-
-    // 多通通话切换提示：标明当前分析的通话，支持一键换一通重新分析
-    renderCallSwitchBanner(data.call_id);
-
-    // 音视频回放
-    showMedia(data.media_manifest);
-
-    // 滚动到结果区域
-    section.scrollIntoView({ behavior: 'smooth' });
-}
-
-// ====== 结果区通话切换 ======
-// 抓包里检测到多通通话时，在结果区顶部提示当前分析的是哪一通，并支持一键
-// 切换到其他通话重新分析（沿用面板当前的方向/媒体类型/延迟开关设置）
-function renderCallSwitchBanner(currentCallId) {
-    const banner = document.getElementById('call-switch-banner');
-    if (!banner) return;
-    if (!detectedCalls || detectedCalls.length < 2) {
-        banner.classList.add('d-none');
-        return;
-    }
-    const curTxt = currentCallId
-        ? `当前分析的是<strong>${callLabel(currentCallId)}</strong>，` +
-          '可切换到其他通话（标有「已分析」的直接复用历史结论）：'
-        : '当前分析的是全部通话混合的结果，建议选择具体通话：';
-    const btns = detectedCalls.map(c => {
-        const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
-        const cur = c.call_id === currentCallId;
-        const title = `${c.start_str} ~ ${c.end_str} · ${c.stream_count} 条流`;
-        const fmBadge = FS_MEDIA_BADGES[c.fs_media?.verdict] || '';
-        const cachedBadge = analysisCache.has(_analysisCacheKey(
-            currentAnalysisParams(c.call_id)))
-            ? ' <span class="badge bg-secondary"><i class="bi bi-clock-history"></i> 已分析</span>'
-            : '';
-        return `<button type="button" class="btn btn-sm ${cur ? 'btn-primary' : 'btn-outline-primary'}"
-                    ${cur ? 'disabled' : ''} onclick="switchCall('${c.call_id}')" title="${title}">
-                    <i class="bi bi-telephone"></i> ${callLabel(c.call_id)}
-                    <span class="badge ${st.badge} ms-1"><i class="bi ${st.icon}"></i> ${st.label}</span>${fmBadge}${cachedBadge}
-                    <span class="ms-1 small">${title}</span>
-                </button>`;
-    }).join('');
-    banner.classList.remove('d-none');
-    banner.innerHTML = `
-        <div class="alert alert-info mb-0 text-start">
-            <div class="d-flex flex-wrap align-items-center gap-2">
-                <strong><i class="bi bi-collection me-1"></i>检测到 ${detectedCalls.length} 通通话</strong>
-                <span class="small">${curTxt}</span>
-            </div>
-            <div class="d-flex flex-wrap gap-2 mt-2">${btns}</div>
-        </div>`;
-}
-
-function switchCall(callId) {
-    if (analyzing) return;
-    // 同步配置面板的通话选择（单选框 + 高亮），两处状态保持一致
-    const radio = document.querySelector(`input[name="call-select"][value="${callId}"]`);
-    if (radio) {
-        document.querySelectorAll('#call-options .direction-option').forEach(o => o.classList.remove('selected'));
-        radio.checked = true;
-        radio.closest('.direction-option').classList.add('selected');
-    }
-    // 分析进行中禁用切换按钮并就地提示，防止重复触发（完成后随结果重绘恢复）
-    const banner = document.getElementById('call-switch-banner');
-    if (banner) {
-        banner.querySelectorAll('button').forEach(b => { b.disabled = true; });
-        const note = document.createElement('div');
-        note.className = 'w-100 small text-primary mt-1';
-        note.innerHTML = '<div class="spinner-border spinner-border-sm me-2"></div>正在重新分析…';
-        banner.appendChild(note);
-    }
-    runAnalysis(callId);
-}
-
-// ====== 流质量速览（并入声音/视频问题分类区块）======
-// 原独立"音画质量分析"块与问题分类展示的是同一批检测结论，已并入避免重复。
-// 音画质量专用徽章（音频 clean/noisy/bad，视频 ok/risk/bad）
-const QUALITY_BADGES = {
-    clean: ['success', '干净'],
-    noisy: ['warning', '有杂音'],
-    bad: ['danger', '异常'],
-    ok: ['success', '无花屏风险'],
-    risk: ['warning', '花屏风险'],
-};
-
-// ====== 声音问题分类（对照《声音问题种类》清单） ======
-// 把各检测器结论按问题种类聚合展示：种类描述 + 用户听感词 + 证据 +
-// 排查方向。默认只展开"严重"级卡片，注意/提示级一律收进折叠区，
-// 点开才看。抓包看不到的听感问题单独折叠列出人工验证方法。
-const PRIO_BADGE = {P0: 'danger', P1: 'warning', P2: 'info', P3: 'secondary'};
-
-function _problemCard(p, feelNoun) {
-    feelNoun = feelNoun || '听感';
-    let html = '<div class="border rounded p-2 mb-2">';
-    html += '<div class="d-flex flex-wrap align-items-center gap-2">' +
-            `<span class="badge bg-${PRIO_BADGE[p.priority] || 'secondary'}">${p.priority}</span>` +
-            `<strong>${_esc(p.name)}</strong>` +
-            `<span class="badge bg-light text-dark border">${_esc(p.category)}</span>` +
-            `<code class="small">${_esc(p.term)}</code>` +
-            `<span class="badge bg-${p.severity === 'critical' ? 'danger' : p.severity === 'warning' ? 'warning' : 'secondary'}">` +
-            `${p.severity === 'critical' ? '严重' : p.severity === 'warning' ? '注意' : '提示'}</span>` +
-            '</div>';
-    html += `<div class="small mt-1">用户${feelNoun}：` +
-            p.feel.map(f => `<span class="badge bg-warning-subtle text-dark border border-warning-subtle me-1 fw-normal">“${_esc(f)}”</span>`).join('') +
-            '</div>';
-    html += `<div class="small text-muted mt-1">${_esc(p.description)}</div>`;
-    if (p.evidence && p.evidence.length) {
-        html += '<div class="small mt-1"><strong>证据：</strong><ul class="mb-0 ps-4">';
-        p.evidence.forEach(e => { html += `<li>${_esc(e)}</li>`; });
-        html += '</ul></div>';
-    }
-    html += `<div class="small mt-1"><strong>排查方向：</strong>${_esc((p.causes || []).join('；'))}</div>`;
-    html += `<div class="small"><strong>验证方法：</strong>${_esc((p.verify || []).join('；'))}</div>`;
-    html += '</div>';
-    return html;
-}
-
-// 声音/视频问题分类共用一套卡片布局，只差标题、清单名、空态文案与
-// "听感/观感"用词
-function renderProblemClassification(pc, mq) {
-    return _renderProblemSection(pc, '声音问题分类', '声音问题种类',
-                                 '抓包层面未发现可归类的声音问题。', '听感', mq, 'audio');
-}
-
-function renderVideoProblemClassification(pc, mq) {
-    return _renderProblemSection(pc, '视频问题分类', '视频问题',
-                                 '抓包层面未发现可归类的视频问题。', '观感', mq, 'video');
-}
-
-function _renderProblemSection(pc, title, docName, emptyText, feelNoun, mq, kind) {
-    if (!pc || !pc.available) return '';
-    let html = `<h6 class="mt-3">${_esc(title)}` +
-        ` <span class="text-muted small fw-normal">对照《${_esc(docName)}》清单，把检测结论对号入座</span></h6>`;
-    // 区块开头放"流质量速览"：每条流的结论徽章 + 关键指标，替代原独立块
-    html += _qualityOverview(mq, kind);
-    html += `<div class="alert alert-secondary py-2 small mb-2">${_esc(pc.summary)}</div>`;
-    (pc.notes || []).forEach(n => {
-        html += `<p class="small text-muted mb-2">${_esc(n)}</p>`;
-    });
-    if (!pc.problems.length) {
-        html += `<div class="alert alert-success py-2 mb-2">${_esc(emptyText)}</div>`;
-    }
-    const severe = pc.problems.filter(p => p.severity === 'critical');
-    const minor = pc.problems.filter(p => p.severity !== 'critical');
-    severe.forEach(p => { html += _problemCard(p, feelNoun); });
-    if (minor.length) {
-        // 注意/提示级一律默认收起，点开才看；无严重级卡片时仅去掉"另有"前缀
-        const label = (severe.length ? '另有 ' : '') +
-            `${minor.length} 类注意/提示级问题（点开展开查看）`;
-        html += `<details class="mt-1">` +
-                `<summary class="small text-muted user-select-none">${label}</summary>` +
-                '<div class="mt-2">';
-        minor.forEach(p => { html += _problemCard(p, feelNoun); });
-        html += '</div></details>';
-    }
-    if (pc.unobservable && pc.unobservable.length) {
-        html += `<details class="mt-2"><summary class="small text-muted user-select-none">另有 ${pc.unobservable.length} 类${_esc(feelNoun)}问题无法仅凭抓包确认（点开看原因与人工验证方法）</summary>`;
-        html += '<div class="table-responsive mt-1"><table class="table table-sm table-bordered small mb-0">' +
-                '<thead><tr><th>类别</th><th>问题</th><th>用户' + _esc(feelNoun) + '</th><th>为什么抓包看不到</th><th>人工验证方法</th></tr></thead><tbody>';
-        pc.unobservable.forEach(u => {
-            html += `<tr><td>${_esc(u.category)}</td><td>${_esc(u.name)}</td>` +
-                    `<td>${u.feel.map(f => `“${_esc(f)}”`).join(' ')}</td>` +
-                    `<td>${_esc(u.why)}</td><td>${_esc(u.verify)}</td></tr>`;
-        });
-        html += '</tbody></table></div></details>';
-    }
-    return html;
-}
-
-// 音频流关键指标徽章（原每流卡片的指标行，速览复用）
-function _audioQualityChips(q) {
-    if (q.verdict === 'unknown') {
-        return [`${q.codec || ''} 编码不可解（仅 PCMU/PCMA 支持音质检测）`];
-    }
-    const chips = [];
-    if (q.tones?.howl_count) chips.push(`啸叫/单频音 ${q.tones.howl_count} 处`);
-    if (q.tones?.hum_count) chips.push(`低频嗡声 ${q.tones.hum_count} 处`);
-    if (q.clipping?.run_count) chips.push(`削波 ${q.clipping.run_count} 处`);
-    if (q.clicks?.count) chips.push(`爆点 ${q.clicks.count} 个`);
-    if (q.noise_floor_dbfs != null) chips.push(`底噪 ${q.noise_floor_dbfs} dBFS`);
-    if (q.speech_level_dbfs != null) chips.push(`话音 ${q.speech_level_dbfs} dBFS`);
-    const integ = q.rtp_integrity;
-    if (integ) {
-        if (integ.monotonic && !integ.lost_packets && !integ.ts_duplicate) {
-            chips.push(`RTP 秩序正常（每包 +${integ.median_ts_delta} ≈ ${integ.packet_duration_ms}ms）`);
-        } else {
-            if (integ.lost_packets) chips.push(`序号缺口 ${integ.seq_gaps} 处（丢 ${integ.lost_packets} 包）`);
-            if (integ.ts_backward) chips.push(`时间戳倒退 ${integ.ts_backward} 处`);
-            if (integ.ts_duplicate) chips.push(`时间戳重复 ${integ.ts_duplicate} 处`);
-        }
-        if (integ.other_pt_packets) chips.push(`其他PT包 ${integ.other_pt_packets} 个（DTMF 事件等，不参与秩序判定）`);
-    }
-    if (!chips.length) chips.push('未检测到异常');
-    return chips;
-}
-
-// 视频流关键指标徽章（原每流卡片的指标行，速览复用）
-function _videoQualityChips(q) {
-    const chips = [];
-    if (q.total_lost) chips.push(`丢包 ${q.total_lost} 包（${q.loss_rate_pct}%)`);
-    if (q.rtp_integrity?.ts_backward) chips.push(`时间戳倒退 ${q.rtp_integrity.ts_backward} 处`);
-    if (q.broken_nals) chips.push(`破损帧 ${q.broken_nals} 个`);
-    chips.push(`IDR 关键帧 ${q.idr_count ?? 0} 个`);
-    if (q.idr_interval_max_s != null) chips.push(`最长间隔 ${q.idr_interval_max_s}s`);
-    if (q.est_artifacts_ms) chips.push(`估算花屏 ${(q.est_artifacts_ms / 1000).toFixed(1)}s`);
-    if (q.decode_check === 'ok') chips.push('解码校验通过');
-    else if (q.decode_check === 'errors') chips.push(`解码错误 ${q.decode_errors} 处`);
-    else if (q.decode_check === 'unavailable') chips.push('解码校验跳过（无 ffmpeg）');
-    return chips;
-}
-
-// 流质量速览：一条流一行——流名 + 结论徽章 + 关键指标；检测提示默认收起
-function _qualityOverviewRow(label, q, kind) {
-    const badge = QUALITY_BADGES[q.verdict] || ['secondary', q.verdict];
-    const chips = kind === 'video' ? _videoQualityChips(q) : _audioQualityChips(q);
-    let html = '<div class="border rounded p-2 mb-1">' +
-        '<div class="d-flex flex-wrap align-items-center gap-1">' +
-        `<strong class="me-1">${_esc(label)}</strong>` +
-        `<span class="badge bg-${badge[0]}">${_esc(badge[1])}</span>`;
-    chips.forEach(c => {
-        html += `<span class="badge bg-light text-dark border">${_esc(c)}</span>`;
-    });
-    html += '</div>';
-    if (q.issues && q.issues.length) {
-        html += `<details class="mt-1"><summary class="small text-muted user-select-none">${q.issues.length} 条检测提示（点开展开）</summary>`;
-        q.issues.forEach(i => {
-            const sev = i.severity === 'critical' ? 'danger' : i.severity === 'warning' ? 'warning' : 'secondary';
-            html += `<div class="mt-1 small"><span class="badge bg-${sev} me-1">${i.severity === 'critical' ? '严重' : i.severity === 'warning' ? '注意' : '提示'}</span>${_esc(i.message)}</div>`;
-        });
-        html += '</details>';
-    }
-    html += '</div>';
-    return html;
-}
-
-// 某类媒体（audio/video）的速览条，插在对应问题分类区块开头；没有流时整体省略
-function _qualityOverview(mq, kind) {
-    const entries = Object.entries((mq && mq[kind]) || {});
-    if (!entries.length) return '';
-    let html = '<div class="mb-2">' +
-        '<div class="small text-muted mb-1">流质量速览（每条流的检测结论与关键指标，' +
-        '详细归因与排查方向见下方问题卡片）：</div>';
-    entries.forEach(([label, q]) => { html += _qualityOverviewRow(label, q, kind); });
-    html += '</div>';
-    return html;
-}
-
-// ====== 音视频回放展示 ======
-function showMedia(manifest) {
-    const section = document.getElementById('media-section');
-    const container = document.getElementById('media-container');
-
-    if (!manifest || (!manifest.audio?.length && !manifest.video?.length && !manifest.unsupported?.length)) {
-        section.classList.add('d-none');
-        return;
-    }
-    section.classList.remove('d-none');
-
-    // 按角色分组
-    const byRole = {};
-
-    (manifest.audio || []).forEach(e => {
-        if (!byRole[e.role]) byRole[e.role] = { audio: [], video: [] };
-        byRole[e.role].audio.push(e);
-    });
-    (manifest.video || []).forEach(e => {
-        if (!byRole[e.role]) byRole[e.role] = { audio: [], video: [] };
-        byRole[e.role].video.push(e);
-    });
-
-    let html = '';
-    // 所属通话标注（分析限定在某通通话时）
-    if (manifest.call_id) {
-        html += `<div class="mb-2">
-            <span class="badge bg-primary"><i class="bi bi-telephone"></i> ${callLabel(manifest.call_id)}</span>
-            <span class="text-muted small">以下媒体流均来自该通话</span>
-        </div>`;
-    }
-    // 通话拓扑：先一句话说清每条腿谁到谁（主叫 ↔ FS ↔ 被叫），细节在每条流开头标注
-    const parties = manifest.parties || [];
-    if (parties.length) {
-        html += `<div class="mb-3 small d-flex flex-wrap align-items-center gap-1">` +
-            `<i class="bi bi-diagram-3 text-primary"></i>` +
-            parties.map(_partyChainHtml).join('<span class="text-muted mx-1">；</span>') +
-            `<span class="text-muted ms-1">—— 每条媒体流的收发双方标注在各流开头</span></div>`;
-    }
-    for (const [role, media] of Object.entries(byRole)) {
-        const roleName = ROLE_NAMES[role] || role;
-        const roleIcon = ROLE_ICONS[role] || 'bi-question-circle';
-        html += `
-            <div class="mb-4">
-                <h6 class="mb-3">
-                    <i class="bi ${roleIcon} text-primary"></i>
-                    ${roleName}
-                    <span class="badge bg-light text-dark">${media.audio.length + media.video.length} 个媒体流</span>
-                </h6>`;
-
-        // 音频
-        media.audio.forEach(a => {
-            html += _mediaItem(a, 'audio');
-        });
-        // 视频
-        media.video.forEach(v => {
-            html += _mediaItem(v, 'video');
-        });
-        html += '</div>';
-    }
-
-    // 不支持的编解码
-    if (manifest.unsupported && manifest.unsupported.length > 0) {
-        html += '<div class="alert alert-warning small mt-2"><strong>未能重建的流：</strong><ul class="mb-0">';
-        manifest.unsupported.forEach(u => {
-            const flow = u.flow ? `（${_esc(u.flow.from.label)} → ${_esc(u.flow.to.label)}）` : '';
-            html += `<li>${ROLE_NAMES[u.role] || u.role} (SSRC=${u.ssrc})${flow} — ${u.codec}: ${u.reason}</li>`;
-        });
-        html += '</ul></div>';
-    }
-
-    container.innerHTML = html;
-}
-
-// 通话拓扑链：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），来自后端 SIP 信令识别
-function _partyChainHtml(p) {
-    const seg = s => s ? `<strong>${_esc(s.label || '')}</strong>` +
-        (s.ip ? `<span class="text-muted ms-1">${s.ip}</span>` : '') : '';
-    let html = seg(p.caller);
-    html += ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` +
-        `<span class="badge bg-dark">FS</span>` +
-        (p.server_ip ? `<span class="text-muted ms-1">${p.server_ip}</span>` : '');
-    if (p.answerer) {
-        html += ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` + seg(p.answerer);
-    }
-    return html;
-}
-
-function _mediaItem(entry, kind) {
-    const dirName = DIR_NAMES[entry.direction] || entry.direction;
-    const dirBadge = DIR_BADGE[entry.direction] || 'bg-secondary';
-    const dur = entry.duration_ms ? (entry.duration_ms / 1000).toFixed(1) + 's' : '';
-
-    // 谁到谁：发送方 → 接收方（SIP 识别的主叫/被叫身份，无信令时为角色名或 IP）
-    let head = `<span class="badge ${dirBadge} me-1">${dirName}</span>`;
-    if (entry.flow) {
-        const side = s => `<strong>${_esc(s.label || '')}</strong>` +
-            (s.ip && s.label !== s.ip ? `<span class="text-muted small ms-1">${s.ip}</span>` : '');
-        head += side(entry.flow.from) +
-            ` <i class="bi bi-arrow-right text-muted mx-1"></i> ` + side(entry.flow.to) + ' ';
-    }
-
-    let meta = `<span class="badge bg-dark me-1">${entry.codec || ''}</span>
-                <span class="text-muted small">SSRC: ${entry.ssrc}`;
-    if (dur) meta += ` · 时长 ${dur}`;
-    if (entry.total_packets) meta += ` · ${entry.total_packets} 包`;
-    if (entry.lost_packets) meta += ` · 丢 ${entry.lost_packets} 包`;
-    if (entry.packet_duration_ms && entry.packet_duration_ms !== 20) {
-        meta += ` · 每包 ${entry.packet_duration_ms}ms`;
-    }
-    if (entry.ts_gap_filled) meta += ` · 时间戳跳变补静音 ${entry.ts_gap_filled} 处`;
-    meta += '</span>';
-
-    let player;
-    if (kind === 'audio') {
-        player = `<audio controls preload="none" class="w-100 mt-1">
-                    <source src="${entry.url}" type="audio/wav">
-                    您的浏览器不支持音频播放。
-                  </audio>`;
-    } else {
-        player = `<video controls preload="metadata" class="w-100 mt-1" style="max-height: 300px;">
-                    <source src="${entry.url}" type="${entry.mp4_available ? 'video/mp4' : 'video/h264'}">
-                    您的浏览器不支持视频播放。
-                  </video>`;
-    }
-
-    return `
-        <div class="border rounded p-2 mb-2 bg-light">
-            <div>${head}</div>
-            <div class="mt-1">${meta}</div>
-            ${player}
-            <a href="${entry.url}" download class="btn btn-sm btn-outline-secondary mt-1">
-                <i class="bi bi-download"></i> 下载
-            </a>
-        </div>
-    `;
-}
-
-function _summaryCard(icon, title, value, subtitle, color) {
-    return `
-        <div class="col-6 col-md-4 col-xl">
-            <div class="stat-card stat-${color}">
-                <div class="stat-icon"><i class="bi ${icon}"></i></div>
-                <div>
-                    <div class="stat-title">${title}</div>
-                    <div class="stat-value">${value}</div>
-                    ${subtitle ? `<div class="stat-sub">${subtitle}</div>` : ''}
-                </div>
-            </div>
-        </div>
-    `;
 }

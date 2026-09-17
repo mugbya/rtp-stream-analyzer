@@ -147,6 +147,16 @@ def _track_page(response, path):
     return response
 
 
+@app.after_request
+def _no_cache_html(response):
+    """页面（HTML）禁止浏览器缓存。结果页的界面逻辑内嵌在模板 JS 里，
+    浏览器若拿旧缓存页，会用旧逻辑渲染新会话数据（表现为"改版后页面
+    还是旧样子"）；静态资源与媒体文件不受影响。"""
+    if response.content_type.startswith('text/html'):
+        response.headers['Cache-Control'] = 'no-cache'
+    return response
+
+
 @app.route('/')
 def index():
     """主页：上传和配置"""

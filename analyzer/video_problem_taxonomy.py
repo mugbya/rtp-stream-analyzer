@@ -261,12 +261,13 @@ def classify_video_problems(results: dict) -> dict:
             col.add('video_clock_anomaly',
                     f"{label}: RTP 时间戳倒退 {integ['ts_backward']} 处"
                     f"——发送端时钟异常，帧序重排会错位，花屏/冻结风险高",
-                    'critical', '音画质量')
+                    'critical', '音画质量', streams=[label])
         for issue in q.get('issues') or []:
             pid = _VQ_KIND_MAP.get(issue.get('kind'))
             if pid:
                 col.add(pid, f"{label}: {issue.get('message', '')}",
-                        issue.get('severity', 'info'), '音画质量')
+                        issue.get('severity', 'info'), '音画质量',
+                        streams=[label])
 
     # —— 流级丢包（只认视频流；视频质量分析已覆盖的流不重复报） ——
     vq_labels = set((results.get('video_quality') or {}).keys())
@@ -281,7 +282,7 @@ def classify_video_problems(results: dict) -> dict:
                 f"{data.get('label', '')}: 丢失 {data.get('total_lost', 0)} 包"
                 f"（丢包率 {data.get('loss_rate_pct', 0):.2f}%）——丢包处画面会"
                 f"花屏直到下一个关键帧刷新",
-                sev, '丢包检测')
+                sev, '丢包检测', streams=[data.get('label') or key])
 
     # —— RTCP：接收端自报丢包 / NACK 重传 / PLI-FIR 关键帧请求 ——
     for label, entry in (results.get('rtcp') or {}).items():
@@ -292,14 +293,14 @@ def classify_video_problems(results: dict) -> dict:
             col.add('video_loss',
                     f"{label}: 接收端 RTCP RR 自报丢包 "
                     f"{rr['fraction_lost_pct']}%（累计 {rr.get('cum_lost', 0)} 包）",
-                    'warning', 'RTCP')
+                    'warning', 'RTCP', streams=[label])
         fb = entry.get('fb') or {}
         nack = fb.get('nack')
         if nack and nack.get('requested'):
             col.add('video_loss',
                     f"{label}: 接收端 NACK 指名重传 {nack['requested']} 个包"
                     f"（{nack['packets']} 次）——接收端确实在丢包并补救",
-                    'warning', 'RTCP')
+                    'warning', 'RTCP', streams=[label])
         pli, fir = fb.get('pli'), fb.get('fir')
         req_cnt = ((pli or {}).get('count', 0) + (fir or {}).get('count', 0))
         if req_cnt >= PLI_STORM_MIN:
@@ -308,7 +309,7 @@ def classify_video_problems(results: dict) -> dict:
                     f"{(pli or {}).get('count', 0)} / FIR "
                     f"{(fir or {}).get('count', 0)}）——解码层反复在等参考帧，"
                     f"对应画面在花屏或停住",
-                    'warning', 'RTCP')
+                    'warning', 'RTCP', streams=[label])
 
     # —— 时间戳连续性（只看 frame 模式 = 视频流）+ 帧率估算 ——
     for label, data in (results.get('ts_continuity') or {}).items():
@@ -318,7 +319,7 @@ def classify_video_problems(results: dict) -> dict:
             col.add('video_clock_anomaly',
                     f"{label}: 视频时间戳往回走 {data['backward_count']} 处"
                     f"（发送端时钟异常）",
-                    'critical', '时间戳连续性')
+                    'critical', '时间戳连续性', streams=[label])
         rate = data.get('clock_rate')
         median_delta = data.get('median_ts_delta') or 0
         if rate and median_delta > 0 and data.get('packet_count', 0) >= 100:
@@ -327,12 +328,12 @@ def classify_video_problems(results: dict) -> dict:
                 col.add('low_fps',
                         f"{label}: 估算帧率仅 {fps:.1f} fps（按 RTP 时间戳"
                         f"估算；变帧率编码如屏幕共享会天然偏低，仅供参考）",
-                        'warning', '时间戳连续性')
+                        'warning', '时间戳连续性', streams=[label])
             elif fps < 15:
                 col.add('low_fps',
                         f"{label}: 估算帧率约 {fps:.1f} fps，偏低"
                         f"（变帧率编码下仅供参考）",
-                        'info', '时间戳连续性')
+                        'info', '时间戳连续性', streams=[label])
 
     # —— 延迟 / 抖动（只认视频流） ——
     fs_delay = results.get('fs_delay') or {}
@@ -353,7 +354,7 @@ def classify_video_problems(results: dict) -> dict:
             col.add('video_latency',
                     f"{label}: 包间隔抖动偏大（标准差 {data['std']:.1f}ms）"
                     f"——解码缓冲压力大，表现为画面一顿一顿",
-                    'warning', '抖动分析')
+                    'warning', '抖动分析', streams=[label])
 
     # —— 适用范围与说明 ——
     if not video_buckets and not results.get('video_quality'):

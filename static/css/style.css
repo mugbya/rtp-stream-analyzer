@@ -916,3 +916,24 @@ footer {
     .hero-title { font-size: 1.5rem; }
     .display-5 { font-size: 1.8rem; }
 }
+
+/* ====== 结果页音/视频区块：链路方向分组 + 流卡片 ====== */
+/* 链路（主叫 → FS → 被叫）节点徽章行 */
+.chain-line { line-height: 1.6; }
+
+/* 一个链路方向组：链路头 + 该方向流卡片网格 */
+.dir-group {
+    background: #f8fafc;
+}
+.dir-group > .d-flex:first-child {
+    padding-bottom: .35rem;
+    border-bottom: 1px dashed #e2e8f0;
+}
+
+/* 流卡片：组内两列并排；有严重问题时左侧红线强调 */
+.stream-card { background: #fff; }
+.stream-card-bad { border-left: 3px solid #dc3545 !important; }
+.stream-ssrc {
+    font-family: var(--bs-font-monospace, monospace);
+    color: #475569;
+}
