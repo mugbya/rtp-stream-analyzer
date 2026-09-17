@@ -1079,11 +1079,6 @@ async function runAnalysis(callIdOverride = null) {
     summaryHtml += '</div>';
     document.getElementById('result-summary').innerHTML = summaryHtml;
 
-    // 图表
-    if (data.chart_url) {
-        document.getElementById('result-chart').src = data.chart_url;
-    }
-
     // 报告
     if (data.report && data.report.conclusion) {
         const c = data.report.conclusion;

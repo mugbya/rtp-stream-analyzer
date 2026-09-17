@@ -1,6 +1,6 @@
 """
 Unit tests for the auto-cleanup of outputs/ and uploads/: the retention
-cutoff applies to root chart files, per-session directory trees and uploaded
+cutoff applies to root media files, per-session directory trees and uploaded
 pcap session dirs; empty parent dirs are removed; fresh trees are never
 touched even when their own dir mtime is old.
 
@@ -46,20 +46,20 @@ def test_default_retention_config():
     assert app_module.app.config['FILE_RETENTION_HOURS'] == 2
 
 
-def test_stale_root_chart_removed_fresh_kept():
-    """根目录散落的图表文件超时删除、未超时保留。"""
+def test_stale_root_media_removed_fresh_kept():
+    """根目录散落文件超时删除、未超时保留。"""
     dirs, cleanup, restore = _with_tmp_dirs(retention_hours=2)
     try:
-        old_chart = os.path.join(dirs['outputs'], 'analysis_old.png')
-        fresh_chart = os.path.join(dirs['outputs'], 'analysis_new.png')
-        open(old_chart, 'w').close()
-        open(fresh_chart, 'w').close()
-        _backdate(old_chart, hours_ago=3)
+        old_file = os.path.join(dirs['outputs'], 'media_old.png')
+        fresh_file = os.path.join(dirs['outputs'], 'media_new.png')
+        open(old_file, 'w').close()
+        open(fresh_file, 'w').close()
+        _backdate(old_file, hours_ago=3)
 
         cleanup()
 
-        assert not os.path.exists(old_chart)
-        assert os.path.exists(fresh_chart)
+        assert not os.path.exists(old_file)
+        assert os.path.exists(fresh_file)
     finally:
         restore()
 
@@ -176,7 +176,7 @@ def test_zero_retention_clears_everything():
 
 def main():
     test_default_retention_config()
-    test_stale_root_chart_removed_fresh_kept()
+    test_stale_root_media_removed_fresh_kept()
     test_stale_session_tree_removed_empty_date_dir_removed()
     test_fresh_tree_kept_despite_old_dir_mtime()
     test_mixed_date_dir_keeps_fresh_session_and_date_dir()

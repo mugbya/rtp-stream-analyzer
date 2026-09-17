@@ -24,16 +24,6 @@
             <!-- 摘要卡片 -->
             <div class="row g-3 mb-4" id="summary-cards"></div>
 
-            <!-- 分析图表 -->
-            <div class="card mb-4">
-            <div class="card-header bg-info">
-                <h5 class="mb-0"><i class="bi bi-graph-up"></i> 分析图表</h5>
-            </div>
-                <div class="card-body text-center">
-                    <img id="chart-img" class="img-fluid border rounded shadow-sm" alt="Analysis Chart">
-                </div>
-            </div>
-
             <!-- 通话与 SIP 信令 -->
             <div class="card mb-4 d-none" id="calls-card">
                 <div class="card-header bg-success">
@@ -101,12 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
 function showResults(results) {
     document.getElementById('result-loading').classList.add('d-none');
     document.getElementById('result-content').classList.remove('d-none');
-    
-    // 图表
-    if (results.chart_url) {
-        document.getElementById('chart-img').src = results.chart_url;
-    }
-    
+
     // 摘要卡片
     const summary = results.summary;
     const cards = document.getElementById('summary-cards');

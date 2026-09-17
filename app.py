@@ -24,7 +24,6 @@ from analyzer.delay_analyzer import (
 from analyzer.jitter_analyzer import calc_inter_packet_gaps, compare_jitter
 from analyzer.packet_loss import detect_all_losses
 from analyzer.ts_continuity import check_ts_continuity
-from analyzer.charts import generate_analysis_chart
 from analyzer.reporter import generate_report
 from analyzer.media_extractor import (
     generate_all_media, get_media_urls, describe_media_parties, extract_call_parties,
@@ -44,7 +43,7 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['OUTPUT_FOLDER'] = os.path.join(os.path.dirname(__file__), 'outputs')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
-# 自动清理：outputs（图表/媒体文件）与 uploads（上传的抓包）超过保留时长
+# 自动清理：outputs（媒体文件）与 uploads（上传的抓包）超过保留时长
 # 即被后台线程删除，两处共用同一保留时长
 app.config['FILE_RETENTION_HOURS'] = 2            # 保留时长（小时）
 app.config['FILE_CLEANUP_INTERVAL_MINUTES'] = 10  # 清理巡检间隔（分钟）
@@ -99,7 +98,7 @@ def _cleanup_tree_once(root, cutoff):
 
 
 def _cleanup_stale_files_once():
-    """按保留时长清理 outputs（图表/媒体）与 uploads（上传的抓包），
+    """按保留时长清理 outputs（媒体）与 uploads（上传的抓包），
     超过保留时长的内容被删除，两处共用 FILE_RETENTION_HOURS。"""
     cutoff = time.time() - app.config['FILE_RETENTION_HOURS'] * 3600
     _cleanup_tree_once(app.config['OUTPUT_FOLDER'], cutoff)
@@ -126,6 +125,10 @@ def _start_file_cleaner():
 if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not DEBUG:
     _start_file_cleaner()
 
+# 启动即生成统计管理页密钥文件（data/admin_key.txt；环境变量 ADMIN_STATS_KEY
+# 优先），部署完不用先访问一次 /admin/stats 才能取到密钥
+stats_mod.get_admin_key()
+
 
 def _track_page(response, path):
     """页面访问统计：带访客 cookie 则直接记录，没有则生成并种回响应
@@ -133,7 +136,8 @@ def _track_page(response, path):
     try:
         vid = stats_mod.ensure_visitor_id(request)
         new_visitor = request.cookies.get(stats_mod.visitor_cookie_name()) != vid
-        stats_mod.record_visit(vid, stats_mod.client_ip(request), path)
+        stats_mod.record_visit(vid, stats_mod.client_ip(request), path,
+                               stats_mod.request_domain(request))
         if new_visitor:
             response.set_cookie(stats_mod.visitor_cookie_name(), vid,
                                 max_age=365 * 86400, httponly=True,
@@ -514,16 +518,6 @@ def run_analysis():
     if fs_delay and fs_delay.get('count', 0) > 0:
         results['end_to_end'] = estimate_end_to_end_delay(fs_delay)
     
-    # === 生成瀑布图数据 ===
-    if check_delay and len(captures) >= 3:
-        results['waterfall'] = _build_waterfall_data(captures, target_streams, server_ip)
-    
-    # === 生成图表 ===
-    chart_path = generate_analysis_chart(app.config['OUTPUT_FOLDER'], results)
-    results['chart_path'] = chart_path
-    results['chart_url'] = url_for('serve_chart', 
-                                   filename=os.path.basename(chart_path))
-    
     # === 生成报告 ===
     report = generate_report(results)
     results['report'] = report
@@ -538,14 +532,14 @@ def run_analysis():
             request.cookies.get(stats_mod.visitor_cookie_name())
             or 'ip:' + stats_mod.client_ip(request),
             stats_mod.client_ip(request), session_id, media_type,
-            selected_call['call_id'] if selected_call else None)
+            selected_call['call_id'] if selected_call else None,
+            stats_mod.request_domain(request))
     except Exception:
         pass
 
     return jsonify({
         'success': True,
         'call_id': selected_call['call_id'] if selected_call else None,
-        'chart_url': results['chart_url'],
         'report': report,
         'media_manifest': {
             'call_id': media_manifest.get('call_id'),
@@ -587,7 +581,6 @@ def get_session(session_id):
             'direction': results.get('direction'),
             'media_type': results.get('media_type'),
             'call_id': results.get('call_id'),
-            'chart_url': results.get('chart_url'),
             'report': results.get('report'),
             'summary': _build_summary(results),
             'media_manifest': results.get('media_manifest'),
@@ -664,13 +657,6 @@ def serve_media(filepath):
     return send_file(full_path, mimetype=mimetype)
 
 
-@app.route('/charts/<filename>')
-def serve_chart(filename):
-    """提供图表文件。"""
-    return send_file(os.path.join(app.config['OUTPUT_FOLDER'], filename),
-                     mimetype='image/png')
-
-
 @app.route('/results/<session_id>')
 def results_page(session_id):
     """结果展示页。"""
@@ -700,6 +686,7 @@ def admin_stats():
         summary=stats_mod.query_summary(),
         daily=stats_mod.query_daily(),
         regions=stats_mod.query_regions(),
+        domains=stats_mod.query_domains(),
         recent_visits=stats_mod.query_recent_visits(),
         recent_analyses=stats_mod.query_recent_analyses(),
     ))
@@ -835,13 +822,6 @@ def _find_and_calc_fs_delay(fs_packets, target_streams, server_ip):
                         best_result['ssrc_out'] = f'0x{ssrc_out:08x}'
     
     return best_result
-
-
-def _build_waterfall_data(captures, target_streams, server_ip):
-    """构建瀑布图数据。"""
-    # 简化实现：需要在多个抓包中找同一媒体流的对应包
-    # 这里返回空，实际需要在 delay_analyzer 中关联
-    return []
 
 
 if __name__ == '__main__':

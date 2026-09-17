@@ -126,7 +126,8 @@ def _init_db():
                 ip TEXT DEFAULT '',
                 province TEXT DEFAULT '',
                 city TEXT DEFAULT '',
-                path TEXT DEFAULT ''
+                path TEXT DEFAULT '',
+                domain TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_visits_day ON visits(day);
             CREATE TABLE IF NOT EXISTS analyses (
@@ -139,45 +140,58 @@ def _init_db():
                 city TEXT DEFAULT '',
                 session_id TEXT DEFAULT '',
                 media_type TEXT DEFAULT '',
-                call_id TEXT DEFAULT ''
+                call_id TEXT DEFAULT '',
+                domain TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_analyses_day ON analyses(day);
         ''')
 
 
+def _migrate():
+    """给早期建的库补新列（CREATE IF NOT EXISTS 不会改已有表结构）。"""
+    with _connect() as conn:
+        for table in ('visits', 'analyses'):
+            cols = {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
+            if 'domain' not in cols:
+                conn.execute(
+                    f'ALTER TABLE {table} ADD COLUMN domain TEXT DEFAULT ""')
+
+
 _init_db()
+_migrate()
 
 
-def _record(table, vid, ip, path_or_session, extra):
+def request_domain(request):
+    """访客来自哪个域名：Nginx 已把 $host 写进 Host 头，去掉端口即可。"""
+    return (request.host or '').split(':')[0].strip().lower()
+
+
+def record_visit(vid, ip, path, domain=''):
     try:
         province, city = lookup_region(ip)
         now = time.time()
         with _connect() as conn:
             conn.execute(
-                f'INSERT INTO {table} (ts, day, vid, ip, province, city, '
-                f'{extra[0]}) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO visits (ts, day, vid, ip, province, city, '
+                'path, domain) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                 (int(now), time.strftime('%Y-%m-%d', time.localtime(now)),
-                 vid, ip, province, city, path_or_session))
+                 vid, ip, province, city, path, domain or ''))
     except Exception:
         pass  # 统计是旁路功能，任何失败都不影响主流程
 
 
-def record_visit(vid, ip, path):
-    _record('visits', vid, ip, path, ('path',))
-
-
-def record_analysis(vid, ip, session_id, media_type, call_id):
+def record_analysis(vid, ip, session_id, media_type, call_id, domain=''):
     try:
         province, city = lookup_region(ip)
         now = time.time()
         with _connect() as conn:
             conn.execute(
                 'INSERT INTO analyses (ts, day, vid, ip, province, city, '
-                'session_id, media_type, call_id) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'session_id, media_type, call_id, domain) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (int(now), time.strftime('%Y-%m-%d', time.localtime(now)),
                  vid, ip, province, city, session_id or '',
-                 media_type or '', str(call_id or '')))
+                 media_type or '', str(call_id or ''), domain or ''))
     except Exception:
         pass
 
@@ -246,6 +260,22 @@ def query_regions(limit=50):
         LEFT JOIN (SELECT province, city, COUNT(*) AS cnt
                    FROM analyses GROUP BY province, city) a
           ON a.province = v.province AND a.city = v.city
+    ''', (limit,))
+
+
+def query_domains(limit=10):
+    """域名来源分布：各域名的访客数、浏览量、分析次数。"""
+    return _q('''
+        SELECT v.domain,
+               v.uv, v.pv,
+               COALESCE(a.cnt, 0) AS analyses
+        FROM (SELECT domain,
+                     COUNT(DISTINCT vid) AS uv, COUNT(*) AS pv
+              FROM visits
+              GROUP BY domain ORDER BY pv DESC LIMIT ?) v
+        LEFT JOIN (SELECT domain, COUNT(*) AS cnt
+                   FROM analyses GROUP BY domain) a
+          ON a.domain = v.domain
     ''', (limit,))
 
 

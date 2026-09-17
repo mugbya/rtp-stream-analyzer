@@ -38,7 +38,7 @@ VoIP 通话 RTP 音视频流分析平台。上传抓包文件（pcap/pcapng）�
 - **端到端延迟估算**：FS 延迟 + 网络传输
 - **抖动分析**：包间隔稳定性（均值/中位数/标准差/P95/P99/异常间隔）
 - **丢包检测**：基于 RTP 序列号连续性
-- 生成 9 面板分析图表 + 结构化结论报告（含问题分级与根因建议）
+- 生成结构化结论报告（含问题分级与根因建议）
 
 ### 3. 音视频重建与回放
 - **音频**：从 RTP 载荷重建 G.711 PCMU（μ-law）/ PCMA（A-law）为 WAV 文件
@@ -117,14 +117,14 @@ python3 app.py
 
 浏览器访问 **http://localhost:5050**
 
-outputs 目录（分析图表与音视频文件）由后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，可在 `app.py` 顶部的 `OUTPUT_RETENTION_HOURS` / `OUTPUT_CLEANUP_INTERVAL_MINUTES` 配置项调整。
+outputs 目录（音视频文件）由后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，可在 `app.py` 顶部的 `OUTPUT_RETENTION_HOURS` / `OUTPUT_CLEANUP_INTERVAL_MINUTES` 配置项调整。
 
 ## 使用流程
 
 1. **上传**：选择 1~3 个抓包文件（pcap/pcapng），点击「上传并识别」
 2. **确认识别结果**：系统显示检测到的服务器 IP、音频/视频流数量，以及**检测到的通话列表**（每通含时间范围、流数、完整性徽章，可展开查看判断依据）
 3. **选择分析参数**：多通通话时先**选择通话**（默认选中第一通完整的），再选延迟方向与媒体类型
-4. **查看结果**：摘要卡片 → 9 面板图表 → 音视频回放（标注所属通话）→ 详细报告
+4. **查看结果**：摘要卡片 → 音视频回放（标注所属通话）→ 详细报告
 5. **回放媒体**：在「音视频回放」区按端点分组试听/观看（开头标明本通通话谁打给谁，每条流标注谁到谁），可下载
 
 ## 项目结构
@@ -145,7 +145,6 @@ rtp-stream-analyzer/
 │   ├── media_extractor.py       # 音频/视频重建（G.711→WAV、H.264→MP4）
 │   ├── quality_analyzer.py      # 音画质量：杂音/啸叫/削波（音频）、花屏风险（视频）
 │   ├── problem_taxonomy.py      # 声音问题分类：检测结论 → 问题种类 + 用户听感词
-│   ├── charts.py                # matplotlib 图表生成
 │   └── reporter.py              # 汇总报告
 ├── tests/
 │   └── test_call_detector.py    # 通话分组/完整性单元测试（python3 tests/test_call_detector.py）
@@ -157,7 +156,7 @@ rtp-stream-analyzer/
 │   ├── css/style.css
 │   └── js/app.js
 ├── uploads/<session_id>/        # 上传的抓包文件
-└── outputs/                     # 生成的媒体与图表
+└── outputs/                     # 生成的媒体文件
 ```
 
 ## 输出目录与清理
@@ -177,14 +176,13 @@ outputs/
 │       │   ├── seat_outbound_0xaaaa1111.mp4    # H.264 → MP4
 │       │   └── seat_outbound_0xaaaa1111.h264   # 原始裸流（ffmpeg 失败时保留）
 │       └── media_manifest.json   # 媒体清单（含每个流的元信息）
-└── chart_xxx.png                 # 分析图表
 ```
 
 ### 自动清理
 
-outputs 目录（图表 + 媒体文件）与 uploads 目录（上传的抓包文件）由应用内置的后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，应用启动时也会先清一次历史遗留。两处共用同一保留时长，可在 `app.py` 顶部调整 `FILE_RETENTION_HOURS` / `FILE_CLEANUP_INTERVAL_MINUTES` 两个配置项。
+outputs 目录（媒体文件）与 uploads 目录（上传的抓包文件）由应用内置的后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，应用启动时也会先清一次历史遗留。两处共用同一保留时长，可在 `app.py` 顶部调整 `FILE_RETENTION_HOURS` / `FILE_CLEANUP_INTERVAL_MINUTES` 两个配置项。
 
-> 注意：会话数据存在内存中（`sessions` 字典），重启后丢失。超过保留时长后，旧结果页的媒体/图表链接会失效，对旧会话重新分析也会因原始抓包已被清理而失败——这是保留时长的预期行为，需要更长保留就调大配置项。
+> 注意：会话数据存在内存中（`sessions` 字典），重启后丢失。超过保留时长后，旧结果页的媒体链接会失效，对旧会话重新分析也会因原始抓包已被清理而失败——这是保留时长的预期行为，需要更长保留就调大配置项。
 
 ## API
 
@@ -195,7 +193,6 @@ outputs 目录（图表 + 媒体文件）与 uploads 目录（上传的抓包文
 | `/api/analyze` | POST | 执行分析 `{"session_id", "direction", "media_type", "call_id"?}`；`call_id` 限定分析范围到某通通话，缺省时单通自动选中、多通分析全部 |
 | `/api/session/<id>` | GET | 会话信息与结果（含 media_manifest） |
 | `/media/<date>/<session_id>/...` | GET | 媒体文件（WAV/MP4） |
-| `/charts/<filename>` | GET | 分析图表 PNG |
 | `/results/<session_id>` | GET | 独立结果页 |
 
 ## 支持的编解码

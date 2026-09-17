@@ -82,9 +82,37 @@
         </div>
     </div>
 
-    <!-- 地域分布 -->
-    <div class="col-lg-6">
-        <div class="card h-100">
+    <!-- 域名来源 + 地域分布 -->
+    <div class="col-lg-6 d-flex flex-column gap-4">
+        <div class="card">
+            <div class="card-header"><i class="bi bi-globe"></i> 域名来源</div>
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>域名</th>
+                            <th class="text-end">访客</th>
+                            <th class="text-end">浏览</th>
+                            <th class="text-end">分析</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for d in domains %}
+                        <tr>
+                            <td>{{ d.domain or '—' }}</td>
+                            <td class="text-end">{{ d.uv }}</td>
+                            <td class="text-end">{{ d.pv }}</td>
+                            <td class="text-end">{{ d.analyses }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="4" class="text-center text-muted py-4">暂无数据</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card flex-fill">
             <div class="card-header"><i class="bi bi-geo-alt"></i> 地域分布（省 / 市）</div>
             <div class="card-body p-0" style="max-height: 30rem; overflow-y: auto;">
                 <table class="table table-sm table-hover mb-0">
@@ -122,7 +150,7 @@
             <div class="card-body p-0" style="max-height: 26rem; overflow-y: auto;">
                 <table class="table table-sm table-hover mb-0">
                     <thead class="table-light" style="position: sticky; top: 0;">
-                        <tr><th>时间</th><th>地域</th><th>IP</th><th>页面</th></tr>
+                        <tr><th>时间</th><th>地域</th><th>IP</th><th>页面</th><th>域名</th></tr>
                     </thead>
                     <tbody>
                         {% for v in recent_visits %}
@@ -131,9 +159,10 @@
                             <td class="text-nowrap">{{ v.province }}{{ ' / ' + v.city if v.city }}</td>
                             <td class="text-nowrap text-muted">{{ v.ip_masked }}</td>
                             <td>{{ v.path }}</td>
+                            <td class="text-muted">{{ v.domain or '—' }}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="4" class="text-center text-muted py-4">暂无数据</td></tr>
+                        <tr><td colspan="5" class="text-center text-muted py-4">暂无数据</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
