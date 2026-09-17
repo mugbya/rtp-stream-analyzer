@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}使用统计 - RTP Stream Analyzer{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap align-items-center justify-content-between mb-4 gap-2">
+    <h1 class="h3 mb-0"><i class="bi bi-graph-up"></i> 使用统计</h1>
+    <span class="text-muted small">
+        PV = 页面浏览量；UV = 按访客 cookie 去重的人数；地域由 IP 离线解析，精确到省市
+    </span>
+</div>
+
+<!-- 汇总卡片 -->
+<div class="row g-3 mb-4">
+    <div class="col-6 col-lg-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="text-muted small">今日访问人数（UV）</div>
+                <div class="display-6">{{ summary.uv_today or 0 }}</div>
+                <div class="text-muted small">浏览 {{ summary.pv_today or 0 }} 次</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="text-muted small">累计访问人数（UV）</div>
+                <div class="display-6">{{ summary.uv_total or 0 }}</div>
+                <div class="text-muted small">浏览 {{ summary.pv_total or 0 }} 次</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="text-muted small">今日执行分析</div>
+                <div class="display-6">{{ summary.an_today or 0 }}</div>
+                <div class="text-muted small">{{ summary.an_uv_today or 0 }} 人执行</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-lg-3">
+        <div class="card h-100">
+            <div class="card-body">
+                <div class="text-muted small">累计执行分析</div>
+                <div class="display-6">{{ summary.an_total or 0 }}</div>
+                <div class="text-muted small">{{ summary.an_uv_total or 0 }} 人执行过</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <!-- 逐日数据 -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-calendar3"></i> 近 30 天逐日数据</div>
+            <div class="card-body p-0" style="max-height: 30rem; overflow-y: auto;">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light" style="position: sticky; top: 0;">
+                        <tr>
+                            <th>日期</th>
+                            <th class="text-end">浏览量</th>
+                            <th class="text-end">访客</th>
+                            <th class="text-end">分析次数</th>
+                            <th class="text-end">分析人数</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for d in daily %}
+                        <tr>
+                            <td>{{ d.day }}</td>
+                            <td class="text-end">{{ d.pv }}</td>
+                            <td class="text-end">{{ d.uv }}</td>
+                            <td class="text-end">{{ d.analyses }}</td>
+                            <td class="text-end">{{ d.analysts }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="5" class="text-center text-muted py-4">暂无数据</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 地域分布 -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-geo-alt"></i> 地域分布（省 / 市）</div>
+            <div class="card-body p-0" style="max-height: 30rem; overflow-y: auto;">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light" style="position: sticky; top: 0;">
+                        <tr>
+                            <th>省份</th>
+                            <th>城市</th>
+                            <th class="text-end">访客</th>
+                            <th class="text-end">浏览</th>
+                            <th class="text-end">分析</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for r in regions %}
+                        <tr>
+                            <td>{{ r.province }}</td>
+                            <td>{{ r.city or '—' }}</td>
+                            <td class="text-end">{{ r.uv }}</td>
+                            <td class="text-end">{{ r.pv }}</td>
+                            <td class="text-end">{{ r.analyses }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="5" class="text-center text-muted py-4">暂无数据</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 最近访问 -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-people"></i> 最近访问</div>
+            <div class="card-body p-0" style="max-height: 26rem; overflow-y: auto;">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light" style="position: sticky; top: 0;">
+                        <tr><th>时间</th><th>地域</th><th>IP</th><th>页面</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for v in recent_visits %}
+                        <tr>
+                            <td class="text-nowrap">{{ v.time }}</td>
+                            <td class="text-nowrap">{{ v.province }}{{ ' / ' + v.city if v.city }}</td>
+                            <td class="text-nowrap text-muted">{{ v.ip_masked }}</td>
+                            <td>{{ v.path }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="4" class="text-center text-muted py-4">暂无数据</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 最近分析 -->
+    <div class="col-lg-6">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-activity"></i> 最近执行分析</div>
+            <div class="card-body p-0" style="max-height: 26rem; overflow-y: auto;">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light" style="position: sticky; top: 0;">
+                        <tr><th>时间</th><th>地域</th><th>类型</th><th>通话</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for a in recent_analyses %}
+                        <tr>
+                            <td class="text-nowrap">{{ a.time }}</td>
+                            <td class="text-nowrap">{{ a.province }}{{ ' / ' + a.city if a.city }}</td>
+                            <td>{{ {'audio': '音频', 'video': '视频', 'all': '音视频'}.get(a.media_type, a.media_type or '—') }}</td>
+                            <td class="text-muted text-truncate" style="max-width: 10rem;">{{ a.call_id or '—' }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="4" class="text-center text-muted py-4">暂无数据</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

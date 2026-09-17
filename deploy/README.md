@@ -122,3 +122,31 @@ systemctl restart rtp-stream-analyzer
 - **`--install-cert` 报 `fullchain.cer: No such file or directory`**：acme.sh 里的源证书残缺（上次 `--issue` 签发失败留下的），`--issue --force` 重签后再安装。
 - **`--issue --nginx` 报 `It seems that the nginx config is not correct`**：nginx 模式签发前会自检 nginx 配置，配置本身有坏文件（如引用空证书）就整个卡住。改用 `--dns dns_dp` 验证（本部署默认方式），完全不碰 nginx。
 - **DNS 验证报 `Invalid status ... NXDOMAIN looking up TXT`**：CA 在公网查不到这个域名（域名刚注册/NS 刚切到 DNSPod 还没生效，或注册商的 DNS 服务器没指向 DNSPod）。`dig NS 域名 +short` 看 NS 是否为 `*.dnspod.net`；NS 正常就等几分钟重跑，NS 不对先去注册商改 DNS 服务器。多域名签发是整单成败，可将未生效域名从列表去掉先签其余的，生效后再补签。
+
+## 使用统计（/admin/stats）
+
+访问人数、执行分析次数、访客省市分布由服务端自己统计（SQLite，`data/stats.db`，随服务自动建表），不依赖第三方统计服务。
+
+- **访问人数**：首页/结果页打开时记录，种一年期 cookie（`vid`）做去重，页面展示 UV（去重人数）和 PV（浏览次数）。
+- **执行分析**：`/api/analyze` 成功完成一次分析记一条，附带媒体类型与通话；无 cookie 的调用按 IP 去重。
+- **地域**：用 ip2region 离线库（`data/ip2region.xdb`，随仓库分发）解析 Nginx 传来的 `X-Real-IP`，精确到省/市，全程不出网。
+
+### 访问统计页
+
+无登录功能，靠密钥 URL 鉴权（密钥不对返回 404，不暴露页面存在）：
+
+1. 取密钥：服务器上设置了 `ADMIN_STATS_KEY` 环境变量就用它；没设置则首次启动自动生成在 `data/admin_key.txt`：
+
+   ```bash
+   cat /opt/rtp-stream-analyzer/app/data/admin_key.txt
+   ```
+
+2. 首次访问：`https://你的域名/admin/stats?key=密钥` —— 校验通过后种一年期 cookie。
+3. 之后直接打开 `https://你的域名/admin/stats` 即可。
+
+页面内容：今日/累计的访问与执行汇总卡片、近 30 天逐日数据、省/市地域分布、最近访问与最近分析明细（IP 展示时打码最后一段）。
+
+### 注意事项
+
+- 部署工作流已排除 `data/stats.db*` 与 `data/admin_key.txt`（运行时数据，rsync 不会覆盖/删除）；`data/ip2region.xdb` 随代码同步。
+- xdb 数据文件约每月更新一次（IP 库会过期），想更新就到 [ip2region 发布页](https://github.com/lionsoul2014/ip2region/releases) 下载新版 `ip2region_v4.xdb` 覆盖 `data/ip2region.xdb`。

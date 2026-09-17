@@ -10,7 +10,8 @@ import shutil
 import threading
 import time
 from datetime import date
-from flask import Flask, render_template, request, jsonify, send_file, url_for
+from flask import (Flask, render_template, request, jsonify, send_file,
+                   url_for, make_response)
 
 from analyzer.rtp_parser import extract_rtp_packets, get_stream_packets
 from analyzer.stream_classifier import (
@@ -34,6 +35,7 @@ from analyzer.delay_chains import build_delay_chains
 from analyzer.quality_analyzer import analyze_audio_quality, analyze_video_quality
 from analyzer.call_detector import detect_calls, check_capture_consistency
 from analyzer.capture_integrity import merge_integrity
+import stats as stats_mod
 
 # 默认 True（本地 python app.py 调试）；systemd 部署设 FLASK_DEBUG=0 走 gunicorn 生产模式
 DEBUG = os.environ.get('FLASK_DEBUG', '1') == '1'
@@ -125,10 +127,26 @@ if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not DEBUG:
     _start_file_cleaner()
 
 
+def _track_page(response, path):
+    """页面访问统计：带访客 cookie 则直接记录，没有则生成并种回响应
+    （一年有效，用于"访问人数"去重）。统计失败不影响页面。"""
+    try:
+        vid = stats_mod.ensure_visitor_id(request)
+        new_visitor = request.cookies.get(stats_mod.visitor_cookie_name()) != vid
+        stats_mod.record_visit(vid, stats_mod.client_ip(request), path)
+        if new_visitor:
+            response.set_cookie(stats_mod.visitor_cookie_name(), vid,
+                                max_age=365 * 86400, httponly=True,
+                                samesite='Lax')
+    except Exception:
+        pass
+    return response
+
+
 @app.route('/')
 def index():
     """主页：上传和配置"""
-    return render_template('index.html')
+    return _track_page(make_response(render_template('index.html')), '/')
 
 
 @app.route('/api/upload', methods=['POST'])
@@ -513,6 +531,17 @@ def run_analysis():
     # 保存结果到会话
     session['results'] = results
 
+    # 使用统计：一次成功完成的分析（地域/访客信息尽力获取）；
+    # 无访客 cookie 时退化为按 IP 去重
+    try:
+        stats_mod.record_analysis(
+            request.cookies.get(stats_mod.visitor_cookie_name())
+            or 'ip:' + stats_mod.client_ip(request),
+            stats_mod.client_ip(request), session_id, media_type,
+            selected_call['call_id'] if selected_call else None)
+    except Exception:
+        pass
+
     return jsonify({
         'success': True,
         'call_id': selected_call['call_id'] if selected_call else None,
@@ -647,7 +676,37 @@ def results_page(session_id):
     """结果展示页。"""
     if session_id not in sessions:
         return "Session not found", 404
-    return render_template('results.html', session_id=session_id)
+    return _track_page(
+        make_response(render_template('results.html', session_id=session_id)),
+        '/results')
+
+
+@app.route('/admin/stats')
+def admin_stats():
+    """使用统计管理页：不做登录，靠密钥鉴权。
+
+    首次访问用 /admin/stats?key=密钥（密钥来自 ADMIN_STATS_KEY 环境变量，
+    未配置则自动生成在 data/admin_key.txt）；校验通过后种一年期 cookie，
+    之后直接打开 /admin/stats 即可。密钥不对按 404 处理，不暴露页面存在。
+    """
+    expected = stats_mod.get_admin_key()
+    key = request.args.get('key') or request.cookies.get(
+        stats_mod.admin_cookie_name())
+    if not expected or not key or key != expected:
+        return "Not Found", 404
+
+    resp = make_response(render_template(
+        'admin_stats.html',
+        summary=stats_mod.query_summary(),
+        daily=stats_mod.query_daily(),
+        regions=stats_mod.query_regions(),
+        recent_visits=stats_mod.query_recent_visits(),
+        recent_analyses=stats_mod.query_recent_analyses(),
+    ))
+    if request.args.get('key') == expected:
+        resp.set_cookie(stats_mod.admin_cookie_name(), expected,
+                        max_age=365 * 86400, httponly=True, samesite='Lax')
+    return resp
 
 
 def _canonical_role(role):

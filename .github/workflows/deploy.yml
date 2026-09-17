@@ -41,6 +41,9 @@ jobs:
             --exclude 'uploads/' \
             --exclude 'outputs/' \
             --exclude 'tests/' \
+            --exclude 'data/stats.db' \
+            --exclude 'data/stats.db-*' \
+            --exclude 'data/admin_key.txt' \
             --exclude '.DS_Store' \
             -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT -o BatchMode=yes" \
             ./ "$SSH_USER@$SSH_HOST":/opt/rtp-stream-analyzer/app/

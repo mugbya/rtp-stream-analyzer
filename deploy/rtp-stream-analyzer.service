@@ -11,6 +11,9 @@ WorkingDirectory=/opt/rtp-stream-analyzer/app
 Environment=FLASK_DEBUG=0
 # matplotlib 缓存目录，避免写到 $HOME/.config
 Environment=MPLCONFIGDIR=/opt/rtp-stream-analyzer/mplcache
+# 使用统计管理页（/admin/stats）的访问密钥：留空则服务首次启动时自动生成到
+# /opt/rtp-stream-analyzer/app/data/admin_key.txt（查看：cat 该文件）；想自定义就取消下一行注释
+# Environment=ADMIN_STATS_KEY=换成你的随机密钥
 # 单 worker 多线程：分析会话存在进程内存里（app.py 的 sessions 字典），
 # 多 worker 会各存一份导致请求间丢失会话；大文件上传/分析慢，超时放宽到 300s。
 # 只监听回环地址：对外统一由 Nginx 80 端口反代，5050 不暴露公网

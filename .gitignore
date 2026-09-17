@@ -6,3 +6,8 @@ uploads/
 venv/
 .env
 case/
+
+# 统计运行时数据（ip2region.xdb 保留提交，其余本地生成）
+data/stats.db
+data/stats.db-*
+data/admin_key.txt
