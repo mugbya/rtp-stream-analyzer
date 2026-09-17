@@ -108,6 +108,81 @@ def test_audio_hum():
     print("PASS: audio low-frequency hum detected")
 
 
+def test_audio_ringback_is_prompt_not_howling():
+    """开头 1.5s 的 450Hz 回铃音 + 之后 68s 静音：归为提示音(info)而非
+    啸叫，不报削波/话音电平，报"全程未检测到话音"，verdict silent。
+
+    对应真实抓包形态：FS→主叫只有一声"嘟"之后全程数字静音（单通）。"""
+    t = np.arange(int(1.5 * SR)) / SR
+    tone = (6000 * np.sin(2 * np.pi * 450 * t)).astype(np.int16)
+    x = np.concatenate([tone, np.zeros(int(68 * SR))]).astype(np.int16)
+    r = analyze_audio_quality(make_packets(A, audio_items(x)), A)
+    assert r['tones']['howl_count'] == 0, r['tones']
+    assert r['tones']['prompt_count'] == 1, r['tones']
+    kinds = [i['kind'] for i in r['issues']]
+    assert 'howling' not in kinds and 'clipping' not in kinds, r['issues']
+    assert 'high_level' not in kinds and 'low_level' not in kinds, r['issues']
+    assert 'prompt_tone' in kinds and 'no_speech' in kinds, r['issues']
+    assert r['speech_level_dbfs'] is None, r
+    assert r['verdict'] == 'silent', r
+    print("PASS: ringback tone classified as prompt, stream flagged silent")
+
+
+def test_audio_steady_noise_is_not_speech():
+    """持续背景电平（工频嗡声+底噪）不是话音：报 no_speech，不冒话音电平。
+
+    对应真实抓包形态：主叫设备故障时把 50Hz 嗡声+宽带噪声整通发上来，
+    能量过门限但包络无音节起伏——不能算"有人声"。"""
+    t = np.arange(int(12 * SR)) / SR
+    rng = np.random.default_rng(7)
+    x = (600 + 100 * np.sin(2 * np.pi * 50 * t)
+         + rng.integers(-80, 80, t.size)).astype(np.int16)
+    r = analyze_audio_quality(make_packets(A, audio_items(x)), A)
+    assert r['speech_activity'] is False, r
+    assert r['speech_level_dbfs'] is None, r
+    assert r['steady_level_dbfs'] is not None, r
+    kinds = [i['kind'] for i in r['issues']]
+    assert 'no_speech' in kinds, r['issues']
+    assert 'low_level' not in kinds and 'high_level' not in kinds, r['issues']
+    assert r['verdict'] == 'silent', r
+    print("PASS: steady background level reported as no_speech, verdict silent")
+
+
+def test_audio_voice_moments_inside_background():
+    """背景电平中短暂的人声：检出话音电平与背景电平，不报 no_speech。
+
+    对应真实抓包形态：设备把工频嗡声/底噪整通发上来，中间短暂出现过
+    人声——人声时刻要单独检出，不能整段吞成背景电平。"""
+    t = np.arange(int(12 * SR)) / SR
+    rng = np.random.default_rng(3)
+    x = 600 + 100 * np.sin(2 * np.pi * 50 * t) + rng.integers(-80, 80, t.size)
+    for a in (2.0, 7.0):                    # 两段 240ms 的人声（包络≈3×背景）
+        for j in range(12):
+            s = int((a + j * 0.02) * SR)
+            n = int(0.02 * SR)
+            amp = 3000 if j % 2 else 2000
+            x[s:s + n] = amp * np.sin(2 * np.pi * 200 * np.arange(n) / SR)
+    r = analyze_audio_quality(make_packets(A, audio_items(x.astype(np.int16))), A)
+    assert r['speech_activity'] is True, r
+    assert r['speech_level_dbfs'] is not None, r
+    assert r['steady_level_dbfs'] is not None, r
+    kinds = [i['kind'] for i in r['issues']]
+    assert 'no_speech' not in kinds, r['issues']
+    print("PASS: voice moments inside background detected in quality stats")
+
+
+def test_audio_clipping_inside_tone_not_flagged():
+    """单频音事件自身的削平采样不报削波（提示音生成过热 ≠ 发话端破音）。
+
+    300Hz 不在提示音频率表内，事件按啸叫档记录；其削顶被剔除。"""
+    t = np.arange(int(1.0 * SR)) / SR
+    tone = np.clip(32000 * np.sin(2 * np.pi * 300 * t), -27200, 27200)
+    r = analyze_audio_quality(make_packets(A, audio_items(tone.astype(np.int16))), A)
+    assert r['tones']['count'] >= 1, r['tones']
+    assert r['clipping']['run_count'] == 0, r['clipping']
+    print("PASS: clipping flats inside tone events not flagged")
+
+
 def test_audio_clipping():
     """削波平台（连续相等大幅值采样）：检出削波。"""
     t = np.arange(int(1.0 * SR)) / SR
@@ -398,6 +473,10 @@ if __name__ == '__main__':
     test_audio_clean_speech()
     test_audio_howling()
     test_audio_hum()
+    test_audio_ringback_is_prompt_not_howling()
+    test_audio_steady_noise_is_not_speech()
+    test_audio_voice_moments_inside_background()
+    test_audio_clipping_inside_tone_not_flagged()
     test_audio_clipping()
     test_audio_click()
     test_audio_noisy_floor()

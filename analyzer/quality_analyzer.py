@@ -7,6 +7,9 @@
 1. 啸叫/持续单频音——回授啸叫、单音提示音泄漏。特征是频谱上出现一根
    "又高又窄又稳定"的谱峰：帧级 FFT 找显著峰值（峰值远高于谱中位数），
    连续多帧且频率不漂移（±容差）即判定。≥250Hz 报啸叫/持续单频音。
+   其中 425/450Hz 等常见呼叫提示音频率上的短促单音（回铃音/忙音，
+   通常出现在应答前）单独归为"提示音"info 项——那是正常呼叫流程音，
+   不是啸叫，不能因为 FS 播了回铃音就把整通电话判成质量问题。
 2. 低频嗡声（50/100Hz 电源干扰、地环路）——能量集中在低频段的持续帧。
    用"低频能量占比 ≥85% 且持续"判定，不依赖精确的 bin 对齐。
 3. 削波破音——波形顶端被削平：连续多个采样值一字排开且幅度极大。
@@ -56,9 +59,16 @@ HOP = 128                 # 帧移 16ms
 TONE_BAND = (250.0, 3900.0)   # 啸叫检测频带（8k 采样奈奎斯特 4kHz）
 TONE_PROMINENCE = 40.0    # 谱峰 / 谱中位数 ≥40 倍才够"窄而尖"
 TONE_MIN_RMS = 300        # 帧能量下限（排除底噪里的伪峰）
-TONE_MIN_FRAMES = 16      # 持续 ≥16 帧（约 0.26s）判为持续单频音，
-                          # 短于常见按键音（DTMFA 约 120ms）避免误报
+TONE_MIN_FRAMES = 10      # 持续 ≥10 帧（约 0.16s）判为持续单频音，
+                          # 仍长于常见按键音（DTMF 约 120ms）避免误报；
+                          # 现场提示音常经声学/电气耦合混入底噪，起振段
+                          # 的谐波会吃掉头尾几帧，门槛太高会漏检
 TONE_FREQ_TOL_HZ = 50.0   # 同一事件内允许的频率漂移
+PROMPT_FREQS = (425.0, 440.0, 450.0, 480.0)
+                          # 常见呼叫提示音频率：425Hz（欧标回铃/忙音）、
+                          # 440+480Hz（美标）、450Hz（国标回铃/忙音/拨号音）
+PROMPT_FREQ_TOL_HZ = 40.0 # 匹配容差（FFT bin 宽 31.25Hz，450Hz 会落在 437.5）
+PROMPT_MAX_S = 6.0        # 短于此的提示音频单音归为提示音；更久按啸叫处理
 HUM_LOW_HZ = 220.0        # 低频嗡声的"低频段"上界
 HUM_RATIO = 0.85          # 低频能量占比门限
 HUM_MIN_RMS = 800         # 嗡声要有可闻电平
@@ -85,18 +95,25 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
          'rtp_integrity': 序号/时间戳秩序判定（见 _rtp_integrity），
          'clipping': {'run_count', 'sample_count', 'events': [...]},
          'clicks': {'count', 'events': [...]},
-         'tones': {'count', 'howl_count', 'hum_count', 'events': [...]},
+         'tones': {'count', 'howl_count', 'prompt_count', 'hum_count',
+                   'events': [...]},
          'noise_floor_dbfs', 'speech_level_dbfs',
+         'speech_activity': 人声活动判定（True=有人声——整体起伏或背景
+                            之上的人声时刻 / False=只有平稳背景电平 /
+                            None=活跃样本不足），'steady_level_dbfs':
+                            活跃帧里非人声部分的持续背景电平,
          'issues': [{'kind', 'severity', 'message'}],
-         'verdict': 'clean'|'noisy'|'bad'|'unknown'}
+         'verdict': 'clean'|'noisy'|'bad'|'silent'|'unknown'}
     """
     result = {
         'packet_count': 0, 'codec': 'unknown', 'decodable': False,
         'duration_s': 0.0,
         'clipping': {'run_count': 0, 'sample_count': 0, 'events': []},
         'clicks': {'count': 0, 'events': []},
-        'tones': {'count': 0, 'howl_count': 0, 'hum_count': 0, 'events': []},
+        'tones': {'count': 0, 'howl_count': 0, 'prompt_count': 0,
+                  'hum_count': 0, 'events': []},
         'noise_floor_dbfs': None, 'speech_level_dbfs': None,
+        'speech_activity': None, 'steady_level_dbfs': None,
         'rtp_integrity': None,
         'issues': [], 'verdict': 'clean',
     }
@@ -176,23 +193,29 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
     peak_val = band_spec[np.arange(n_frames), peak_pos]
     peak_freq = freqs[band_idx[peak_pos]]
     med = np.maximum(np.median(spec[:, 1:], axis=1), 1e-6)
-    df = freqs[1]                      # bin 宽 31.25Hz
-    harm = np.zeros(n_frames, dtype=bool)
-    for mult in (2.0, 3.0, 0.5):
-        tgt = np.round(peak_freq * mult / df).astype(int)
-        idxs = np.where((tgt >= 1) & (tgt < spec.shape[1]))[0]
-        if not idxs.size:
-            continue
-        b = tgt[idxs]
-        mag = spec[idxs, b]
-        mag = np.maximum(mag, spec[idxs, np.clip(b - 1, 0, None)])
-        mag = np.maximum(mag, spec[idxs, np.clip(b + 1, 0, spec.shape[1] - 1)])
-        over = np.zeros(n_frames, dtype=bool)
-        over[idxs] = mag > 0.25 * peak_val[idxs]
-        harm |= over
+    harm = _harmonic_mask(spec, freqs[1], peak_freq, peak_val)
+    dc_dom = _dc_dominant(spec)
+    # 带内峰必须是全谱最大分量：低于频段下限的单频（如 200Hz 嗡声）主瓣
+    # 会泄进带内，若不排除就被当成"带内单频音"，连带误伤削波豁免逻辑
+    global_peak = np.max(spec[:, 1:], axis=1)
     is_tone = ((peak_val / med >= TONE_PROMINENCE)
-               & (frame_rms >= TONE_MIN_RMS) & ~harm)
+               & (peak_val >= global_peak)
+               & (frame_rms >= TONE_MIN_RMS) & ~harm & ~dc_dom)
     result['tones'] = _track_tones(is_tone, peak_freq, frame_rms, frame_t)
+    tones = result['tones']
+
+    # 提示音/单频音覆盖的帧：削波与话音电平统计要剔除——回铃音这类流程音
+    # 生成电平高、常在编码满幅处削顶，会被误判成"话音削波/话音电平过高"。
+    # 边缘外扩一整帧：事件边界上的过渡帧（窗口沾到音头的帧能量仍高）
+    # 也不能算话音，否则"只有提示音没有说话"的流会冒出假的话音电平。
+    # 低频嗡声（hum 档）不在此列：电源干扰本身伴随的削顶可能是真破音
+    tone_frame = np.zeros(n_frames, dtype=bool)
+    edge = FRAME / SAMPLE_RATE
+    for ev in tones['events']:
+        if ev['band'] == 'hum':
+            continue
+        tone_frame |= ((frame_t >= ev['start_s'] - edge)
+                       & (frame_t <= ev['end_s'] + edge))
 
     # 2) 低频嗡声：低频能量占比高的持续帧（与啸叫独立判定）
     low_mask = freqs <= HUM_LOW_HZ
@@ -200,9 +223,9 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
     low_energy = np.sum(spec[:, low_mask] ** 2, axis=1)
     total_energy = np.sum(spec[:, 1:] ** 2, axis=1)
     low_ratio = low_energy / np.maximum(total_energy, 1e-9)
-    is_hum = (low_ratio >= HUM_RATIO) & (frame_rms >= HUM_MIN_RMS)
+    is_hum = (low_ratio >= HUM_RATIO) & (frame_rms >= HUM_MIN_RMS) \
+        & ~_dc_dominant(spec)
     hum = _track_runs(is_hum, frame_t, HUM_MIN_FRAMES)
-    tones = result['tones']
     tones['hum_count'] = len(hum)
     tones['count'] += len(hum)
     for start, end in hum[:MAX_EVENTS]:
@@ -212,13 +235,23 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
             'freq_hz': None, 'band': 'hum',
             'mean_dbfs': _dbfs(np.mean(frame_rms[sel]))})
 
-    # 3) 削波：连续相等的大幅值采样（波形被削平的平台）
+    # 3) 削波：连续相等的大幅值采样（波形被削平的平台）。
+    #    落在提示音/单频音事件内的削顶不报：提示音本身生成电平高，削顶是
+    #    流程音的固有形态，不是"发话端音量过大"的破音
+    tone_samp = np.zeros(x.size, dtype=bool)
+    for ev in tones['events']:
+        if ev['band'] == 'hum':
+            continue          # 嗡声段里的削顶可能是真破音，照常报
+        # 事件时间保留了 2 位小数（±5ms 量化误差），余量取整帧
+        i0 = max(int(ev['start_s'] * SAMPLE_RATE) - FRAME, 0)
+        i1 = min(int(ev['end_s'] * SAMPLE_RATE) + FRAME, x.size)
+        tone_samp[i0:i1] = True
     clip_events = []
     for start, length in _bool_runs(np.diff(x) == 0):
         if length + 1 < CLIP_MIN_RUN:
             continue
         level = abs(x[start])
-        if level < CLIP_MIN_LEVEL:
+        if level < CLIP_MIN_LEVEL or tone_samp[start]:
             continue
         clip_events.append((start, length + 1, level))
     result['clipping']['run_count'] = len(clip_events)
@@ -254,18 +287,39 @@ def analyze_audio_quality(packets: dict, ssrc: int) -> dict:
             'time_s': round(s / SAMPLE_RATE, 2),
             'amplitude_dbfs': _dbfs(amp)})
 
-    # 5) 底噪与话音电平
+    # 5) 底噪与话音电平：话音统计剔除提示音帧——只有提示音没有说话的流
+    #    不该报"话音电平过高/过低"，而该走 no_speech 结论
     quiet = frame_rms[frame_rms < ACTIVE_RMS]
     if quiet.size >= 10:
         result['noise_floor_dbfs'] = _dbfs(np.median(quiet))
-    speech = frame_rms[frame_rms >= ACTIVE_RMS]
-    if speech.size:
-        result['speech_level_dbfs'] = _dbfs(np.mean(speech))
+    speech = frame_rms[(frame_rms >= ACTIVE_RMS) & ~tone_frame]
+    # 有电平 ≠ 有人声：活跃帧里分出"人声帧"与"平稳背景电平帧"。
+    # 人声帧算话音电平；背景电平帧记 steady_level_dbfs——设备把供电
+    # 干扰/环境噪声整通发上来时，不能冒出假的"话音电平"
+    vmask = _voice_mask(speech)
+    if vmask is None:
+        result['speech_activity'] = None
+    elif vmask.any():
+        result['speech_activity'] = True
+        result['speech_level_dbfs'] = _dbfs(np.mean(speech[vmask]))
+        other = speech[~vmask]
+        if other.size >= 10:
+            result['steady_level_dbfs'] = _dbfs(np.mean(other))
+    else:
+        result['speech_activity'] = False
+        result['steady_level_dbfs'] = _dbfs(np.mean(speech))
 
     result['issues'] = _audio_issues(result)
     worst = {i['severity'] for i in result['issues']}
-    result['verdict'] = ('bad' if 'critical' in worst
-                         else 'noisy' if 'warning' in worst else 'clean')
+    kinds = {i['kind'] for i in result['issues']}
+    if 'critical' in worst:
+        result['verdict'] = 'bad'
+    elif 'no_speech' in kinds:
+        result['verdict'] = 'silent'    # 除提示音外全程无声，不是"有杂音"
+    elif 'warning' in worst:
+        result['verdict'] = 'noisy'
+    else:
+        result['verdict'] = 'clean'
     return result
 
 
@@ -283,8 +337,87 @@ def _bool_runs(mask: np.ndarray):
     return [(int(s), int(e - s)) for s, e in zip(starts, ends)]
 
 
+def _harmonic_mask(spec, df: float, peak_freq, peak_val) -> np.ndarray:
+    """谱峰的 2f/3f/f÷2 处也有显著峰 → 是语音谐波结构，不是纯单频。
+
+    df: 频谱 bin 宽（Hz）。
+    """
+    n_frames = spec.shape[0]
+    harm = np.zeros(n_frames, dtype=bool)
+    for mult in (2.0, 3.0, 0.5):
+        tgt = np.round(peak_freq * mult / df).astype(int)
+        idxs = np.where((tgt >= 1) & (tgt < spec.shape[1]))[0]
+        if not idxs.size:
+            continue
+        b = tgt[idxs]
+        mag = spec[idxs, b]
+        mag = np.maximum(mag, spec[idxs, np.clip(b - 1, 0, None)])
+        mag = np.maximum(mag, spec[idxs, np.clip(b + 1, 0, spec.shape[1] - 1)])
+        over = np.zeros(n_frames, dtype=bool)
+        over[idxs] = mag > 0.25 * peak_val[idxs]
+        harm |= over
+    return harm
+
+
+def _is_prompt_freq(f: float) -> bool:
+    """频率落在常见呼叫提示音（回铃/忙音/拨号音）附近。"""
+    return any(abs(f - pf) <= PROMPT_FREQ_TOL_HZ for pf in PROMPT_FREQS)
+
+
+def _dc_dominant(spec: np.ndarray) -> np.ndarray:
+    """直流主导的帧（恒定电平信号）不是振荡，不能按单频音/嗡声判定。
+
+    恒定电平的全部能量落在 bin0，汉宁窗旁瓣会泄进低频 bin——
+    既把低频占比顶过 hum 门限，又让 250Hz 以上的旁瓣在"谱中位数
+    趋近于零"的信号里显出虚假显著度。
+    """
+    return spec[:, 0] > np.sum(spec[:, 1:], axis=1)
+
+
+SPEECH_CV = 0.5           # 人声包络起伏下限（变异系数）；实测人声 0.8-1.2，
+                          # 工频嗡声/平稳底噪 < 0.4
+SPEECH_SPREAD = 0.55      # 包络 p10/p50 下展门限：真实说话在音节间有明显的
+                          # 低谷（p10 远低于中位），平稳电平挤在中位附近
+VOICE_ABOVE_FLOOR = 1.8   # 平坦活跃段里，高于背景电平 1.8×（≈+5dB）且
+                          # 持续足够的突发按"人声时刻"计
+VOICE_MIN_EPISODE = 10    # 突发至少持续 10 个统计样本（包 20ms/帧 16ms），
+                          # 排除瞬时尖峰与提示音起振的残帧
+
+
+def _voice_mask(rms_seq):
+    """活跃样本中哪些属于人声（其余为平稳背景电平）。返回 None=样本太少。
+
+    分层判定，防止两种相反的漏报：
+    1) 样本 <25（约 0.5s）→ 无法判定；
+    2) 包络整体起伏大（cv ≥0.5，或低谷明显 p10/p50 ≤0.55）→ 全部按
+       人声——正常说话的形态；
+    3) 包络整体平（设备把背景电平整通发上来的形态）→ 高于背景电平
+       1.8×且持续 ≥10 样本的突发单独算人声时刻——"背景音里说过话"
+       不能因为整段包络平就被吞掉。
+    """
+    if rms_seq is None or len(rms_seq) < 25:
+        return None
+    a = np.asarray(rms_seq, dtype=float)
+    env = np.convolve(a, np.ones(5) / 5, mode='same')
+    cv = env.std() / max(env.mean(), 1e-9)
+    p50 = max(float(np.percentile(env, 50)), 1e-9)
+    spread = float(np.percentile(env, 10)) / p50
+    if cv >= SPEECH_CV or spread <= SPEECH_SPREAD:
+        return np.ones(a.size, dtype=bool)
+    mask = env >= p50 * VOICE_ABOVE_FLOOR
+    for s, length in _bool_runs(mask):
+        if length < VOICE_MIN_EPISODE:
+            mask[s:s + length] = False
+    return mask
+
+
 def _track_tones(is_tone, peak_freq, frame_rms, frame_t) -> dict:
-    """把"单频帧"串成持续事件：先填 1 帧空洞，再按频率漂移分段。"""
+    """把"单频帧"串成持续事件：先填 1 帧空洞，再按频率漂移分段。
+
+    提示音归类：425/450Hz 等呼叫流程音频率上的短促（≤6s）单音是回铃音/
+    忙音类正常信号，band 记为 'prompt'（info 级），不计入啸叫；持续更久
+    或频率对不上提示音的仍按啸叫处理——真实啸叫也可能恰好在这些频率。
+    """
     filled = is_tone.copy()
     filled[1:-1] |= np.roll(is_tone, 1)[1:-1] & np.roll(is_tone, -1)[1:-1]
     events = []
@@ -306,15 +439,64 @@ def _track_tones(is_tone, peak_freq, frame_rms, frame_t) -> dict:
     for frames_idx in events:
         f_mean = float(np.median(peak_freq[frames_idx]))
         level = _dbfs(np.mean(frame_rms[frames_idx]))
+        dur = float(frame_t[frames_idx[-1]] - frame_t[frames_idx[0]])
+        if f_mean >= TONE_BAND[0]:
+            band = ('prompt' if _is_prompt_freq(f_mean) and dur <= PROMPT_MAX_S
+                    else 'howl')
+        else:
+            band = 'hum'
         out.append({
             'start_s': round(float(frame_t[frames_idx[0]]), 2),
             'end_s': round(float(frame_t[frames_idx[-1]]), 2),
             'freq_hz': round(f_mean, 1),
-            'band': 'howl' if f_mean >= TONE_BAND[0] else 'hum',
+            'band': band,
             'mean_dbfs': level})
     return {'count': len(out),
             'howl_count': sum(1 for e in out if e['band'] == 'howl'),
+            'prompt_count': sum(1 for e in out if e['band'] == 'prompt'),
             'hum_count': 0, 'events': out[:MAX_EVENTS]}
+
+
+def tone_intervals(x: np.ndarray) -> list:
+    """检测 PCM 中的稳态单频段（提示音/啸叫/低频嗡声），返回 [(start_s, end_s)]。
+
+    帧级判定与 analyze_audio_quality 同一套参数（帧长、显著度、谐波豁免、
+    低频占比），供静音分析把提示音从"有人声"时间里剔除——回铃音不是人声。
+    """
+    if x.size < FRAME:
+        return []
+    n_frames = (x.size - FRAME) // HOP + 1
+    idx = np.arange(FRAME) + HOP * np.arange(n_frames)[:, None]
+    frames = x[idx]
+    spec = np.abs(np.fft.rfft(frames * np.hanning(FRAME), axis=1))
+    freqs = np.fft.rfftfreq(FRAME, 1 / SAMPLE_RATE)
+    frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    frame_t = (idx[:, 0] + FRAME / 2) / SAMPLE_RATE
+
+    band_idx = np.where((freqs >= TONE_BAND[0]) & (freqs <= TONE_BAND[1]))[0]
+    band_spec = spec[:, band_idx]
+    peak_pos = np.argmax(band_spec, axis=1)
+    peak_val = band_spec[np.arange(n_frames), peak_pos]
+    peak_freq = freqs[band_idx[peak_pos]]
+    med = np.maximum(np.median(spec[:, 1:], axis=1), 1e-6)
+    harm = _harmonic_mask(spec, freqs[1], peak_freq, peak_val)
+    dc_dom = _dc_dominant(spec)
+    global_peak = np.max(spec[:, 1:], axis=1)
+    is_tone = ((peak_val / med >= TONE_PROMINENCE)
+               & (peak_val >= global_peak)
+               & (frame_rms >= TONE_MIN_RMS) & ~harm & ~dc_dom)
+
+    low_mask = freqs <= HUM_LOW_HZ
+    low_mask[0] = False
+    low_energy = np.sum(spec[:, low_mask] ** 2, axis=1)
+    total_energy = np.sum(spec[:, 1:] ** 2, axis=1)
+    is_hum = (low_energy / np.maximum(total_energy, 1e-9) >= HUM_RATIO) \
+        & (frame_rms >= HUM_MIN_RMS) & ~dc_dom
+
+    iv = _track_runs(is_tone, frame_t, TONE_MIN_FRAMES)
+    iv += _track_runs(is_hum, frame_t, HUM_MIN_FRAMES)
+    iv.sort()
+    return [(round(a, 3), round(b, 3)) for a, b in iv]
 
 
 def _track_runs(is_flag, frame_t, min_frames):
@@ -442,6 +624,16 @@ def _audio_issues(r: dict) -> list:
                         f"{integ.get('packet_duration_ms')} ms）{extra}{other}"
                         f"——重建音频与杂音/啸叫检测的基础数据可信")})
     tones = r['tones']
+    if tones.get('prompt_count'):
+        ev = [e for e in tones['events'] if e['band'] == 'prompt']
+        longest = max(e['end_s'] - e['start_s'] for e in ev)
+        freqs = '、'.join(f"{e['freq_hz']:.0f}Hz" for e in ev[:3])
+        issues.append({
+            'kind': 'prompt_tone', 'severity': 'info',
+            'message': (f"检测到呼叫提示音 {tones['prompt_count']} 处"
+                        f"（{freqs}，最长 {longest:.1f} 秒，电平约 "
+                        f"{ev[0]['mean_dbfs']} dBFS）——回铃音/忙音类单频"
+                        f"流程音，属正常呼叫信号，不是啸叫")})
     if tones['howl_count']:
         ev = [e for e in tones['events'] if e['band'] == 'howl']
         longest = max(e['end_s'] - e['start_s'] for e in ev)
@@ -478,6 +670,23 @@ def _audio_issues(r: dict) -> list:
             'kind': 'noise', 'severity': 'warning' if nf > -40 else 'info',
             'message': (f"静音段底噪约 {nf} dBFS，偏高——对方环境噪声或拾音"
                         f"设备底噪会一直传过来，听感为持续的沙沙/电流声")})
+    if r.get('duration_s', 0) >= 10 and r.get('speech_level_dbfs') is None:
+        # 剔除提示音/单频音后没有任何有人声的帧：该方向全程没有有效人声
+        # 内容（典型：只听到一声回铃音之后就再无声音的"单通"）
+        steady = r.get('steady_level_dbfs')
+        if steady is not None:
+            # 有持续背景电平但无说话起伏：设备把供电干扰/环境噪声整通
+            # 发了过来，人声采集/编码链路实际没有工作
+            detail = (f"有持续背景电平（约 {steady} dBFS，疑似供电干扰/"
+                      f"环境噪声），但没有说话的音节起伏")
+        else:
+            detail = (f"除提示音/单频音外基本为静音，底噪约 "
+                      f"{nf if nf is not None else '—'} dBFS")
+        issues.append({
+            'kind': 'no_speech', 'severity': 'warning',
+            'message': (f"媒体时长 {r['duration_s']:.0f} 秒，全程未检测到话音"
+                        f"（{detail}）——发声端没有把有效人声内容送出来，"
+                        f"听感为只有提示音/持续噪声/完全无声")})
     sl = r['speech_level_dbfs']
     if sl is not None and sl < SPEECH_LOW_DBFS:
         issues.append({

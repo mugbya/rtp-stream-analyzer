@@ -385,11 +385,12 @@ function renderDelayChains(dc) {
 
 // ====== 流质量速览（并入声音/视频问题分类区块）======
 // 原独立"音画质量分析"块与问题分类展示的是同一批检测结论，已并入避免重复。
-// 音画质量专用徽章（音频 clean/noisy/bad，视频 ok/risk/bad）
+// 音画质量专用徽章（音频 clean/noisy/bad/silent，视频 ok/risk/bad）
 const QUALITY_BADGES = {
     clean: ['success', '干净'],
     noisy: ['warning', '有杂音'],
     bad: ['danger', '异常'],
+    silent: ['danger', '无人声'],
     ok: ['success', '无花屏风险'],
     risk: ['warning', '花屏风险'],
 };
@@ -401,6 +402,7 @@ function _audioQualityChips(q) {
     }
     const chips = [];
     if (q.tones?.howl_count) chips.push(`啸叫/单频音 ${q.tones.howl_count} 处`);
+    if (q.tones?.prompt_count) chips.push(`提示音 ${q.tones.prompt_count} 处`);
     if (q.tones?.hum_count) chips.push(`低频嗡声 ${q.tones.hum_count} 处`);
     if (q.clipping?.run_count) chips.push(`削波 ${q.clipping.run_count} 处`);
     if (q.clicks?.count) chips.push(`爆点 ${q.clicks.count} 个`);

@@ -14,6 +14,10 @@
 期间不发包，按包数统计会把"只有说话时才发包"误判成一直有人声；按时间戳
 推进的媒体时间统计（未发包的缺口=静音）才能还原真实的人声占比。
 
+"有人声"还要排除稳态单频音（回铃音/忙音/提示音）：一声 450Hz 回铃音
+能量再大也不是人声，不能把"只响了一声嘟之后全程静音"的流撑过门限
+判成"有人声"——这正是单通抓包里最常见的形态。
+
 方向诊断按抓包角色锚定（terminal=主叫端、seat=坐席端、fs=FS），不依赖
 SIP 也能工作；有信令时用主叫/被叫 IP 从 FS 抓包补选流。每条腿在"源端
 抓包 → 下一跳抓包"两个点上检查流的存在性，并用能量画像判定该方向
@@ -22,13 +26,16 @@ SIP 也能工作；有信令时用主叫/被叫 IP 从 FS 抓包补选流。每�
 import math
 
 import audioop
+import numpy as np
 
+from analyzer.quality_analyzer import FRAME, _voice_mask, tone_intervals
 from analyzer.stream_classifier import get_pt_name, pick_call_stream
 from analyzer.ts_continuity import signed32
 
 # 判定"有人声"的单包 RMS 门限（16bit 线性 PCM，≈ -36 dBFS）。
 # G.711 静音帧解码后 RMS≈0，室内噪声通常 <300，正常说话 >1000
 ACTIVE_RMS = 500
+SAMPLE_RATE = 8000         # G.711 采样率（与 quality_analyzer 一致）
 # 有声媒体时间占比低于此值视为"基本没人说话"（全程静音=0）
 SILENT_RATIO = 0.02
 # 单个时间戳缺口最多计入的静音媒体时间（秒）：时间戳重置不当作超长静音
@@ -47,9 +54,15 @@ def analyze_silence(packets: dict, ssrc: int) -> dict:
             'packet_count': int,
             'codec': str,                 # 解码用编码名
             'decodable': bool,            # 仅 PCMU/PCMA 可解
-            'active_ratio': float,        # 有声媒体时间占比（含 DTX 缺口）
+            'active_ratio': float,        # 有声媒体时间占比（含 DTX 缺口，
+                                          # 已剔除提示音/单频音段）
             'speech_ms': float,           # 有声媒体时间
             'media_ms': float,            # 有声+静音媒体时间（不含重置缺口）
+            'tone_ms': float,             # 稳态单频音（提示音等）媒体时间
+            'speech_activity': bool|None, # 活跃段包络起伏像人声？
+                                          # False=只有平稳背景电平（无话音）
+            'steady_energy_ms': float,    # 仅 speech_activity=False 时有：
+            'steady_dbfs': float,         #   背景电平时长与电平值
             'zero_packets': int,          # 解码后全零的包（数字静音）
             'active_packets': int,
             'mean_active_dbfs': float|None,  # 有人声的包平均电平
@@ -63,7 +76,7 @@ def analyze_silence(packets: dict, ssrc: int) -> dict:
     result = {
         'packet_count': 0, 'codec': 'unknown', 'decodable': False,
         'active_ratio': 0.0, 'speech_ms': 0.0, 'media_ms': 0.0,
-        'zero_packets': 0, 'active_packets': 0,
+        'tone_ms': 0.0, 'zero_packets': 0, 'active_packets': 0,
         'mean_active_dbfs': None, 'peak_dbfs': None, 'first_active_s': None,
         'spans': [], 'span_count': 0, 'verdict': 'unknown',
     }
@@ -93,46 +106,126 @@ def analyze_silence(packets: dict, ssrc: int) -> dict:
     if not (0 < spp <= 8000 // 2):
         spp = 160
 
-    active_rms_vals = []
+    # —— 第一遍：逐包解码取能量，并按媒体时间拼接 PCM（DTX 缺口补零，
+    # 与真实播放时间对齐），供稳态单频音（提示音）剔除做帧级检测 ——
+    pkt_t, pkt_ts, pkt_rms = [], [], []
+    media_pos = []                  # 每包在媒体时间轴上的起始样本位置
+    pcm = []
+    pos = 0
+    prev_ts = None
     peak = 0
-    speech_samples = 0
-    silent_samples = 0
-    first_active = None
-    spans = []      # [start_t, end_t, active]
-
-    for i, seq in enumerate(seqs):
+    zero_packets = 0
+    for seq in seqs:
         t, ts, p = stream[seq][0], stream[seq][1], stream[seq][2]
-        # 未发包的媒体缺口（DTX/静音抑制）= 静音时间；时间戳重置跳过
+        if prev_ts is not None:
+            gap = signed32(ts - prev_ts) - spp
+            if 0 < gap <= MAX_GAP_S * 8000:
+                pos += gap
+                pcm.append(np.zeros(gap, dtype=np.float64))
+        prev_ts = ts
+        media_pos.append(pos)
+        if p != pt:
+            # 非主 PT（如 CN 舒适噪声 PT 13）：按一包静音计
+            pkt_rms.append(0)
+            pcm.append(np.zeros(spp, dtype=np.float64))
+        else:
+            lin = decode(stream[seq][7], 2)
+            rms = audioop.rms(lin, 2)
+            peak = max(peak, rms)
+            if rms == 0:
+                zero_packets += 1
+            pkt_rms.append(rms)
+            pcm.append(np.frombuffer(lin, dtype=np.int16).astype(np.float64))
+        pkt_t.append(t)
+        pkt_ts.append(ts)
+        pos += spp
+
+    # —— 提示音剔除：稳态单频段（回铃音/忙音/啸叫/嗡声）不是人声 ——
+    # 一声 450Hz 回铃音能量再大也不能把"之后全程静音"的流判成有人声
+    tone_iv = []
+    try:
+        x_all = np.concatenate(pcm) if pcm else np.zeros(0)
+        tone_iv = tone_intervals(x_all)
+    except Exception:
+        tone_iv = []
+
+    def _tone_overlap(i: int) -> int:
+        """第 i 包与单频音段重叠的样本数（段边缘留一个 FFT 帧余量）。"""
+        s, e = media_pos[i], media_pos[i] + spp
+        ov = 0
+        for a, b in tone_iv:                  # 已按起始时间排序
+            # 事件时间是帧中心时间（有 ±半帧量化误差），加上帧窗口本身
+            # 覆盖信号起振的模糊，余量取一个整帧
+            lo = int(a * SAMPLE_RATE) - FRAME
+            hi = int(b * SAMPLE_RATE) + FRAME
+            if hi <= s:
+                continue
+            if lo >= e:
+                break
+            ov += min(hi, e) - max(lo, s)
+        return ov
+
+    is_active = [rms >= ACTIVE_RMS and _tone_overlap(i) < spp / 4
+                 for i, rms in enumerate(pkt_rms)]
+
+    # —— 语音活动判定：有能量 ≠ 有人声 ——
+    # 设备故障时会把持续背景电平（供电干扰/环境噪声）整通发过来，包
+    # 能量同样过门限，"有声占比"会虚高。_voice_mask 在活跃包里分出
+    # 人声：整体起伏像人声就全算；整体平则只保留明显高于背景电平的
+    # 突发段（"背景音里的人声时刻"），其余记为背景电平时间
+    act_pos = [i for i, act in enumerate(is_active) if act]
+    vmask = _voice_mask([pkt_rms[i] for i in act_pos])
+    steady_ms = steady_dbfs = None
+    if vmask is None:
+        speech_activity = None
+    elif not vmask.any():
+        # 活跃能量全是平稳背景电平：不计入人声时间
+        speech_activity = False
+        steady_ms = round(len(act_pos) * spp / 8000 * 1000, 1)
+        steady_dbfs = round(_dbfs(sum(pkt_rms[i] for i in act_pos)
+                                  / max(len(act_pos), 1)), 1)
+        is_active = [False] * len(pkt_rms)
+    else:
+        speech_activity = True
+        keep = {act_pos[j] for j in range(len(vmask)) if vmask[j]}
+        idle = [i for i in act_pos if i not in keep]
+        if idle:
+            steady_ms = round(len(idle) * spp / 8000 * 1000, 1)
+            steady_dbfs = round(_dbfs(sum(pkt_rms[i] for i in idle)
+                                      / len(idle)), 1)
+        is_active = [i in keep for i in range(len(pkt_rms))]
+
+    # —— 第二遍：按剔除后的判定累计媒体时间与区间 ——
+    speech_samples = silent_samples = 0
+    spans = []
+    first_active = None
+    active_rms_vals = []
+    for i in range(len(pkt_ts)):
         if i:
-            gap = signed32(ts - ts_list[i - 1]) - spp
+            gap = signed32(pkt_ts[i] - pkt_ts[i - 1]) - spp
             if 0 < gap <= MAX_GAP_S * 8000:
                 silent_samples += gap
 
-        if p != pt:
-            # 非主 PT（如 CN 舒适噪声 PT 13）：按一包静音计
-            is_active = False
-        else:
-            rms = audioop.rms(decode(stream[seq][7], 2), 2)
-            is_active = rms >= ACTIVE_RMS
-            peak = max(peak, rms)
-            if is_active:
-                active_rms_vals.append(rms)
-                if first_active is None:
-                    first_active = t
-            elif rms == 0:
-                result['zero_packets'] += 1
-
-        if is_active:
+        if is_active[i]:
             speech_samples += spp
-            result['active_packets'] += 1
+            active_rms_vals.append(pkt_rms[i])
+            if first_active is None:
+                first_active = pkt_t[i]
         else:
             silent_samples += spp
 
-        if spans and spans[-1][2] == is_active:
-            spans[-1][1] = t
+        if spans and spans[-1][2] == is_active[i]:
+            spans[-1][1] = pkt_t[i]
         else:
-            spans.append([t, t, is_active])
+            spans.append([pkt_t[i], pkt_t[i], is_active[i]])
 
+    result['zero_packets'] = zero_packets
+    result['active_packets'] = sum(is_active)
+    result['tone_ms'] = round(sum(b - a for a, b in tone_iv) * 1000, 1)
+    result['speech_activity'] = speech_activity
+    if steady_ms is not None:
+        result['steady_energy_ms'] = steady_ms
+        result['steady_dbfs'] = steady_dbfs
     total = speech_samples + silent_samples
     result['speech_ms'] = round(speech_samples / 8000 * 1000, 1)
     result['media_ms'] = round(total / 8000 * 1000, 1)
@@ -387,16 +480,24 @@ def _judge_leg(leg_name, src_ssrc, src_at, dst_ssrc, dst_at,
     def _desc(entry):
         p = entry['profile']
         role = _ROLE_DISPLAY.get(entry['role'], entry['role'])
+        tone = (f"，其中 {p['tone_ms'] / 1000:.1f}s 为提示音/单频音已剔除"
+                if p.get('tone_ms') else '')
+        steady = (f"；另有持续背景电平（约 {p['steady_dbfs']} dBFS，无说话"
+                  f"起伏，疑似供电干扰/环境噪声）"
+                  if p.get('steady_energy_ms') else '')
         if p['verdict'] == 'silent':
-            return (f"{role}侧实测全程无人声（有声占比 {p['active_ratio']:.1%}，"
-                    f"{p['zero_packets']} 包为数字零）")
+            zero = f"，{p['zero_packets']} 包为数字零" if p['zero_packets'] \
+                else ''
+            return (f"{role}侧实测全程无人声（有声占比 {p['active_ratio']:.1%}"
+                    f"{zero}{tone}{steady}）")
         if p['verdict'] == 'sparse':
             return (f"{role}侧仅 {p['active_ratio']:.1%} 时间有人声"
-                    f"（{p['speech_ms'] / 1000:.1f}s/{p['media_ms'] / 1000:.0f}s）")
+                    f"（{p['speech_ms'] / 1000:.1f}s/{p['media_ms'] / 1000:.0f}s"
+                    f"{tone}{steady}）")
         if p['verdict'] == 'unknown':
             return f"{role}侧编码不可解（{p['codec']}），无法判定能量"
         return (f"{role}侧实测有人声（占比 {p['active_ratio']:.1%}，"
-                f"均值 {p['mean_active_dbfs']} dBFS）")
+                f"均值 {p['mean_active_dbfs']} dBFS{tone}{steady}）")
 
     for entry in (src_p, next_p):
         # 某侧抓包缺该流/画像为空时 entry 为 None，只描述存在的一侧

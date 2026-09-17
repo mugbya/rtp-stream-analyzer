@@ -67,6 +67,9 @@ _KIND_TO_PROBLEM = {
     'noise': 'noise_floor',
     'low_level': 'low_volume',
     'high_level': 'high_volume',
+    # 全程未检测到话音（除提示音外基本静音）→ 无声/单通
+    'no_speech': 'one_way_audio',
+    # prompt_tone（回铃音/忙音类提示音）是正常呼叫信号，不进问题分类
     # rtp_order 拆到 clock_anomaly / dup_audio，按 rtp_integrity 字段区分
     # rtp_ok 是正常项，不进分类
 }

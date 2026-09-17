@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import audioop
+import numpy as np
 
 from analyzer.silence_analyzer import analyze_silence, diagnose_audio
 from analyzer.rtcp_parser import parse_rtcp, summarize_rtcp
@@ -34,9 +35,19 @@ def make_packets(ssrc, items):
     return packets
 
 
+# 默认电平：音节级起伏的话音样式（每 5 包=100ms 换一档）。
+# 恒定电平会被语音活动判定归为"持续背景电平"（平稳包络不是人声），
+# 构造"有人声"的用例必须带起伏。
+VOICE_BLOCKS = (13000, 2500, 11000, 2000, 9000, 3000)
+
+
+def _voice_levels(n):
+    return [VOICE_BLOCKS[i // 5 % len(VOICE_BLOCKS)] for i in range(n)]
+
+
 def ulaw_items(n=100, levels=None, pt=0, ts0=1000, spp=160):
     if levels is None:
-        levels = [8000] * n
+        levels = _voice_levels(n)
     items, ts = [], ts0
     for i in range(n):
         items.append((i, ts, pt, audioop.lin2ulaw(_frag(levels[i]), 2)))
@@ -71,7 +82,7 @@ def test_analyze_silence_digital_silence():
 
 def test_analyze_silence_dtx_gap_counts_as_silent_media_time():
     """DTX 缺口：未发包的 1 秒计入静音媒体时间（时间加权而非包数加权）。"""
-    levels = [8000] * 50 + [0] * 50
+    levels = _voice_levels(50) + [0] * 50
     items, ts = [], 1000
     for i in range(100):
         if i == 50:
@@ -84,6 +95,60 @@ def test_analyze_silence_dtx_gap_counts_as_silent_media_time():
     assert abs(r['media_ms'] - 3000.0) < 1, r   # 100 包×20ms + 1000ms DTX
     assert abs(r['active_ratio'] - 1000.0 / 3000.0) < 0.01, r
     print("PASS: analyze_silence DTX gap = silent media time")
+
+
+def test_analyze_silence_prompt_tone_excluded():
+    """开头 1.5s 的 450Hz 回铃音 + 之后全程静音：提示音不算人声，
+    verdict silent，tone_ms 记录提示音时长——"一声嘟后无声"别判成有人声。"""
+    sr = 8000
+    t = np.arange(int(1.5 * sr)) / sr
+    tone = (6000 * np.sin(2 * np.pi * 450 * t)).astype(np.int16)
+    items, ts = [], 1000
+    for i in range(0, len(tone) - 160 + 1, 160):
+        items.append((len(items), ts, 0,
+                      audioop.lin2ulaw(tone[i:i + 160].tobytes(), 2)))
+        ts += 160
+    # seq 接着提示音包继续编（同流 seq 重复会被当作同一个包覆盖掉）
+    items += [(len(items) + i, zts, pt, payload)
+              for i, (_, zts, pt, payload) in enumerate(
+                  ulaw_items(n=925, levels=[0] * 925, ts0=ts))]
+    r = analyze_silence(make_packets(A, items), A)
+    assert r['verdict'] == 'silent', r
+    assert r['active_ratio'] == 0.0, r
+    assert r['tone_ms'] >= 1200, r
+    assert r['first_active_s'] is None, r
+    print("PASS: analyze_silence prompt tone excluded from voice time")
+
+
+def test_analyze_silence_steady_energy_not_voice():
+    """持续背景电平（供电干扰/环境噪声）不是人声：判 silent 并记录电平。
+
+    设备故障时会把平稳电平整通发过来，包能量过门限但包络无起伏——
+    不能因为"有声占比高"就判成有人声（qigndao2 主叫上行 78% 有声实为
+    50Hz 工频嗡声+底噪）。"""
+    r = analyze_silence(make_packets(A, ulaw_items(levels=[8000] * 100)), A)
+    assert r['verdict'] == 'silent' and r['speech_activity'] is False, r
+    assert r['active_ratio'] == 0.0 and r['first_active_s'] is None, r
+    assert r['steady_energy_ms'] == 2000.0, r
+    assert abs(r['steady_dbfs'] + 12.2) < 1, r   # 8000 → 约 -12.2 dBFS
+    print("PASS: analyze_silence steady background level is not voice")
+
+
+def test_analyze_silence_voice_inside_background():
+    """背景电平之上的人声时刻必须检出，不能整段吞成背景电平。
+
+    对应真实抓包形态（qigndao2 FS→被叫）：工频嗡声/底噪垫底，中间
+    短暂出现过人声——整段包络 cv 不高，但突发明显高于背景电平。"""
+    levels = [600] * 1500
+    for a in (200, 700):                    # 两次 240ms 的人声突发（2~3×背景）
+        for j in range(12):
+            levels[a + j] = 1800 if j % 2 else 1200
+    r = analyze_silence(make_packets(A, ulaw_items(n=1500, levels=levels)), A)
+    assert r['speech_activity'] is True, r
+    assert r['verdict'] == 'sparse' and r['speech_ms'] >= 300, r
+    assert r['steady_energy_ms'] >= 3000, r     # 其余活跃时间是背景电平
+    assert r['first_active_s'] is not None, r
+    print("PASS: analyze_silence voice moments inside background detected")
 
 
 def test_analyze_silence_undecodable():
@@ -145,8 +210,12 @@ def test_summarize_rtcp_latest_stats_and_reporters():
 # ---------- 无声诊断 ----------
 
 def _diag_captures(b_stream_level=0):
-    """FS 场景：A=主叫上行、B=FS→坐席（电平可设）、C=坐席上行、D=FS→主叫。"""
-    b_items = ulaw_items(levels=[b_stream_level] * 100)
+    """FS 场景：A=主叫上行、B=FS→坐席（电平可设）、C=坐席上行、D=FS→主叫。
+
+    b_stream_level=0 → 数字静音；>0 → 话音样式（平稳电平会被语音活动
+    判定归为背景电平，不能代表"有人声"）。"""
+    b_items = ulaw_items(levels=_voice_levels(100) if b_stream_level
+                         else [0] * 100)
     term_cap = {'_role': 'terminal',
                 'streams': {**stream_meta(A, 100, CALLER, SRV),
                             **stream_meta(D, 100, SRV, CALLER)}}
@@ -422,6 +491,9 @@ if __name__ == '__main__':
     test_analyze_silence_normal()
     test_analyze_silence_digital_silence()
     test_analyze_silence_dtx_gap_counts_as_silent_media_time()
+    test_analyze_silence_prompt_tone_excluded()
+    test_analyze_silence_steady_energy_not_voice()
+    test_analyze_silence_voice_inside_background()
     test_analyze_silence_undecodable()
     test_parse_rtcp_sr_rr()
     test_summarize_rtcp_latest_stats_and_reporters()
