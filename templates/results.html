@@ -553,24 +553,23 @@ function _buildDirGroups(labels, report, kind, p2p) {
     return groups;
 }
 
-// 一条流的问题列表：严重（critical）与 P0（摘要点名的"最需要先处理"，
-// 如全程无人声的单通）展开直出，注意/提示级收进折叠区
+// 严重（critical/P0）问题：用于流卡片顶部标红提示"这条流有问题"，
+// 问题详情本身一律默认收起，用户点开再逐条看
 const _isSevere = p => p.severity === 'critical' || p.priority === 'P0';
 
+// 一条流的问题列表：顶部只留质量结论徽章，具体的问题分析（分类/证据/
+// 排查方向）内容较长，全部收进折叠区，点击展开后按优先级排序展示
 function _problemList(problems, feelNoun) {
     if (!problems || !problems.length) return '';
-    const severe = problems.filter(_isSevere);
-    const minor = problems.filter(p => !_isSevere(p));
-    let html = '';
-    severe.forEach(p => { html += _problemCard(p, feelNoun); });
-    if (minor.length) {
-        const label = (severe.length ? '另有 ' : '') +
-            `${minor.length} 条注意/提示级问题（点开展开查看）`;
-        html += `<details class="mt-1">` +
-                `<summary class="small text-muted user-select-none">${label}</summary>` +
-                `<div class="mt-2">${minor.map(p => _problemCard(p, feelNoun)).join('')}</div></details>`;
-    }
-    return html;
+    const ordered = [...problems].sort((a, b) =>
+        String(a.priority || 'P9').localeCompare(String(b.priority || 'P9')));
+    const severeN = ordered.filter(_isSevere).length;
+    const label = `共 ${ordered.length} 条问题分析` +
+        (severeN ? `（其中 ${severeN} 条严重）` : '') +
+        '（点开展开查看）';
+    return `<details class="mt-1">` +
+            `<summary class="small text-muted user-select-none">${label}</summary>` +
+            `<div class="mt-2">${ordered.map(p => _problemCard(p, feelNoun)).join('')}</div></details>`;
 }
 
 const STREAM_ROLE_BADGE = {
