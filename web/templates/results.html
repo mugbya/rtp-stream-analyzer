@@ -21,6 +21,9 @@
             <!-- 多通通话切换提示（检测到 ≥2 通时显示） -->
             <div id="call-switch-banner" class="d-none mb-4"></div>
 
+            <!-- 追加分析提示（会话里还有未分析的媒体类型时显示） -->
+            <div id="media-switch-banner" class="d-none mb-4"></div>
+
             <!-- 摘要卡片 -->
             <div class="row g-3 mb-4" id="summary-cards"></div>
 
@@ -66,6 +69,8 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(data => {
             if (data.results) {
                 showResults(data.results);
+                // 追加分析提示：会话里还有本次没分析的媒体类型时展示切换按钮
+                renderMediaSwitcher(data, data.results);
                 if (data.calls && data.calls.length) {
                     buildIpRoleMap(data.files || [], data.server_ip);
                     renderCalls(data.calls, data.capture_warning, data.files || []);
@@ -1462,6 +1467,86 @@ function switchCall(callId, mediaType, direction) {
         .catch(err => {
             switchingCall = false;
             alert('切换通话失败：' + err.message);
+        });
+}
+
+// ====== 追加分析（媒体范围切换） ======
+// 结果页只展示本次 /api/analyze 所选 media_type 范围的结果。会话里还有
+// 本次没分析的媒体流时，顶部给出切换按钮：用同一份上传的抓包重新分析
+// （保持通话/方向不变），无需回首页重新上传。
+// 推荐项是"音频+视频一起分析"（media_type=all，两种结果同页都有），
+// 另给一个"只看另一种媒体"的精简选项；当前已是全范围时无需展示。
+let switchingMedia = false;
+let currentMediaType = null;
+let currentDirection = 'auto';
+let currentCallId = null;
+
+function renderMediaSwitcher(data, results) {
+    const hasAudio = (data.audio_streams || 0) > 0;
+    const hasVideo = (data.video_streams || 0) > 0;
+    if (!hasAudio || !hasVideo) return;   // 会话里只有一种媒体，没什么可追加
+
+    currentMediaType = (results && results.media_type) || 'audio';
+    currentDirection = (results && results.direction) || 'auto';
+    currentCallId = (results && results.call_id) || null;
+    if (currentMediaType === 'all') return;   // 音频+视频都已分析
+
+    const curTxt = currentMediaType === 'audio' ? '音频' : '视频';
+    const other = currentMediaType === 'audio' ? 'video' : 'audio';
+    const otherTxt = currentMediaType === 'audio' ? '视频' : '音频';
+    const btn = (mt, label, icon, cls, title) =>
+        `<button type="button" class="btn btn-sm ${cls}" ${switchingMedia ? 'disabled' : ''}
+            onclick="switchMediaType('${mt}')" title="${title}">
+            <i class="bi ${icon}"></i> ${label}
+        </button>`;
+    const banner = document.getElementById('media-switch-banner');
+    banner.classList.remove('d-none');
+    banner.innerHTML = `
+        <div class="alert alert-info mb-0">
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                <strong><i class="bi bi-plus-circle me-1"></i>追加分析</strong>
+                <span class="small">本次分析的是<strong>${curTxt}</strong>，检测到同一份抓包里还有${otherTxt}流，可直接补充分析（无需重新上传）：</span>
+                ${btn('all', `音频 + ${otherTxt}一起分析`, 'bi-collection-play',
+                      'btn-primary',
+                      `重新分析音频和视频，两种结果在同一页展示`)}
+                ${btn(other, `改为只分析${otherTxt}`, 'bi-arrow-repeat',
+                      'btn-outline-primary',
+                      `重新分析，只展示${otherTxt}的结果`)}
+            </div>
+            <div class="small text-muted mt-1${switchingMedia ? '' : ' d-none'}" id="media-switch-status"></div>
+        </div>`;
+}
+
+function switchMediaType(mediaType) {
+    if (switchingMedia || switchingCall) return;
+    switchingMedia = true;
+    // 禁掉两个横幅的所有按钮，避免分析进行中又触发切换
+    document.querySelectorAll('#media-switch-banner button, #call-switch-banner button')
+        .forEach(b => b.disabled = true);
+    const status = document.getElementById('media-switch-status');
+    if (status) {
+        status.classList.remove('d-none');
+        status.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>' +
+            '正在分析中，媒体重建可能需要一些时间，完成后自动刷新页面…';
+    }
+    fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            session_id: SESSION_ID,
+            direction: currentDirection,
+            media_type: mediaType,
+            call_id: currentCallId,
+        }),
+    })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(() => location.reload())
+        .catch(err => {
+            switchingMedia = false;
+            if (status) status.textContent = '';
+            document.querySelectorAll('#media-switch-banner button')
+                .forEach(b => b.disabled = false);
+            alert('追加分析失败：' + err.message);
         });
 }
 
