@@ -1019,6 +1019,9 @@ function renderRtcp(rtcp) {
 
 // ====== 音视频回放展示 ======
 const ROLE_NAMES = { seat: '被叫端（坐席）', fs: '服务端（FS）', terminal: '主叫端（终端）' };
+// 回放卡片的抓包来源名：三份抓包都传时同一条流会在每份抓包里各重建一段，
+// 卡片必须标明音/视频取自哪份抓包，听感对比时才能对号入座
+const CAPTURE_SOURCE_NAMES = { terminal: '主叫侧抓包', fs: '服务端抓包', seat: '被叫侧抓包' };
 const DIR_NAMES = { inbound: '呼入（接收）', outbound: '呼出（发送）', unknown: '方向未知' };
 const DIR_BADGE = { inbound: 'bg-info', outbound: 'bg-success', unknown: 'bg-secondary' };
 
@@ -1617,7 +1620,7 @@ function showMedia(manifest, report) {
         html += `<div class="mb-3 small d-flex flex-wrap align-items-center gap-1">` +
             `<i class="bi bi-diagram-3 text-primary"></i>` +
             parties.map(p => _partyChainHtml(p, _mediaP2p(report))).join('<span class="text-muted mx-1">；</span>') +
-            `<span class="text-muted ms-1">—— 每条媒体流的收发双方标注在各流开头</span></div>`;
+            `<span class="text-muted ms-1">—— 每条媒体流的收发双方与抓包来源标注在各流开头；同一方向内先列服务端抓包的段，其余按三段式链路顺序排列</span></div>`;
     }
     // 音频/视频各一个子区块：按链路方向分组（点对点时组头链路无 FS），
     // 每个播放器卡片下面直接挂该流的质量结论与问题——听音频时即可对号入座
@@ -1643,6 +1646,27 @@ function showMedia(manifest, report) {
                             ((a.speaker || '').startsWith('主叫') ? 1 : 0));
         const others = groups.filter(g => !(g.label && !g.rest && !g.fsRelay));
         const renderGroups = [...chain, ...others];
+        // 同一方向卡内播放卡片的排序：服务端抓包的段全部最前，其余按三段式
+        // 链路位置排——上游腿（说话方 → 服务端）在前、下游腿（服务端 → 收听方）
+        // 在后。抓包点角色对上本卡的说话方即上游腿（如 主叫侧抓包的主叫→FS、
+        // 被叫侧抓包的被叫→FS），对上收听方即下游腿；服务端抓包收（上游）在
+        // 前、发（下游）在后
+        const capSrcRank = lb => ((byLabel[lb] || {}).role === 'fs' ? 0 : 1);
+        const _legRank = (lb, g) => {
+            const e = byLabel[lb] || {};
+            if (e.role === 'fs') return e.direction === 'outbound' ? 1 : 0;
+            const roleOf = { terminal: '主叫', seat: '被叫' }[e.role];
+            if (roleOf && roleOf === g.speaker) return 0;
+            if (roleOf && roleOf === g.listener) return 1;
+            return e.direction === 'inbound' ? 1 : 0;   // 角色未知：发送端视为上游腿
+        };
+        renderGroups.forEach(g => {
+            g.labels = [...g.labels].sort((a, b) =>
+                (capSrcRank(a) - capSrcRank(b)) ||
+                (_legRank(a, g) - _legRank(b, g)) ||
+                String((byLabel[a] || {}).ssrc || '')
+                    .localeCompare(String((byLabel[b] || {}).ssrc || '')));
+        });
         const globalProblems = pc ? _attributeProblems(pc, renderGroups) : [];
 
         html += `<h6 class="mt-3 mb-2"><i class="bi ${meta.icon} text-primary"></i> ${meta.title}` +
@@ -1732,6 +1756,12 @@ function _mediaItem(entry, kind, q, problems, feelNoun, serverIp) {
         else if (serverIp && ti === serverIp) leg = `${_shortParty(entry.flow.from.label)} → 服务端`;
         else leg = `${_shortParty(entry.flow.from.label)} → ${_shortParty(entry.flow.to.label)}`;
         head += `<span class="badge bg-light text-dark border me-1">${_esc(leg)}</span>`;
+    }
+    // 抓包来源：这段音/视频从哪份上传的抓包里重建（同一条流多份抓包各出一段）
+    if (entry.role) {
+        const srcName = CAPTURE_SOURCE_NAMES[entry.role] || `${entry.role} 抓包`;
+        head += `<span class="badge bg-info-subtle text-info-emphasis border border-info-subtle me-1"` +
+            ` title="此音/视频从该份上传的抓包中重建">来源：${_esc(srcName)}</span>`;
     }
     // 质量结论徽章跟在头部，一眼可见这条流有没有问题
     let verdictBadge = '';
