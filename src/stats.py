@@ -57,27 +57,28 @@ def client_ip(request):
 
 
 def lookup_region(ip):
-    """IP → (省, 市)。解析失败/内网地址返回 ('未知', '')。"""
+    """IP → (国家, 省, 市)。解析失败/内网地址返回 ('未知', '', '')。"""
     if not ip or not _load_xdb():
-        return '未知', ''
+        return '未知', '', ''
     # 内网/回环/保留地址不在库里，直接标注，避免落成误导性的"未知"
     if (ip.startswith('127.') or ip.startswith('10.') or
             ip.startswith('192.168.') or ip.startswith('169.254.')):
-        return '内网/本地', ''
+        return '内网/本地', '', ''
     m = re.match(r'^172\.(1[6-9]|2\d|3[01])\.', ip)
     if m or ip.startswith('fc') or ip.startswith('fd') or ip.startswith('fe80'):
-        return '内网/本地', ''
+        return '内网/本地', '', ''
     try:
         s = xdb_searcher.new_with_buffer(xdb_util.IPv4, _xdb_buffer)
         # v4 库字段：国家|省份|城市|运营商|国家码，"0" 表示缺省
         parts = s.search(ip).split('|')
+        country = parts[0] if parts and parts[0] != '0' else ''
         province = parts[1] if len(parts) > 1 and parts[1] != '0' else ''
         city = parts[2] if len(parts) > 2 and parts[2] != '0' else ''
         if province == 'Reserved':
-            return '内网/本地', ''
-        return province or '未知', city
+            return '内网/本地', '', ''
+        return country or '未知', province, city
     except Exception:
-        return '未知', ''
+        return '未知', '', ''
 
 
 def ensure_visitor_id(request):
@@ -133,6 +134,7 @@ def _init_db():
                 day TEXT NOT NULL,
                 vid TEXT NOT NULL,
                 ip TEXT DEFAULT '',
+                country TEXT DEFAULT '',
                 province TEXT DEFAULT '',
                 city TEXT DEFAULT '',
                 path TEXT DEFAULT '',
@@ -145,6 +147,7 @@ def _init_db():
                 day TEXT NOT NULL,
                 vid TEXT NOT NULL,
                 ip TEXT DEFAULT '',
+                country TEXT DEFAULT '',
                 province TEXT DEFAULT '',
                 city TEXT DEFAULT '',
                 session_id TEXT DEFAULT '',
@@ -164,6 +167,9 @@ def _migrate():
             if 'domain' not in cols:
                 conn.execute(
                     f'ALTER TABLE {table} ADD COLUMN domain TEXT DEFAULT ""')
+            if 'country' not in cols:
+                conn.execute(
+                    f'ALTER TABLE {table} ADD COLUMN country TEXT DEFAULT ""')
 
 
 _init_db()
@@ -177,29 +183,29 @@ def request_domain(request):
 
 def record_visit(vid, ip, path, domain=''):
     try:
-        province, city = lookup_region(ip)
+        country, province, city = lookup_region(ip)
         now = time.time()
         with _connect() as conn:
             conn.execute(
-                'INSERT INTO visits (ts, day, vid, ip, province, city, '
-                'path, domain) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO visits (ts, day, vid, ip, country, province, '
+                'city, path, domain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (int(now), time.strftime('%Y-%m-%d', time.localtime(now)),
-                 vid, ip, province, city, path, domain or ''))
+                 vid, ip, country, province, city, path, domain or ''))
     except Exception:
         pass  # 统计是旁路功能，任何失败都不影响主流程
 
 
 def record_analysis(vid, ip, session_id, media_type, call_id, domain=''):
     try:
-        province, city = lookup_region(ip)
+        country, province, city = lookup_region(ip)
         now = time.time()
         with _connect() as conn:
             conn.execute(
-                'INSERT INTO analyses (ts, day, vid, ip, province, city, '
-                'session_id, media_type, call_id, domain) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO analyses (ts, day, vid, ip, country, province, '
+                'city, session_id, media_type, call_id, domain) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (int(now), time.strftime('%Y-%m-%d', time.localtime(now)),
-                 vid, ip, province, city, session_id or '',
+                 vid, ip, country, province, city, session_id or '',
                  media_type or '', str(call_id or ''), domain or ''))
     except Exception:
         pass
@@ -258,17 +264,18 @@ def query_daily(days=30):
 
 
 def query_regions(limit=50):
-    """地域分布：省 → 市，各自的访客数、浏览量、分析次数。"""
+    """地域分布：国家 → 省 → 市，各自的访客数、浏览量、分析次数。"""
     return _q('''
-        SELECT v.province, v.city, v.uv, v.pv,
+        SELECT v.country, v.province, v.city, v.uv, v.pv,
                COALESCE(a.cnt, 0) AS analyses
-        FROM (SELECT province, city,
+        FROM (SELECT country, province, city,
                      COUNT(DISTINCT vid) AS uv, COUNT(*) AS pv
-              FROM visits WHERE province != ''
-              GROUP BY province, city ORDER BY pv DESC LIMIT ?) v
-        LEFT JOIN (SELECT province, city, COUNT(*) AS cnt
-                   FROM analyses GROUP BY province, city) a
-          ON a.province = v.province AND a.city = v.city
+              FROM visits WHERE province != '' OR country != ''
+              GROUP BY country, province, city ORDER BY pv DESC LIMIT ?) v
+        LEFT JOIN (SELECT country, province, city, COUNT(*) AS cnt
+                   FROM analyses GROUP BY country, province, city) a
+          ON a.country = v.country AND a.province = v.province
+         AND a.city = v.city
     ''', (limit,))
 
 
@@ -288,11 +295,18 @@ def query_domains(limit=10):
     ''', (limit,))
 
 
+def _region_label(r):
+    """国家 / 省 / 市拼接成展示串，缺省段跳过。"""
+    return ' / '.join(x for x in (r['country'], r['province'], r['city'])
+                      if x) or '—'
+
+
 def query_recent_visits(limit=50):
     rows = _q('SELECT * FROM visits ORDER BY id DESC LIMIT ?', (limit,))
     for r in rows:
         r['ip_masked'] = _mask_ip(r['ip'])
         r['time'] = time.strftime('%m-%d %H:%M:%S', time.localtime(r['ts']))
+        r['region'] = _region_label(r)
     return rows
 
 
@@ -301,4 +315,5 @@ def query_recent_analyses(limit=50):
     for r in rows:
         r['ip_masked'] = _mask_ip(r['ip'])
         r['time'] = time.strftime('%m-%d %H:%M:%S', time.localtime(r['ts']))
+        r['region'] = _region_label(r)
     return rows
