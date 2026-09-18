@@ -189,8 +189,19 @@ def identify_direction(stream_info: dict, server_ip: str = None) -> str:
     return 'unknown'
 
 
-def detect_server_ip(all_streams: dict) -> str:
-    """自动检测服务器 IP（通常是 SIP 5060 端口 + 多 RTP 流）。
+def detect_server_ip(all_streams: dict, sip_events: list = None) -> str:
+    """自动检测服务器 IP（通常是 FS 端）。
+
+    主判定：各 IP 在 RTP 端口对里的出现次数，服务器转发所有流必然最多。
+    单侧抓包（只传终端或坐席的 pcap）时所有端点出现次数必然打平，数不出
+    服务器——此时用 SIP INVITE 的 Via 头数消歧：
+    - 只有 1 条 Via：INVITE 是主叫终端自发 → 服务器是 INVITE 的目标；
+    - 有 ≥2 条 Via：INVITE 经 FS 转发而来（抓包点在被叫侧）→ 服务器是
+      INVITE 的来源。
+
+    Args:
+        all_streams: {ssrc: {port_pairs, ...}}，全部抓包的 RTP 流。
+        sip_events: 各抓包的 SIP 事件（含 via_count），无信令时为空。
 
     Returns:
         推测的服务器 IP，或 None
@@ -203,10 +214,23 @@ def detect_server_ip(all_streams: dict) -> str:
             ip_connections[src_ip] = ip_connections.get(src_ip, 0) + 1
             ip_connections[dst_ip] = ip_connections.get(dst_ip, 0) + 1
 
-    # 连接数最多的 IP 可能是服务器
-    if ip_connections:
-        return max(ip_connections, key=ip_connections.get)
-    return None
+    if not ip_connections:
+        return None
+
+    # 连接数最多的 IP 可能是服务器；唯一最大值时直接采用
+    ranked = sorted(ip_connections.items(), key=lambda kv: kv[1], reverse=True)
+    if len(ranked) == 1 or ranked[0][1] > ranked[1][1]:
+        return ranked[0][0]
+
+    # 打平（单侧抓包的典型形态）：信令消歧，只在候选 IP 命中时采用
+    inv = next((ev for ev in sip_events or []
+                if ev.get('method') == 'INVITE'), None)
+    if inv is not None and inv.get('via_count'):
+        via = inv['via_count']
+        candidate = inv.get('dst') if via == 1 else inv.get('src')
+        if candidate in ip_connections:
+            return candidate
+    return ranked[0][0]
 
 
 def pick_call_stream(cap: dict, call_ssrcs, src_is=None, dst_is=None):

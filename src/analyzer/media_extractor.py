@@ -815,6 +815,7 @@ def extract_call_parties(call: dict, server_ip: str = None) -> dict:
         if peers:
             answerer_ip = max(peers, key=peers.get)
     answerer_ident = {}
+    answerer_relayed = False
     if answerer_ip:
         # 呼向被叫的 INVITE 的 To；抓不到时退回 200 OK 的 To（回显同一头）
         inv_to = next((m for m in flow if m['method'] == 'INVITE'
@@ -824,9 +825,20 @@ def extract_call_parties(call: dict, server_ip: str = None) -> dict:
             inv_to = next((m for m in flow if m.get('dst') == answerer_ip
                            and _ident_label(m.get('to') or {})), None)
         answerer_ident = (inv_to.get('to') if inv_to else None) or (ok.get('to') or {})
+    elif caller_ip is not None:
+        # 被叫端不在抓包里（终端/坐席单侧抓包，媒体经服务器转发）：取主叫
+        # INVITE 的 To 头拿到被叫身份，媒体标注成"被叫 xxx（经FS）"——
+        # 否则回放里那半边链路只能显示 FS，看不出听的是谁的声音
+        inv_to = next((m for m in flow if m['method'] == 'INVITE'
+                       and m.get('src') == caller_ip
+                       and _ident_label(m.get('to') or {})), None)
+        if inv_to:
+            answerer_ident = inv_to.get('to') or {}
+            answerer_relayed = bool(_ident_label(answerer_ident))
 
     return {'caller_ip': caller_ip, 'caller_ident': caller_ident,
-            'answerer_ip': answerer_ip, 'answerer_ident': answerer_ident}
+            'answerer_ip': answerer_ip, 'answerer_ident': answerer_ident,
+            'answerer_relayed': answerer_relayed}
 
 
 def _party_label(ip: str, parties: dict, server_ip: str, role_names: dict) -> str:
@@ -838,6 +850,10 @@ def _party_label(ip: str, parties: dict, server_ip: str, role_names: dict) -> st
         if ip and ip == parties.get('answerer_ip'):
             ident = _ident_label(parties.get('answerer_ident'))
             return f'被叫 {ident}' if ident else '被叫'
+        if server_ip and ip == server_ip and parties.get('answerer_relayed'):
+            # 被叫端不在抓包里：FS 一侧的媒体实际是"被叫的声音经 FS 转发"
+            ident = _ident_label(parties.get('answerer_ident'))
+            return f'被叫 {ident}（经FS）' if ident else '被叫（经FS）'
     if server_ip and ip == server_ip:
         return 'FS'
     if ip in role_names:
@@ -846,14 +862,30 @@ def _party_label(ip: str, parties: dict, server_ip: str, role_names: dict) -> st
 
 
 def _party_chain(parties: dict, server_ip: str):
-    """通话拓扑行：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），无信令时为 None。"""
+    """通话拓扑行：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），无信令时为 None。
+
+    被叫端不在抓包里（单侧抓包经 FS 转发）时照样给出被叫称呼（来自主叫
+    INVITE 的 To 头），ip 为 None——拓扑行由前端补上 FS 徽章。
+    """
     if not parties or not (parties.get('caller_ip') or parties.get('answerer_ip')):
         return None
     label = lambda ip: _party_label(ip, parties, server_ip, {})
-    caller = ({'label': label(parties['caller_ip']), 'ip': parties['caller_ip']}
-              if parties.get('caller_ip') else None)
-    answerer = ({'label': label(parties['answerer_ip']), 'ip': parties['answerer_ip']}
-                if parties.get('answerer_ip') else None)
+    if parties.get('caller_ip'):
+        # 主叫端不在抓包里（坐席单侧抓包，INVITE 由 FS 转发，caller_ip 记在
+        # FS 上）：拓扑行不显示 FS 的 IP，只显示主叫身份
+        c_ip = None if (server_ip and parties['caller_ip'] == server_ip) \
+            else parties['caller_ip']
+        caller = {'label': label(parties['caller_ip']), 'ip': c_ip}
+    else:
+        caller = None
+    if parties.get('answerer_ip'):
+        answerer = {'label': label(parties['answerer_ip']),
+                    'ip': parties['answerer_ip']}
+    elif parties.get('answerer_relayed'):
+        ident = _ident_label(parties.get('answerer_ident'))
+        answerer = {'label': f'被叫 {ident}' if ident else '被叫', 'ip': None}
+    else:
+        answerer = None
     return {'caller': caller, 'answerer': answerer, 'server_ip': server_ip}
 
 
@@ -936,8 +968,12 @@ def describe_media_parties(manifest: dict, captures: dict, calls: list,
             chain = _party_chain(_parties(call_of_ssrc.get(ssrc)), server_ip)
             if not chain:
                 continue
-            key = (chain['caller']['ip'] if chain['caller'] else None,
-                   chain['answerer']['ip'] if chain['answerer'] else None)
+            # 去重键用称呼+IP：单侧抓包里不在场的一端 ip 为 None，
+            # 只按 IP 会把不同通话的拓扑误并成一条
+            key = ((chain['caller']['label'], chain['caller']['ip'])
+                   if chain['caller'] else (None, None),
+                   (chain['answerer']['label'], chain['answerer']['ip'])
+                   if chain['answerer'] else (None, None))
             if key not in seen:
                 seen.add(key)
                 chains.append(chain)

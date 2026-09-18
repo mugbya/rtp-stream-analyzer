@@ -228,8 +228,10 @@ def upload_files():
                 'integrity': rtp_data['integrity'],
             })
 
-    # 自动检测服务器 IP
-    server_ip = detect_server_ip(all_streams)
+    # 自动检测服务器 IP（单侧抓包打平时用 SIP INVITE 的 Via 数消歧）
+    all_sip_events = [ev for rd in rtp_captures.values()
+                      for ev in rd.get('sip_events') or []]
+    server_ip = detect_server_ip(all_streams, all_sip_events)
 
     # 通话检测：将流按通话分组并评估每通的抓包完整性
     calls = detect_calls(rtp_captures, server_ip)

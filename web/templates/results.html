@@ -39,7 +39,7 @@
                 </div>
                 <div class="card-body">
                     <p class="text-muted small mb-3">
-                        从 RTP 流重建的音频/视频，按链路方向分组（点对点通话链路里没有 FS）。
+                        从 RTP 流重建的音频/视频，按链路方向分组（点对点通话媒体不经服务端）。
                         每条流的<strong>质量结论与问题</strong>直接挂在对应播放器下面：严重的默认展开，注意/提示级点击展开。
                     </p>
                     <div id="media-container"></div>
@@ -114,11 +114,11 @@ function showResults(results) {
     }[summary.overall] || ['bi-x-octagon', '异常', 'danger'];
     cards.innerHTML =
         (summary.fs_delay_mean != null
-            ? statCard('bi-speedometer2', 'FS 内部延迟',
+            ? statCard('bi-speedometer2', '服务端内部延迟',
                        `${summary.fs_delay_mean.toFixed(1)}<span class="stat-unit">ms</span>`,
                        `P95 ${summary.fs_delay_p95.toFixed(1)}ms`, 'primary')
-            : statCard('bi-speedometer2', 'FS 内部延迟', '未测量',
-                       summary.delay_checked === false ? '未勾选延迟分析' : '缺少 FS 端抓包',
+            : statCard('bi-speedometer2', '服务端内部延迟', '未测量',
+                       summary.delay_checked === false ? '未勾选延迟分析' : '缺少服务端抓包',
                        'secondary')) +
         statCard('bi-activity', '抖动流数', summary.jitter_streams, '已分析', 'success') +
         statCard(summary.packet_loss_clean ? 'bi-shield-check' : 'bi-shield-x',
@@ -142,7 +142,7 @@ function showResults(results) {
         let html = '';
         
         if (report.delay && report.delay.fs_internal && report.delay.fs_internal.available) {
-            html += '<h6>FS 内部处理延迟</h6>';
+            html += '<h6>服务端内部处理延迟</h6>';
             const d = report.delay.fs_internal;
             const cells = [
                 ['均值', d.mean], ['P50', d.p50], ['P95', d.p95], ['P99', d.p99],
@@ -174,7 +174,7 @@ function showResults(results) {
 
         if (report.conclusion) {
             html += '<h6>结论</h6>';
-            html += `<p><strong>${report.conclusion.root_cause}</strong></p>`;
+            html += `<p><strong>${_esc(report.conclusion.root_cause)}</strong></p>`;
             if (report.conclusion.issues && report.conclusion.issues.length > 0) {
                 html += '<ul class="list-group mb-3">';
                 report.conclusion.issues.forEach(i => {
@@ -335,7 +335,7 @@ function renderAudioHealth(h, merged) {
     }
     // 点对点通话链路里没有 FS，方向头与腿名都不再带 FS
     const p2p = h.p2p || _p2pFallback(h.directions);
-    html += `<p class="small text-muted mb-2">按方向逐腿检查"${p2p ? '发声端 → 听者' : '发声端 → FS → 听者'}"：流是否发出、是否到达、内容是否有人声，用于定位"没听到声音"。</p>`;
+    html += `<p class="small text-muted mb-2">按方向逐腿检查"${p2p ? '发声端 → 听者' : '发声端 → 服务端 → 听者'}"：流是否发出、是否到达、内容是否有人声，用于定位"没听到声音"。</p>`;
     h.directions.forEach(d => {
         html += `<div class="border rounded p-2 mb-2">` +
             `<div class="d-flex flex-wrap align-items-center gap-2">` +
@@ -398,7 +398,7 @@ function renderDelayChains(dc, merged) {
     // 点对点通话链路只有一段网络路径，方向头不带 FS
     const p2p = dc.p2p || (dc.directions || []).some(d =>
         (d.segments || []).some(s => (s.name || '').includes('直连')));
-    html += `<p class="small text-muted mb-2">把每个方向拆成 ${p2p ? '发声端 → 听者 一段' : '发声端→FS、FS 内部、FS→听者 三段'}测量。` +
+    html += `<p class="small text-muted mb-2">把每个方向拆成 ${p2p ? '发声端 → 听者 一段' : '发声端→服务端、服务端内部、服务端→听者 三段'}测量。` +
         `跨抓包段包含抓包机时钟差，绝对值仅供参考；两段往返之和可抵消时钟差。</p>`;
     dc.directions.forEach(d => {
         html += `<div class="border rounded p-2 mb-2">` +
@@ -499,7 +499,7 @@ function _chainNodeBadge(name) {
 function _chainHtml(speaker, listener, p2p) {
     const arrow = '<i class="bi bi-arrow-right text-muted mx-1"></i>';
     let html = _chainNodeBadge(speaker || '主叫');
-    if (!p2p) html += arrow + '<span class="badge bg-dark">FS</span>';
+    if (!p2p) html += arrow + '<span class="badge bg-dark">服务端</span>';
     html += arrow + _chainNodeBadge(listener || '被叫');
     return `<span class="chain-line d-inline-flex align-items-center flex-wrap">${html}</span>`;
 }
@@ -512,7 +512,8 @@ function _p2pFallback(directions) {
 
 // 流展示标签形如 "seat (SSRC=0x00ff2b3a)"，解析角色与 SSRC
 function _parseStreamLabel(label) {
-    const m = /^(terminal|seat|fs)\s*\(SSRC=0x([0-9a-fA-F]+)\)/.exec(label || '');
+    // 角色随抓包点不同：端点抓包是 caller/callee，FS 抓包是 fs；旧数据是 terminal/seat
+    const m = /^(terminal|seat|fs|caller|callee)\s*\(SSRC=0x([0-9a-fA-F]+)\)/.exec(label || '');
     return m ? { role: m[1], ssrc: '0x' + m[2].toLowerCase().padStart(8, '0') }
              : { role: null, ssrc: null };
 }
@@ -529,6 +530,35 @@ function _dirSsrcs(ahDir, dcDir) {
     ((ahDir && ahDir.legs) || []).forEach(l => grab(l.ssrc));
     ((dcDir && dcDir.segments) || []).forEach(s => grab(s.ssrc));
     return set;
+}
+
+// 从腿名取实际链路："主叫上行（主叫 → FS）" → "主叫 → FS"
+function _legChainName(legName) {
+    const m = /[（(](.+?)[）)]/.exec(legName || '');
+    return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+}
+
+// 方向组只匹配到一条腿（单侧抓包只见半程）时，返回该腿的实际链路描述
+// （如"主叫 → FS"），调用方据此把链路头从完整"主叫 → FS → 被叫"改成
+// 实际观测到的半程；整条方向都有流匹配时返回 null。legs 是无声诊断的腿
+// （leg 名带括号链路，ssrc 可能是 '0xA → 0xB' 跨段形态）
+function _singleLegChain(legs, glSsrcs) {
+    const hit = l => l.ssrc && String(l.ssrc).toLowerCase().split('→')
+        .some(x => glSsrcs.has(x.trim()));
+    const hits = (legs || []).filter(hit);
+    if ((legs || []).length < 2 || hits.length !== 1) return null;
+    return _legChainName(hits[0].leg);
+}
+
+// 延迟链路版：段名本身就是链路（"主叫 → FS"），FS 内部段不算腿
+function _singleLegChainFromSegments(segs, glSsrcs) {
+    const hit = s => s.ssrc && String(s.ssrc).toLowerCase().split('→')
+        .some(x => glSsrcs.has(x.trim()));
+    const isLeg = s => (s.name || '').includes('→') && !(s.name || '').includes('内部');
+    const legs = (segs || []).filter(isLeg);
+    const hits = legs.filter(hit);
+    if (legs.length < 2 || hits.length !== 1) return null;
+    return hits[0].name;
 }
 
 // 组装链路方向分组。audio 优先以无声诊断的方向为准（缺失时退回延迟链路
@@ -564,25 +594,43 @@ function _buildDirGroups(labels, report, kind, p2p, flowOf, serverIp) {
         ahDirs.forEach(d => {
             const dc = dcDirs.find(x => x.label === d.label);
             const gl = takeBySsrc(_dirSsrcs(d, dc));
-            if (gl.length) {
+            if (!gl.length) {
+                pendingVerdicts.push({ label: d.label, speaker: d.speaker, listener: d.listener,
+                                       verdict: d.verdict, verdictText: d.verdict_text, ah: d, dc });
+                return;
+            }
+            const glSsrcs = new Set(gl.map(lb => _parseStreamLabel(lb).ssrc).filter(Boolean));
+            const legChain = _singleLegChain(d.legs, glSsrcs);
+            if (legChain) {
+                // 半程卡：只抓到这条腿，头就标实际的"谁 → 谁"（如 主叫 → FS），
+                // 方向级结论是针对完整链路的，不再挂上来（明细仍在折叠区）
+                const [spk, lst] = legChain.split('→').map(s => s.trim());
+                groups.push({ label: legChain, speaker: spk, listener: lst,
+                              legOnly: true, p2p: true, ah: d, dc, labels: gl });
+            } else {
                 groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
                               verdict: d.verdict, verdictText: d.verdict_text, p2p,
                               ah: d, dc, labels: gl });
-            } else {
-                pendingVerdicts.push({ label: d.label, speaker: d.speaker, listener: d.listener,
-                                       verdict: d.verdict, verdictText: d.verdict_text, ah: d, dc });
             }
         });
     } else if (dcDirs.length) {
         dcDirs.forEach(d => {
             const gl = takeBySsrc(_dirSsrcs(null, d));
-            if (gl.length) {
+            if (!gl.length) {
+                pendingVerdicts.push({ label: d.label, speaker: d.speaker, listener: d.listener,
+                                       verdict: d.verdict, verdictText: d.verdict_text, dc: d });
+                return;
+            }
+            const glSsrcs = new Set(gl.map(lb => _parseStreamLabel(lb).ssrc).filter(Boolean));
+            const legChain = _singleLegChainFromSegments(d.segments, glSsrcs);
+            if (legChain) {
+                const [spk, lst] = legChain.split('→').map(s => s.trim());
+                groups.push({ label: legChain, speaker: spk, listener: lst,
+                              legOnly: true, p2p: true, dc: d, labels: gl });
+            } else {
                 groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
                               verdict: d.verdict, verdictText: d.verdict_text, p2p,
                               dc: d, labels: gl });
-            } else {
-                pendingVerdicts.push({ label: d.label, speaker: d.speaker, listener: d.listener,
-                                       verdict: d.verdict, verdictText: d.verdict_text, dc: d });
             }
         });
     }
@@ -599,7 +647,9 @@ function _buildDirGroups(labels, report, kind, p2p, flowOf, serverIp) {
 
     // 还剩的流按角色前缀归组
     [{ role: 'terminal', speaker: '主叫', listener: '被叫' },
-     { role: 'seat', speaker: '被叫', listener: '主叫' }].forEach(rg => {
+     { role: 'seat', speaker: '被叫', listener: '主叫' },
+     { role: 'caller', speaker: '主叫', listener: '被叫' },
+     { role: 'callee', speaker: '被叫', listener: '主叫' }].forEach(rg => {
         const gl = labels.filter(lb => !used.has(lb) &&
             _parseStreamLabel(lb).role === rg.role);
         gl.forEach(lb => used.add(lb));
@@ -618,7 +668,7 @@ function _buildDirGroups(labels, report, kind, p2p, flowOf, serverIp) {
     // 方向级检测没匹配到流的结论：挂到同"谁到谁"的组头上（无声诊断正常/
     // 异常的判定仍然可见），找不到同方向宿主组就丢弃，绝不再出空卡
     pendingVerdicts.forEach(pv => {
-        const host = groups.find(g => !g.rest && !g.fsRelay &&
+        const host = groups.find(g => !g.rest && !g.fsRelay && !g.legOnly &&
             ((g.speaker === pv.speaker && g.listener === pv.listener) ||
              g.label === pv.label));
         if (host && !host.verdict) {
@@ -685,6 +735,21 @@ function _flowDirGroups(candidates, flowOf, p2p, serverIp) {
                     label: `${nameOf(spk)} → ${nameOf(lst)}`,
                     speaker: nameOf(spk), listener: nameOf(lst), p2p, labels: gl });
             });
+        } else if (endpoints.length === 1) {
+            // 单侧抓包只见"本端 ↔ FS"半程（对端不在抓包里）：每条腿单独成卡，
+            // 卡头就是实际观测到的收发双方（本端 → FS / FS → 本端），
+            // 只抓到一条腿时就出一张卡——不能宣称看不到的那半程
+            const e = endpoints[0];
+            items_.forEach(it => {
+                if (it.taken) return;
+                const fromFs = it.flow.from.ip === fs;
+                const spk = fromFs ? 'FS' : (nameOf(e) || '主叫');
+                const lst = fromFs ? (nameOf(e) || '主叫') : 'FS';
+                const gl = take(x => x.flow.from.ip === it.flow.from.ip &&
+                                     x.flow.to.ip === it.flow.to.ip);
+                if (gl.length) groups.push({ label: `${spk} → ${lst}`,
+                    speaker: spk, listener: lst, p2p: true, legOnly: true, labels: gl });
+            });
         }
     }
     // 识别不出两端拓扑（多点会议 / 单侧抓包只见半程）：每条腿单独成组
@@ -720,7 +785,7 @@ function _problemList(problems, feelNoun) {
 const STREAM_ROLE_BADGE = {
     terminal: ['bg-primary', '主叫端'],
     seat: ['bg-success', '被叫端'],
-    fs: ['bg-dark', 'FS 端'],
+    fs: ['bg-dark', '服务端（FS）'],
 };
 
 // 流卡片：角色 + SSRC + 质量结论徽章 + 关键指标 chips + 挂在本流下的问题
@@ -795,7 +860,7 @@ function _dirGroupHead(g, mq, kind, feelNoun) {
             '<span class="text-muted small">（未能归入链路方向）</span>';
     } else if (g.fsRelay) {
         html += _chainHtml(g.speaker || '主叫', g.listener || '被叫', false) +
-            '<span class="text-muted small">（FS 转发流，方向无法判定）</span>';
+            '<span class="text-muted small">（服务端转发流，方向无法判定）</span>';
     } else {
         html += _chainHtml(g.speaker, g.listener, g.p2p);
         if (g.verdict) html += _healthBadge(g.verdict);
@@ -952,7 +1017,7 @@ function renderRtcp(rtcp) {
 }
 
 // ====== 音视频回放展示 ======
-const ROLE_NAMES = { seat: '被叫端（坐席）', fs: 'FS 服务器端', terminal: '主叫端（终端）' };
+const ROLE_NAMES = { seat: '被叫端（坐席）', fs: '服务端（FS）', terminal: '主叫端（终端）' };
 const DIR_NAMES = { inbound: '呼入（接收）', outbound: '呼出（发送）', unknown: '方向未知' };
 const DIR_BADGE = { inbound: 'bg-info', outbound: 'bg-success', unknown: 'bg-secondary' };
 
@@ -973,8 +1038,12 @@ function callLabel(callId) {
 }
 
 // From/To 显示名/分机号是抓包里的自由文本，插入 innerHTML 前需转义
+// 展示术语：服务端不绑定具体实现（FS/FreeSWITCH 只是其中一种），
+// 界面统一说"服务端"；后端返回的腿名/段名/说明里出现 FS 也在这里转掉
+const _svcTerm = s => String(s).replace(/(?<![A-Za-z0-9])FS(?![A-Za-z0-9])/g, '服务端');
+
 function _esc(s) {
-    return String(s).replace(/[&<>"']/g,
+    return _svcTerm(s).replace(/[&<>"']/g,
         c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
@@ -1087,7 +1156,7 @@ function _sipLadder(flow, call) {
     cols.forEach(ip => {
         let name, ipSub = '';
         if (ip === server) {
-            name = 'FS 服务器';
+            name = '服务端（FS）';
             ipSub = ip;
         } else {
             const label = _esc(_identLabel(idents[ip]));
@@ -1236,11 +1305,11 @@ function _sipLadder(flow, call) {
         const fm = call.fs_media;
         if (fm && fm.verdict) {
             const meta = {
-                transcode: {cls: 'bg-danger', label: 'FS 参与转码'},
-                same: {cls: 'bg-success', label: 'FS 未转码'},
-                bypass: {cls: 'bg-info text-dark', label: '媒体不经 FS'},
+                transcode: {cls: 'bg-danger', label: '服务端参与转码（FS）'},
+                same: {cls: 'bg-success', label: '服务端未转码'},
+                bypass: {cls: 'bg-info text-dark', label: '媒体不经服务端'},
                 unknown: {cls: 'bg-light text-dark', label: '无法判定'},
-            }[fm.verdict] || {cls: 'bg-light text-dark', label: 'FS 媒体处理'};
+            }[fm.verdict] || {cls: 'bg-light text-dark', label: '服务端媒体处理'};
             inserts.push({anchor: si, prio: 1, html:
                 `<span class="badge ${meta.cls} me-1"><i class="bi bi-cpu"></i> ${meta.label}</span>` +
                 `<span class="small${fm.verdict === 'unknown' ? ' text-muted' : ''}">${_esc(fm.text || '')}</span>`});
@@ -1265,7 +1334,7 @@ function _callPartyChain(flow) {
     };
     const arrow = '<i class="bi bi-arrow-right text-muted"></i>';
     let html = seg('主叫', 'bg-primary', caller, idents[caller]);
-    if (server) html += arrow + '<span class="badge bg-dark">FS</span>';
+    if (server) html += arrow + '<span class="badge bg-dark">服务端</span>';
     if (answerer) html += arrow + seg('被叫', 'bg-success', answerer, idents[answerer]);
     return `<span class="d-inline-flex align-items-center gap-1 flex-wrap small">${html}</span>`;
 }
@@ -1344,8 +1413,8 @@ function renderCallSwitcher(calls, currentCallId, results) {
         const dis = cur || switchingCall ? 'disabled' : '';
         const title = `${c.start_str} ~ ${c.end_str} · ${c.stream_count} 条流`;
         const fmBadge = {
-            transcode: '<span class="badge bg-danger ms-1"><i class="bi bi-shuffle"></i> FS 转码</span>',
-            same: '<span class="badge bg-success ms-1"><i class="bi bi-check2-circle"></i> FS 未转码</span>',
+            transcode: '<span class="badge bg-danger ms-1"><i class="bi bi-shuffle"></i> 服务端转码（FS）</span>',
+            same: '<span class="badge bg-success ms-1"><i class="bi bi-check2-circle"></i> 服务端未转码</span>',
         }[c.fs_media?.verdict] || '';
         return `<button type="button" class="btn btn-sm ${cls}" ${dis}
                     onclick="switchCall('${c.call_id}', '${mediaType}', '${direction}')"
@@ -1395,8 +1464,8 @@ function renderCalls(calls, captureWarning) {
     // FS 参与编解码判定的卡片徽章（后端 fs_media.verdict）：bypass 已由「点对
     // 点直连」表达，unknown 数据不足不给徽章（阶梯图里有灰字说明）
     const FS_MEDIA_BADGES = {
-        transcode: '<span class="badge bg-danger"><i class="bi bi-shuffle"></i> FS 转码</span>',
-        same: '<span class="badge bg-success"><i class="bi bi-check2-circle"></i> FS 未转码</span>',
+        transcode: '<span class="badge bg-danger"><i class="bi bi-shuffle"></i> 服务端转码（FS）</span>',
+        same: '<span class="badge bg-success"><i class="bi bi-check2-circle"></i> 服务端未转码</span>',
     };
     // 折叠标题里的协商编码摘要：优先按腿展示（主叫 … / 被叫 …），与阶梯图的
     // 两行协商行、FS 转码判定一一对应；旧会话数据没有 per-leg 字段时回退为
@@ -1423,8 +1492,8 @@ function renderCalls(calls, captureWarning) {
         const flow = c.sip_flow || [];
         // 摘要行给出两腿各自协商的编码与 FS 媒体处理判定，不用展开
         const negTxt = legNegotiationSummary(c);
-        const fmShort = {transcode: 'FS 转码', same: 'FS 未转码',
-                         bypass: '媒体不经 FS'}[c.fs_media?.verdict] || '';
+        const fmShort = {transcode: '服务端转码', same: '服务端未转码',
+                         bypass: '媒体不经服务端'}[c.fs_media?.verdict] || '';
 
         let reasons = '';
         for (const [role, pf] of Object.entries(c.completeness.per_file || {})) {
@@ -1552,7 +1621,7 @@ function showMedia(manifest, report) {
             if (g.labels.length) {
                 html += '<div class="row g-2 mt-1">' + g.labels.map(lb =>
                     _mediaItem(byLabel[lb], kind, mq[lb] || {},
-                               (g.streamProblems || {})[lb], meta.feelNoun, !!g.label)
+                               (g.streamProblems || {})[lb], meta.feelNoun, serverIp)
                 ).join('') + '</div>';
             }
             // 音频方向卡尾部：无声诊断逐腿检查 / 分段延迟明细（原来是与卡头
@@ -1590,15 +1659,15 @@ function showMedia(manifest, report) {
     return true;
 }
 
-// 通话拓扑链：主叫 ↔ FS ↔ 被叫（各端称呼 + IP），来自后端 SIP 信令识别；
-// 媒体点对点（p2p）时中间的 FS 不展示——信令虽经 FS，媒体却是两端直连
+// 通话拓扑链：主叫 ↔ 服务端 ↔ 被叫（各端称呼 + IP），来自后端 SIP 信令识别；
+// 媒体点对点（p2p）时中间的服务端不展示——信令虽经服务端，媒体却是两端直连
 function _partyChainHtml(p, p2p) {
     const seg = s => s ? `<strong>${_esc(s.label || '')}</strong>` +
         (s.ip ? `<span class="text-muted ms-1">${s.ip}</span>` : '') : '';
     const arrow = p2p
         ? ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> `
         : ` <i class="bi bi-arrow-left-right text-muted mx-1"></i> ` +
-          `<span class="badge bg-dark">FS</span>` +
+          `<span class="badge bg-dark">服务端</span>` +
           (p.server_ip ? `<span class="text-muted ms-1">${p.server_ip}</span>` : '');
     let html = seg(p.caller);
     html += arrow;
@@ -1610,19 +1679,21 @@ function _partyChainHtml(p, p2p) {
 
 // 回放卡片：播放器在上，下面直接挂该流的质量结论徽章、关键指标与问题——
 // 听音频/看画面时即可对号入座；有严重问题时卡片左侧红线强调
-function _mediaItem(entry, kind, q, problems, feelNoun, hideFlow) {
+function _mediaItem(entry, kind, q, problems, feelNoun, serverIp) {
     const dirName = DIR_NAMES[entry.direction] || entry.direction;
     const dirBadge = DIR_BADGE[entry.direction] || 'bg-secondary';
     const dur = entry.duration_ms ? (entry.duration_ms / 1000).toFixed(1) + 's' : '';
 
-    // 谁到谁：发送方 → 接收方。流已归入"谁到谁"方向卡时链路头已说明，
-    // 不再重复，只留 上行/下行 徽章区分两条腿
+    // 每条流统一标两段式实际流向："主叫 → 服务端" / "服务端 → 被叫"，
+    // 点对点或拓扑对不上时退回收发双方角色（"主叫 → 被叫"）
     let head = `<span class="badge ${dirBadge} me-1">${dirName}</span>`;
-    if (entry.flow && !hideFlow) {
-        const side = s => `<strong>${_esc(s.label || '')}</strong>` +
-            (s.ip && s.label !== s.ip ? `<span class="text-muted small ms-1">${s.ip}</span>` : '');
-        head += side(entry.flow.from) +
-            ` <i class="bi bi-arrow-right text-muted mx-1"></i> ` + side(entry.flow.to) + ' ';
+    if (entry.flow && entry.flow.from && entry.flow.to) {
+        const fi = entry.flow.from.ip, ti = entry.flow.to.ip;
+        let leg;
+        if (serverIp && fi === serverIp) leg = `服务端 → ${_shortParty(entry.flow.to.label)}`;
+        else if (serverIp && ti === serverIp) leg = `${_shortParty(entry.flow.from.label)} → 服务端`;
+        else leg = `${_shortParty(entry.flow.from.label)} → ${_shortParty(entry.flow.to.label)}`;
+        head += `<span class="badge bg-light text-dark border me-1">${_esc(leg)}</span>`;
     }
     // 质量结论徽章跟在头部，一眼可见这条流有没有问题
     let verdictBadge = '';

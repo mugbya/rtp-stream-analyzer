@@ -240,7 +240,8 @@ def test_extract_call_parties_fallbacks():
     # 完全无信令
     empty = extract_call_parties({'sip_flow': []}, SERVER)
     assert empty == {'caller_ip': None, 'caller_ident': {},
-                     'answerer_ip': None, 'answerer_ident': {}}
+                     'answerer_ip': None, 'answerer_ident': {},
+                     'answerer_relayed': False}
     print("PASS: party extraction fallbacks")
 
 
@@ -276,6 +277,71 @@ def test_unanswered_call_callee_fallback():
     print("PASS: unanswered call keeps callee via peer fallback; relayed caller kept verbatim")
 
 
+def test_single_endpoint_capture_relayed_labels():
+    """单侧抓包（对端不在场）：server 用 Via 数消歧，FS 一侧的媒体标注
+    "被叫 xxx（经FS）"，拓扑行照常给出主叫 ↔ FS ↔ 被叫。"""
+    from analyzer.stream_classifier import detect_server_ip
+
+    # 终端侧抓包：上下行两条流，终端与 FS 出现次数必然打平
+    streams = {
+        0x11111111: {'port_pairs': [{(TERM, 10000, SERVER, 20000)}]},
+        0x22222222: {'port_pairs': [{(SERVER, 20000, TERM, 10000)}]},
+    }
+    all_streams = {}
+    for ssrc, info in streams.items():
+        pps = set()
+        for pp_set in info['port_pairs']:
+            pps |= pp_set
+        all_streams[ssrc] = {'port_pairs': pps}
+
+    # 无信令：打平回退首个 IP（保持旧行为）
+    assert detect_server_ip(all_streams, []) in (TERM, SERVER)
+
+    # 终端自发的 INVITE（1 条 Via）→ 服务器是 INVITE 的目标（FS）
+    sip_term = [{'method': 'INVITE', 'src': TERM, 'dst': SERVER, 'via_count': 1}]
+    assert detect_server_ip(all_streams, sip_term) == SERVER
+
+    # FS 转发的 INVITE（2 条 Via）→ 服务器是 INVITE 的来源（FS）
+    sip_relayed = [{'method': 'INVITE', 'src': SERVER, 'dst': SEAT, 'via_count': 2}]
+    assert detect_server_ip(all_streams, sip_relayed) == SERVER
+
+    # 被叫端不在场：主叫 INVITE 的 To 头给出被叫身份，FS 侧标"被叫（经FS）"
+    flow = [
+        {'method': 'INVITE', 'kind': 'request', 'src': TERM, 'dst': SERVER,
+         'from': CALLER_IDENT, 'to': CALLEE_IDENT},
+        {'method': '200', 'kind': 'success', 'cseq_method': 'INVITE',
+         'src': SERVER, 'dst': TERM, 'from': CALLER_IDENT, 'to': CALLEE_IDENT},
+    ]
+    parties = extract_call_parties({'sip_flow': flow}, SERVER)
+    assert parties['caller_ip'] == TERM
+    assert parties['answerer_ip'] is None
+    assert parties['answerer_relayed'] is True
+    assert parties['answerer_ident'] == CALLEE_IDENT
+
+    manifest = {'audio': [
+        {'role': 'terminal', 'ssrc': '0x11111111'},
+        {'role': 'terminal', 'ssrc': '0x22222222'},
+    ]}
+    captures = {'terminal': {'streams': {
+        0x11111111: {'port_pairs': [(TERM, 10000, SERVER, 20000)]},
+        0x22222222: {'port_pairs': [(SERVER, 20000, TERM, 10000)]},
+    }}}
+    calls = [{'call_id': 'c1', 'ssrcs': [0x11111111, 0x22222222],
+              'sip_flow': flow}]
+    describe_media_parties(manifest, captures, calls, SERVER)
+    up, down = manifest['audio']
+    assert up['flow']['to']['label'] == '被叫 李四（1002）（经FS）'
+    assert up['flow']['from']['label'] == '主叫 张三（1001）'
+    assert down['flow']['from']['label'] == '被叫 李四（1002）（经FS）'
+    # 拓扑行：被叫端不在场也给出被叫称呼（ip 为 None，前端补 FS 徽章）
+    chain = manifest['parties'][0]
+    assert chain['caller']['label'] == '主叫 张三（1001）'
+    assert chain['answerer']['label'] == '被叫 李四（1002）'
+    assert chain['answerer']['ip'] is None
+    print("PASS: single-endpoint capture resolves server via Via count; "
+          "relayed callee labeled 经FS")
+
+
 if __name__ == '__main__':
     test_fs_streams_labeled_with_caller_callee()
     test_endpoint_captures_share_ssrc_labels()
@@ -285,4 +351,5 @@ if __name__ == '__main__':
     test_ident_label_format()
     test_extract_call_parties_fallbacks()
     test_unanswered_call_callee_fallback()
+    test_single_endpoint_capture_relayed_labels()
     print("\n=== ALL MEDIA PARTY LABEL TESTS PASSED ===")

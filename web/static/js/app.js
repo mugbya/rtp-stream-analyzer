@@ -15,7 +15,7 @@ let integrityConfirmed = false;
 let pendingCallIdOverride = null;   // 弹窗确认期间暂存的通话切换参数
 
 // ====== 展示常量 ======
-const ROLE_NAMES = { seat: '被叫端（坐席）', fs: 'FS 服务器端', terminal: '主叫端（终端）' };
+const ROLE_NAMES = { seat: '被叫端（坐席）', fs: '服务端（FS）', terminal: '主叫端（终端）' };
 
 // 通话完整性状态：完整=绿 / 缺头/缺尾=黄 / 首尾都不完整=红
 const CALL_STATUS = {
@@ -202,8 +202,8 @@ function showDetectionResults(data) {
 // FS 参与编解码判定的卡片徽章（后端 fs_media.verdict）：bypass 已由「点对点
 // 直连」徽章表达，unknown 数据不足不给徽章（阶梯图里有灰字说明）
 const FS_MEDIA_BADGES = {
-    transcode: '<span class="badge bg-danger"><i class="bi bi-shuffle"></i> FS 转码</span>',
-    same: '<span class="badge bg-success"><i class="bi bi-check2-circle"></i> FS 未转码</span>',
+    transcode: '<span class="badge bg-danger"><i class="bi bi-shuffle"></i> 服务端转码（FS）</span>',
+    same: '<span class="badge bg-success"><i class="bi bi-check2-circle"></i> 服务端未转码</span>',
 };
 
 // FS 媒体转发检测（后端 fs_relay.verdict）：结论样式与提示块配色。
@@ -213,11 +213,11 @@ const FS_RELAY_META = {
     redirected:     {alert: 'alert-danger',   badge: 'bg-danger',
                      icon: 'bi-signpost-split', label: '媒体已改道直连'},
     no_relay:       {alert: 'alert-danger',   badge: 'bg-danger',
-                     icon: 'bi-x-octagon-fill', label: '未经过 FS 中转'},
+                     icon: 'bi-x-octagon-fill', label: '未经过服务端中转'},
     partial_uplink: {alert: 'alert-warning',  badge: 'bg-warning text-dark',
                      icon: 'bi-exclamation-triangle-fill', label: '部分上行缺失'},
     relayed:        {alert: 'alert-success',  badge: 'bg-success',
-                     icon: 'bi-check-circle-fill', label: 'FS 正常转发'},
+                     icon: 'bi-check-circle-fill', label: '服务端正常转发（FS）'},
     insufficient:   {alert: 'alert-secondary', badge: 'bg-secondary',
                      icon: 'bi-question-circle', label: '无法判断'},
 };

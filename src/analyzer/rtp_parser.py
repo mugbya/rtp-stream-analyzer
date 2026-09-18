@@ -191,11 +191,17 @@ def _parse_sip_event(payload: bytes):
     call_id = ''
     cseq_method = ''
     cseq_num = None
+    via_count = 0
     from_hdr = {}
     to_hdr = {}
     for line in text.split('\r\n'):
         if not call_id and (line.startswith('Call-ID:') or line.startswith('i:')):
             call_id = line.split(':', 1)[1].strip()
+        elif line.startswith('Via:') or line.startswith('v:'):
+            # Via 头数量：请求每经过一跳代理就多一条。终端自发的 INVITE 只有
+            # 1 条，经 FS 转发的 INVITE 有 ≥2 条——单侧抓包（终端/坐席）没有
+            # 多端点 RTP 证据可推断服务器 IP，靠它消歧（见 detect_server_ip）
+            via_count += 1
         elif not cseq_method and line.startswith('CSeq:'):
             # "CSeq: 1 INVITE" — for responses, identifies which request the
             # response belongs to (REGISTER keepalives are filtered out here)
@@ -225,6 +231,7 @@ def _parse_sip_event(payload: bytes):
         sdp['endpoints'] = _parse_sdp_endpoints(body)
     return {'method': method, 'reason': reason, 'call_id': call_id,
             'cseq': cseq_num, 'cseq_method': cseq_method,
+            'via_count': via_count,
             'from': from_hdr, 'to': to_hdr, 'sdp': sdp}
 
 
