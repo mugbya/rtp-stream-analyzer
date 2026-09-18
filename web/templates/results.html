@@ -68,8 +68,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 showResults(data.results);
                 if (data.calls && data.calls.length) {
                     buildIpRoleMap(data.files || [], data.server_ip);
-                    renderCalls(data.calls, data.capture_warning);
-                    renderCallSwitcher(data.calls, data.results.call_id, data.results);
+                    renderCalls(data.calls, data.capture_warning, data.files || []);
+                    renderCallSwitcher(data.calls, data.results.call_id, data.results,
+                                       data.files || []);
                 }
                 // 抓包完整性提醒（截短包/文件尾损坏）：无通话也展示
                 const integrityHtml = _integrityWarningHtml(data.files);
@@ -1398,7 +1399,7 @@ function _captureWarningHtml(w) {
 // 可切换到其他通话重新分析（POST /api/analyze 后刷新页面）
 let switchingCall = false;
 
-function renderCallSwitcher(calls, currentCallId, results) {
+function renderCallSwitcher(calls, currentCallId, results, uploads) {
     if (!calls || calls.length < 2) return;
     const banner = document.getElementById('call-switch-banner');
     const mediaType = results.media_type || 'audio';
@@ -1412,6 +1413,11 @@ function renderCallSwitcher(calls, currentCallId, results) {
         const cls = cur ? 'btn-primary' : 'btn-outline-primary';
         const dis = cur || switchingCall ? 'disabled' : '';
         const title = `${c.start_str} ~ ${c.end_str} · ${c.stream_count} 条流`;
+        // 单来源通话在切换按钮上也要醒目：这通电话其余抓包里没有
+        const onlySrc = uploads && uploads.length > 1 && (c.files || []).length === 1
+            ? `<span class="badge bg-danger ms-1" title="${(c.files || [])
+                .map(f => ROLE_NAMES[f] || f).join('、')}的抓包里才有这通通话">仅一处抓包</span>`
+            : '';
         const fmBadge = {
             transcode: '<span class="badge bg-danger ms-1"><i class="bi bi-shuffle"></i> 服务端转码（FS）</span>',
             same: '<span class="badge bg-success ms-1"><i class="bi bi-check2-circle"></i> 服务端未转码</span>',
@@ -1420,7 +1426,7 @@ function renderCallSwitcher(calls, currentCallId, results) {
                     onclick="switchCall('${c.call_id}', '${mediaType}', '${direction}')"
                     title="${title}">
                     <i class="bi bi-telephone"></i> ${callLabel(c.call_id)}
-                    <span class="badge ${st.badge} ms-1"><i class="bi ${st.icon}"></i> ${st.label}</span>${fmBadge}
+                    <span class="badge ${st.badge} ms-1"><i class="bi ${st.icon}"></i> ${st.label}</span>${fmBadge}${onlySrc}
                     <span class="ms-1 small">${title}</span>
                 </button>`;
     }).join('');
@@ -1456,7 +1462,40 @@ function switchCall(callId, mediaType, direction) {
         });
 }
 
-function renderCalls(calls, captureWarning) {
+// 通话来源标注：这通通话出现在哪些上传抓包里。全部上传抓包都包含 → 绿色
+// 说明“N 份抓包均有”；缺了抓包 → 黄色警示；只出现在一份抓包 → 红色醒目
+// （其余抓包点没有这通电话的媒体流：可能是抓包时段不重叠，也可能是点对点
+// 直连绕过了服务端）。uploads 为会话接口返回的上传文件列表（元素带 role）
+function _callSourceBadges(c, uploads) {
+    const roles = (uploads || []).map(f => f.role);
+    const present = (c.files || []).map(f => ROLE_NAMES[f] || f);
+    if (roles.length < 2) {
+        return present.length
+            ? `<span class="text-muted small">来源：${present.join(' / ')}</span>` : '';
+    }
+    const missing = (c.files_missing
+        || roles.filter(r => !(c.files || []).includes(r)))
+        .map(r => ROLE_NAMES[r] || r);
+    if (!missing.length) {
+        return `<span class="badge bg-success-subtle text-success-emphasis" ` +
+            `title="这通通话的媒体流在上传的全部 ${roles.length} 份抓包里都出现了">` +
+            `<i class="bi bi-check2-all"></i> ${roles.length} 份抓包均有（${present.join('、')}）</span>`;
+    }
+    if (present.length === 1) {
+        const p2pNote = c.is_p2p
+            ? `；该通话媒体为端到端直连，不经服务端，其余抓包没有它属正常现象`
+            : '';
+        return `<span class="badge bg-danger" title="这通通话只在上传的 1 份抓包里出现，` +
+            `其余 ${missing.length} 份（${missing.join('、')}）没有它的媒体流——` +
+            `可能是抓包时段与这通电话不重叠，或媒体/信令没有经过那些抓包点${p2pNote}">` +
+            `<i class="bi bi-exclamation-triangle"></i> 仅见于 ${present[0]}</span>`;
+    }
+    return `<span class="badge bg-warning text-dark" title="这通通话只在 ` +
+        `${present.join('、')}的抓包里出现，${missing.join('、')}的抓包里没有">` +
+        `<i class="bi bi-files"></i> 见于 ${present.join('、')}</span>`;
+}
+
+function renderCalls(calls, captureWarning, uploads) {
     const card = document.getElementById('calls-card');
     const container = document.getElementById('calls-container');
     card.classList.remove('d-none');
@@ -1488,7 +1527,6 @@ function renderCalls(calls, captureWarning) {
     let html = captureWarning ? _captureWarningHtml(captureWarning) : '';
     calls.forEach(c => {
         const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
-        const files = c.files.map(f => ROLE_NAMES[f] || f).join(' / ');
         const flow = c.sip_flow || [];
         // 摘要行给出两腿各自协商的编码与 FS 媒体处理判定，不用展开
         const negTxt = legNegotiationSummary(c);
@@ -1515,7 +1553,7 @@ function renderCalls(calls, captureWarning) {
                 <span class="badge ${st.badge}"><i class="bi ${st.icon}"></i> ${st.label}</span>
                 ${FS_MEDIA_BADGES[c.fs_media?.verdict] || ''}
                 <span class="badge bg-light text-dark">${c.stream_count} 条流</span>
-                <span class="text-muted small">${files}</span>
+                ${_callSourceBadges(c, uploads)}
                 ${_callPartyChain(flow)}
             </div>
             ${flow.length ? `<details open class="mt-1">

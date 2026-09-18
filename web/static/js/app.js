@@ -195,7 +195,7 @@ function showDetectionResults(data) {
     document.getElementById('streams-detail').innerHTML = detail;
 
     // 通话列表 + 完整性状态 + 跨抓包一致性提醒
-    renderCalls(data.calls || [], data.capture_warning);
+    renderCalls(data.calls || [], data.capture_warning, data.files);
 }
 
 // ====== 通话检测展示 ======
@@ -272,7 +272,40 @@ function _legNegotiationSummary(c) {
     return t ? `协商 ${t}` : '';
 }
 
-function renderCalls(calls, captureWarning) {
+// 通话来源标注：这通通话出现在哪些上传抓包里。全部上传抓包都包含 → 绿色
+// 说明“N 份抓包均有”；缺了抓包 → 黄色警示；只出现在一份抓包 → 红色醒目
+// （其余抓包点没有这通电话的媒体流：可能是抓包时段不重叠，也可能是点对点
+// 直连绕过了服务端）。uploads 为上传响应里的文件列表（元素带 role）
+function _callSourceBadges(c, uploads) {
+    const roles = (uploads || []).map(f => f.role);
+    const present = (c.files || []).map(f => ROLE_NAMES[f] || f);
+    if (roles.length < 2) {
+        return present.length
+            ? `<span class="text-muted small">来源：${present.join(' / ')}</span>` : '';
+    }
+    const missing = (c.files_missing
+        || roles.filter(r => !(c.files || []).includes(r)))
+        .map(r => ROLE_NAMES[r] || r);
+    if (!missing.length) {
+        return `<span class="badge bg-success-subtle text-success-emphasis" ` +
+            `title="这通通话的媒体流在上传的全部 ${roles.length} 份抓包里都出现了">` +
+            `<i class="bi bi-check2-all"></i> ${roles.length} 份抓包均有（${present.join('、')}）</span>`;
+    }
+    if (present.length === 1) {
+        const p2pNote = c.is_p2p
+            ? `；该通话媒体为端到端直连，不经服务端，其余抓包没有它属正常现象`
+            : '';
+        return `<span class="badge bg-danger" title="这通通话只在上传的 1 份抓包里出现，` +
+            `其余 ${missing.length} 份（${missing.join('、')}）没有它的媒体流——` +
+            `可能是抓包时段与这通电话不重叠，或媒体/信令没有经过那些抓包点${p2pNote}">` +
+            `<i class="bi bi-exclamation-triangle"></i> 仅见于 ${present[0]}</span>`;
+    }
+    return `<span class="badge bg-warning text-dark" title="这通通话只在 ` +
+        `${present.join('、')}的抓包里出现，${missing.join('、')}的抓包里没有">` +
+        `<i class="bi bi-files"></i> 见于 ${present.join('、')}</span>`;
+}
+
+function renderCalls(calls, captureWarning, uploads) {
     const container = document.getElementById('calls-detail');
 
     if (!calls.length) {
@@ -290,7 +323,6 @@ function renderCalls(calls, captureWarning) {
 
     calls.forEach(c => {
         const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
-        const files = c.files.map(f => ROLE_NAMES[f] || f).join(' / ');
         const media = c.media_types.map(m => m === 'audio' ? '音频' : '视频').join('+') || '未知';
         const relay = c.fs_relay;
         const relayMeta = relay && FS_RELAY_META[relay.verdict];
@@ -339,7 +371,7 @@ function renderCalls(calls, captureWarning) {
                 ${relayBadge}
                 <span class="badge bg-light text-dark">${c.stream_count} 条流</span>
                 <span class="badge bg-light text-dark">${media}</span>
-                <span class="text-muted small">${files}</span>
+                ${_callSourceBadges(c, uploads)}
                 ${_callPartyChain(flow)}
             </div>
             ${_fsRelayHtml(relay)}

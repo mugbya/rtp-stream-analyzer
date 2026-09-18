@@ -1398,7 +1398,11 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             'talk_start_str': _fmt_time(talk[0]),
             'talk_end_str': _fmt_time(talk[1]),
             'talk_duration_s': round(talk_dur, 1),
+            # 来源标注：这通通话出现在哪些上传抓包里（files），哪些上传抓包
+            # 里没有（files_missing）——只出现在部分抓包时前端醒目标注
             'files': sorted(call['files']),
+            'files_missing': sorted(r for r in captures
+                                    if r not in call['files']),
             'stream_count': len(call['ssrcs']),
             'media_types': media_types,
             'codecs': codecs,
