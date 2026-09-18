@@ -3,7 +3,6 @@
  */
 
 let sessionId = null;
-let uploadedCount = 0;
 let detectedCalls = [];
 let detectedServerIp = null;
 let ipRoleMap = {};  // ip -> 角色名（用于 SIP 流程里把 IP 显示为端点名）
@@ -63,33 +62,66 @@ function syncDirectionCol() {
     dirCol.classList.toggle('opacity-50', !(delayCheck.checked && !delayCheck.disabled));
 }
 
-// ====== 文件上传 ======
+// 把一个文件落到某个端的上传框（点击选择与拖拽共用）：统一经 input.files
+// 存取，上传时仍按原有逻辑从各 input 收集。file 为空表示清空该框
+function applyFileToBox(input, file) {
+    const role = input.dataset.role;
+    const box = document.getElementById('box-' + role);
+    const nameDiv = document.getElementById('name-' + role);
+
+    if (file) {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        box.classList.add('has-file');
+        nameDiv.textContent = file.name;
+    } else {
+        input.value = '';
+        box.classList.remove('has-file');
+        nameDiv.textContent = '';
+    }
+
+    const count = [...document.querySelectorAll('.file-input')]
+        .filter(i => i.files.length).length;
+    document.getElementById('btn-upload').disabled = count === 0;
+}
+
 function setupFileUploads() {
     const fileInputs = document.querySelectorAll('.file-input');
-    const uploadBtn = document.getElementById('btn-upload');
 
     fileInputs.forEach(input => {
-        input.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            const role = input.dataset.role;
-            const box = document.getElementById('box-' + role);
-            const nameDiv = document.getElementById('name-' + role);
+        input.addEventListener('change', () => {
+            applyFileToBox(input, input.files[0] || null);
+        });
 
-            if (file) {
-                box.classList.add('has-file');
-                nameDiv.textContent = file.name;
-                uploadedCount++;
-            } else {
-                box.classList.remove('has-file');
-                nameDiv.textContent = '';
-                uploadedCount = Math.max(0, uploadedCount - 1);
+        // 拖拽上传：拖到哪个端的卡片就上传到哪个端
+        const box = document.getElementById('box-' + input.dataset.role);
+        const nameDiv = document.getElementById('name-' + input.dataset.role);
+        box.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            box.classList.add('dragover');
+        });
+        box.addEventListener('dragleave', (e) => {
+            if (!box.contains(e.relatedTarget)) box.classList.remove('dragover');
+        });
+        box.addEventListener('drop', (e) => {
+            e.preventDefault();
+            box.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (!file) return;
+            if (!/\.(pcap|pcapng|cap)$/i.test(file.name)) {
+                nameDiv.innerHTML =
+                    '<span class="text-danger">仅支持 pcap / pcapng / cap 文件</span>';
+                setTimeout(() => {
+                    if (nameDiv.querySelector('.text-danger')) nameDiv.textContent = '';
+                }, 4000);
+                return;
             }
-
-            uploadBtn.disabled = uploadedCount === 0;
+            applyFileToBox(input, file);
         });
     });
 
-    uploadBtn.addEventListener('click', uploadFiles);
+    document.getElementById('btn-upload').addEventListener('click', uploadFiles);
 }
 
 async function uploadFiles() {

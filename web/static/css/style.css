@@ -216,6 +216,14 @@ body {
     transform: translateY(-2px);
     box-shadow: 0 12px 26px -16px rgba(79, 70, 229, .45);
 }
+/* 文件拖到卡片上方的悬停态：边界高亮提示"松手即落到这一端" */
+.upload-box.dragover {
+    border-color: #6366f1;
+    border-style: solid;
+    background: #eef2ff;
+    transform: translateY(-2px);
+    box-shadow: 0 12px 26px -16px rgba(79, 70, 229, .55);
+}
 .upload-box.has-file {
     border: 1.5px solid #6ee7b7;
     background: linear-gradient(180deg, #f6fffb, #effdf7);
