@@ -99,11 +99,11 @@ journalctl -u rtp-stream-analyzer -n 200  # 最近 200 行
 systemctl restart rtp-stream-analyzer
 ```
 
-代码目录 `/opt/rtp-stream-analyzer/app`；venv `/opt/rtp-stream-analyzer/venv`；上传的抓包和产出文件在应用目录的 `uploads/`、`outputs/`（超过保留时长自动清理，见 `app.py` 的 `FILE_RETENTION_HOURS`）。
+代码目录 `/opt/rtp-stream-analyzer/app`（Python 代码在其下的 `src/`，配置在根目录 `config.py`）；venv `/opt/rtp-stream-analyzer/venv`；上传的抓包和产出文件在应用目录的 `var/uploads/`、`var/outputs/`（超过保留时长自动清理，见 `config.py` 的 `FILE_RETENTION_HOURS`）。
 
 ## 生产模式说明
 
-- 服务器上以 gunicorn 运行（单 worker + 8 线程，`FLASK_DEBUG=0`），本地 `python app.py` 仍是 debug 模式，互不影响。
+- 服务器上以 gunicorn 运行（单 worker + 8 线程，`FLASK_DEBUG=0`），本地 `python src/app.py` 仍是 debug 模式，互不影响。
 - 分析会话存于应用进程内存，所以必须单 worker；改多进程会导致会话随机丢失。
 - 按你的要求整套以 root 运行（SSH 与服务同账号）；以后想收紧权限，把 service 的 `User`/`Group` 改成专用账号并调整 `/opt/rtp-stream-analyzer` 属主即可。
 - gunicorn 只监听 `127.0.0.1:5050`，不对公网暴露，入口只有 Nginx 的 80 端口。

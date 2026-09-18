@@ -3,6 +3,16 @@ RTP Stream Analyzer - Flask Web Application
 音视频流延迟/抖动分析平台
 """
 import os
+import sys
+
+# src/ 目录本身（analyzer 等包的搜索路径）与仓库根目录（config.py）都加入 sys.path，
+# 使 gunicorn / python / pytest 从任意目录启动都能正常导入
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR = os.path.dirname(_SRC_DIR)
+for _p in (_SRC_DIR, _ROOT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import json
 import re
 import uuid
@@ -12,6 +22,8 @@ import time
 from datetime import date
 from flask import (Flask, render_template, request, jsonify, send_file,
                    url_for, make_response)
+
+import config
 
 from analyzer.rtp_parser import extract_rtp_packets, get_stream_packets
 from analyzer.stream_classifier import (
@@ -36,17 +48,17 @@ from analyzer.call_detector import detect_calls, check_capture_consistency
 from analyzer.capture_integrity import merge_integrity
 import stats as stats_mod
 
-# 默认 True（本地 python app.py 调试）；systemd 部署设 FLASK_DEBUG=0 走 gunicorn 生产模式
-DEBUG = os.environ.get('FLASK_DEBUG', '1') == '1'
+DEBUG = config.DEBUG
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
-app.config['OUTPUT_FOLDER'] = os.path.join(os.path.dirname(__file__), 'outputs')
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
-# 自动清理：outputs（媒体文件）与 uploads（上传的抓包）超过保留时长
-# 即被后台线程删除，两处共用同一保留时长
-app.config['FILE_RETENTION_HOURS'] = 2            # 保留时长（小时）
-app.config['FILE_CLEANUP_INTERVAL_MINUTES'] = 10  # 清理巡检间隔（分钟）
+# 前端资源移到 web/ 下（templates/ 与 static/），相对仓库根目录
+app = Flask(__name__,
+            template_folder=os.path.join(config.BASE_DIR, 'web', 'templates'),
+            static_folder=os.path.join(config.BASE_DIR, 'web', 'static'))
+app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
+app.config['OUTPUT_FOLDER'] = config.OUTPUT_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = config.MAX_CONTENT_LENGTH
+app.config['FILE_RETENTION_HOURS'] = config.FILE_RETENTION_HOURS
+app.config['FILE_CLEANUP_INTERVAL_MINUTES'] = config.FILE_CLEANUP_INTERVAL_MINUTES
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
@@ -835,4 +847,4 @@ def _find_and_calc_fs_delay(fs_packets, target_streams, server_ip):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5050, debug=DEBUG)
+    app.run(host=config.HOST, port=config.PORT, debug=DEBUG)

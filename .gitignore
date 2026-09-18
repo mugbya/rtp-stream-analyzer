@@ -1,11 +1,15 @@
 __pycache__/
-outputs/
-uploads/
 .DS_Store
 .venv/
 venv/
 .env
-case/
+
+# 运行时易失数据（上传的抓包 / 生成的媒体，应用自动清理）
+var/
+
+# 样例抓包（体积大，不入库；人工结论文档 samples/readme.md 保留提交）
+samples/**/*.pcap
+samples/**/*.pcapng
 
 # 统计运行时数据（ip2region.xdb 保留提交，其余本地生成）
 data/stats.db

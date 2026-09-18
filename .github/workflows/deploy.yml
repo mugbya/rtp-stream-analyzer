@@ -28,7 +28,8 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      # 同步代码到服务器；uploads/ outputs/ 为运行时数据，既不覆盖也不删除
+      # 同步代码到服务器；var/（uploads/outputs 运行时数据，含旧版根目录下的
+      # uploads/ outputs/）为运行时数据，既不覆盖也不删除
       - name: Sync code
         run: |
           rsync -az --delete \
@@ -40,6 +41,7 @@ jobs:
             --exclude 'venv/' \
             --exclude 'uploads/' \
             --exclude 'outputs/' \
+            --exclude 'var/' \
             --exclude 'tests/' \
             --exclude 'data/stats.db' \
             --exclude 'data/stats.db-*' \

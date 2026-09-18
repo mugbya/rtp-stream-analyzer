@@ -6,6 +6,7 @@ Run: python3 tests/test_call_detector.py
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from analyzer.call_detector import (

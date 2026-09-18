@@ -8,6 +8,7 @@ Run: python3 tests/test_video_problem_taxonomy.py
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from analyzer.problem_taxonomy import classify_problems

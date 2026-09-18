@@ -9,6 +9,13 @@
 所有对外函数内部兜底吞异常。
 """
 import os
+import sys
+
+# 与 src/app.py 相同的路径引导：仓库根目录（config.py）加入 sys.path
+_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
 import re
 import sqlite3
 import threading
@@ -18,11 +25,13 @@ import uuid
 from ip2region import searcher as xdb_searcher
 from ip2region import util as xdb_util
 
-# 数据与密钥都放 data/ 下（已在 .gitignore 排除运行时文件）
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
-DB_PATH = os.path.join(DATA_DIR, 'stats.db')
-ADMIN_KEY_PATH = os.path.join(DATA_DIR, 'admin_key.txt')
-XDB_PATH = os.path.join(DATA_DIR, 'ip2region.xdb')
+import config
+
+# 数据与密钥都放 data/ 下（已在 .gitignore 排除运行时文件），路径集中在 config.py
+DATA_DIR = config.DATA_DIR
+DB_PATH = config.DB_PATH
+ADMIN_KEY_PATH = config.ADMIN_KEY_PATH
+XDB_PATH = config.XDB_PATH
 
 _visitor_cookie = 'vid'      # 访客去重 cookie（一年有效）
 _admin_cookie = 'admin_key'  # 管理页校验通过后种的免登录 cookie

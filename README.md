@@ -112,12 +112,12 @@ pip3 install -r requirements.txt
 ## 启动
 
 ```bash
-python3 app.py
+python3 src/app.py
 ```
 
 浏览器访问 **http://localhost:5050**
 
-outputs 目录（音视频文件）由后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，可在 `app.py` 顶部的 `OUTPUT_RETENTION_HOURS` / `OUTPUT_CLEANUP_INTERVAL_MINUTES` 配置项调整。
+所有可调参数（端口、上传上限、文件保留时长、统计库路径等）集中在根目录的 `config.py`，改这一个文件即可。var/outputs 目录（音视频文件）由后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，对应 `config.py` 里的 `FILE_RETENTION_HOURS` / `FILE_CLEANUP_INTERVAL_MINUTES`。
 
 ## 使用流程
 
@@ -131,32 +131,41 @@ outputs 目录（音视频文件）由后台线程自动清理：默认保留 2 
 
 ```
 rtp-stream-analyzer/
-├── app.py                       # Flask 主入口
+├── config.py                    # 全部可调参数（端口/上传上限/清理时长/统计路径等）
 ├── requirements.txt
 ├── README.md
-├── analyzer/
-│   ├── rtp_parser.py            # RTP 解析（含载荷提取）
-│   ├── stream_classifier.py     # 音频/视频流分类、方向识别
-│   ├── delay_analyzer.py        # 延迟分析（FS内部/跨抓包/时钟偏移修正）
-│   ├── jitter_analyzer.py       # 抖动分析
-│   ├── packet_loss.py           # 丢包检测
-│   ├── call_detector.py         # 通话检测：分组 + 抓包完整性判断
-│   ├── capture_integrity.py     # 抓包文件完整性：快照截短/文件尾损坏检测（提示不阻断）
-│   ├── media_extractor.py       # 音频/视频重建（G.711→WAV、H.264→MP4）
-│   ├── quality_analyzer.py      # 音画质量：杂音/啸叫/削波（音频）、花屏风险（视频）
-│   ├── problem_taxonomy.py      # 声音问题分类：检测结论 → 问题种类 + 用户听感词
-│   └── reporter.py              # 汇总报告
-├── tests/
-│   └── test_call_detector.py    # 通话分组/完整性单元测试（python3 tests/test_call_detector.py）
-├── templates/
-│   ├── base.html                # Bootstrap 5 基础模板
-│   ├── index.html               # 上传+配置+结果页
-│   └── results.html             # 独立结果页（含媒体回放）
-├── static/
-│   ├── css/style.css
-│   └── js/app.js
-├── uploads/<session_id>/        # 上传的抓包文件
-└── outputs/                     # 生成的媒体文件
+├── src/                         # Python 代码
+│   ├── app.py                   # Flask 主入口
+│   ├── stats.py                 # 访问/使用统计（SQLite + ip2region）
+│   ├── analyzer/
+│   │   ├── rtp_parser.py        # RTP 解析（含载荷提取）
+│   │   ├── stream_classifier.py # 音频/视频流分类、方向识别
+│   │   ├── delay_analyzer.py    # 延迟分析（FS内部/跨抓包/时钟偏移修正）
+│   │   ├── jitter_analyzer.py   # 抖动分析
+│   │   ├── packet_loss.py       # 丢包检测
+│   │   ├── call_detector.py     # 通话检测：分组 + 抓包完整性判断
+│   │   ├── capture_integrity.py # 抓包文件完整性：快照截短/文件尾损坏检测（提示不阻断）
+│   │   ├── media_extractor.py   # 音频/视频重建（G.711→WAV、H.264→MP4）
+│   │   ├── quality_analyzer.py  # 音画质量：杂音/啸叫/削波（音频）、花屏风险（视频）
+│   │   ├── problem_taxonomy.py  # 声音问题分类：检测结论 → 问题种类 + 用户听感词
+│   │   └── reporter.py          # 汇总报告
+│   └── ip2region/               # IP 地域解析库（内置依赖）
+├── web/                         # 前端资源
+│   ├── templates/
+│   │   ├── base.html            # Bootstrap 5 基础模板
+│   │   ├── index.html           # 上传+配置+结果页
+│   │   └── results.html         # 独立结果页（含媒体回放）
+│   └── static/
+│       ├── css/style.css
+│       └── js/app.js
+├── tests/                       # 单元测试（for f in tests/test_*.py; do python3 $f; done）
+├── data/                        # 持久数据：统计库、管理密钥、ip2region.xdb
+├── var/                         # 运行时易失数据（自动清理）
+│   ├── uploads/<session_id>/    # 上传的抓包文件
+│   └── outputs/                 # 生成的媒体文件
+├── samples/                     # 样例抓包与人工听音结论
+├── docs/                        # 运维与问题种类文档
+└── deploy/                      # systemd / nginx / CI 部署
 ```
 
 ## 输出目录与清理
@@ -164,7 +173,7 @@ rtp-stream-analyzer/
 生成的音频/视频按**日期**组织，便于定期清理：
 
 ```
-outputs/
+var/outputs/
 ├── 2026-09-11/                  # 按天分目录
 │   └── <session_id>/
 │       ├── audio/
@@ -180,7 +189,7 @@ outputs/
 
 ### 自动清理
 
-outputs 目录（媒体文件）与 uploads 目录（上传的抓包文件）由应用内置的后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，应用启动时也会先清一次历史遗留。两处共用同一保留时长，可在 `app.py` 顶部调整 `FILE_RETENTION_HOURS` / `FILE_CLEANUP_INTERVAL_MINUTES` 两个配置项。
+var/outputs 目录（媒体文件）与 var/uploads 目录（上传的抓包文件）由应用内置的后台线程自动清理：默认保留 2 小时、每 10 分钟巡检一次，应用启动时也会先清一次历史遗留。两处共用同一保留时长，在根目录 `config.py` 调整 `FILE_RETENTION_HOURS` / `FILE_CLEANUP_INTERVAL_MINUTES` 两个配置项。
 
 > 注意：会话数据存在内存中（`sessions` 字典），重启后丢失。超过保留时长后，旧结果页的媒体链接会失效，对旧会话重新分析也会因原始抓包已被清理而失败——这是保留时长的预期行为，需要更长保留就调大配置项。
 

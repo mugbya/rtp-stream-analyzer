@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from analyzer.ts_continuity import check_ts_continuity

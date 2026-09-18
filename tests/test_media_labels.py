@@ -6,6 +6,7 @@ Run: python3 tests/test_media_labels.py
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from analyzer.media_extractor import (

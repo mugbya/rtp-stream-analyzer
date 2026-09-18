@@ -6,7 +6,8 @@ After=network.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/rtp-stream-analyzer/app
+# gunicorn 在 src/ 下找 app:app（Python 代码都在 src/）
+WorkingDirectory=/opt/rtp-stream-analyzer/app/src
 # 生产模式：关闭 debug 热重载（app.py 读取 FLASK_DEBUG）
 Environment=FLASK_DEBUG=0
 # 使用统计管理页（/admin/stats）的访问密钥：留空则服务首次启动时自动生成到
