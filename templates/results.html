@@ -157,14 +157,19 @@ function showResults(results) {
             html += '</tr></table>';
         }
         
-        // 无声诊断：每个方向"发声端 → FS → 听者"逐腿检查流存在性与人声能量
+        // 无声诊断 / 分段延迟链路：当回放区音频方向卡已经按方向展示结论时，
+        // 明细并入卡内折叠区，这里不再整段重复（避免同一条链路头出现多次）
+        const _audioEntries = (results.media_manifest && results.media_manifest.audio) || [];
+        const _ahDirs = (report.audio_health && report.audio_health.directions) || [];
+        const _dcDirs = (report.delay_chains && report.delay_chains.directions) || [];
+        const _audioDirMerged = _audioEntries.length > 0 && (_ahDirs.length > 0 || _dcDirs.length > 0);
         if (report.audio_health) {
-            html += renderAudioHealth(report.audio_health);
+            html += renderAudioHealth(report.audio_health, _audioDirMerged);
         }
 
         // 分段延迟链路：每个方向拆成三段测量，定位延迟在哪一段
         if (report.delay_chains) {
-            html += renderDelayChains(report.delay_chains);
+            html += renderDelayChains(report.delay_chains, _audioDirMerged);
         }
 
         if (report.conclusion) {
@@ -301,7 +306,29 @@ function _healthBadge(verdict) {
     return `<span class="badge bg-${cls}">${_esc(txt)}</span>`;
 }
 
-function renderAudioHealth(h) {
+// 无声诊断逐腿明细（独立区块与音频方向卡内折叠明细共用）
+function _audioLegsHtml(d) {
+    let html = '';
+    (d.legs || []).forEach(l => {
+        const p = l.presence || {};
+        const pres = [
+            p.sent_at_source === true ? '源端已发' :
+                p.sent_at_source === false ? '源端未见' : '源端未观测',
+            p.arrived_at_next === true ? '下一跳已收' :
+                p.arrived_at_next === false ? '下一跳未见' : '下一跳未观测',
+        ].join(' · ');
+        html += `<div class="ms-3 mt-1 small border-start ps-2">` +
+            `${_healthBadge(l.status)} <strong>${_esc(l.leg)}</strong> ` +
+            `<span class="text-muted">(${l.ssrc || '—'}；${pres})</span>` +
+            (l.note ? `<div class="mt-1">${_esc(l.note)}</div>` : '') +
+            `</div>`;
+    });
+    return html;
+}
+
+function renderAudioHealth(h, merged) {
+    // 已合并进回放区音频方向卡：链路头与逐腿明细都在卡里，不再整段重复
+    if (merged) return '';
     let html = '<h6 class="mt-3">无声诊断（谁没听到谁的声音）</h6>';
     if (!h.directions || !h.directions.length) {
         return html + `<p class="text-muted small mb-3">${_esc(h.summary || '数据不足，无法做无声诊断')}</p>`;
@@ -315,27 +342,54 @@ function renderAudioHealth(h) {
             _chainHtml(d.speaker, d.listener, p2p) +
             _healthBadge(d.verdict) +
             `<span class="small">${_esc(d.verdict_text)}</span></div>`;
-        (d.legs || []).forEach(l => {
-            const p = l.presence || {};
-            const pres = [
-                p.sent_at_source === true ? '源端已发' :
-                    p.sent_at_source === false ? '源端未见' : '源端未观测',
-                p.arrived_at_next === true ? '下一跳已收' :
-                    p.arrived_at_next === false ? '下一跳未见' : '下一跳未观测',
-            ].join(' · ');
-            html += `<div class="ms-3 mt-1 small border-start ps-2">` +
-                `${_healthBadge(l.status)} <strong>${_esc(l.leg)}</strong> ` +
-                `<span class="text-muted">(${l.ssrc || '—'}；${pres})</span>` +
-                (l.note ? `<div class="mt-1">${_esc(l.note)}</div>` : '') +
-                `</div>`;
-        });
+        html += _audioLegsHtml(d);
         html += '</div>';
     });
     if (h.summary) html += `<p class="small text-muted mb-0 mt-1">${_esc(h.summary)}</p>`;
     return html;
 }
 
-function renderDelayChains(dc) {
+// 分段延迟链路单方向的分段测量表（独立区块与音频方向卡内折叠明细共用）
+function _delayTableHtml(d) {
+    let html = '<div class="table-responsive"><table class="table table-sm table-bordered mb-0 mt-1">' +
+        '<thead><tr><th>段</th><th>SSRC</th><th>均值</th><th>P50</th><th>P95</th>' +
+        '<th>样本</th><th>时钟差</th><th>状态</th></tr></thead><tbody>';
+    (d.segments || []).forEach(s => {
+        const num = v => (v != null && typeof v === 'number') ? v.toFixed(1) : '—';
+        html += `<tr><td class="text-nowrap">${_esc(s.name)}</td>` +
+            `<td class="text-nowrap">${_esc(s.ssrc || '—')}</td>` +
+            `<td>${s.mean != null ? num(s.mean) + 'ms' : '—'}</td>` +
+            `<td>${num(s.p50)}</td><td>${num(s.p95)}</td>` +
+            `<td>${s.count || '—'}</td>` +
+            `<td>${s.clock_offset_ms != null ? s.clock_offset_ms.toFixed(0) + 'ms' : '—'}</td>` +
+            `<td>${s.available ? _healthBadge(s.status) :
+                '<span class="badge bg-secondary">未测到</span>'}</td></tr>`;
+        if (s.note) {
+            html += `<tr class="table-light"><td colspan="8" class="small text-muted">${_esc(s.note)}</td></tr>`;
+        }
+    });
+    html += '</tbody></table></div>';
+    return html;
+}
+
+function renderDelayChains(dc, merged) {
+    // 已合并进回放区音频方向卡：方向行（链路头+分段表）都在卡里，
+    // 这里只保留不分方向的往返参考与备注
+    if (merged) {
+        let html = '';
+        if (dc.roundtrip && dc.roundtrip.length) {
+            html += '<div class="small mt-2"><strong>往返参考（已抵消时钟差）：</strong>';
+            dc.roundtrip.forEach(r => {
+                html += `<span class="badge ${r.status === 'high' ? 'bg-warning text-dark' : 'bg-success'} me-1">` +
+                    `${_esc(r.pair)} ${r.ms}ms</span>`;
+            });
+            html += '</div>';
+        }
+        (dc.notes || []).forEach(n => {
+            html += `<div class="text-muted small mt-1">${_esc(n)}</div>`;
+        });
+        return html;
+    }
     let html = '<h6 class="mt-3">分段延迟链路（延迟在哪一段）</h6>';
     if (!dc.directions || !dc.directions.length) {
         const note = (dc.notes && dc.notes[0]) || '数据不足，无法测量链路延迟';
@@ -356,24 +410,7 @@ function renderDelayChains(dc) {
                   (d.total_note ? `（${_esc(d.total_note)}）` : '') + `</span>`
                 : '') +
             `</div><div class="small mt-1">${_esc(d.verdict_text)}</div>`;
-        html += '<div class="table-responsive"><table class="table table-sm table-bordered mb-0 mt-1">' +
-            '<thead><tr><th>段</th><th>SSRC</th><th>均值</th><th>P50</th><th>P95</th>' +
-            '<th>样本</th><th>时钟差</th><th>状态</th></tr></thead><tbody>';
-        (d.segments || []).forEach(s => {
-            const num = v => (v != null && typeof v === 'number') ? v.toFixed(1) : '—';
-            html += `<tr><td class="text-nowrap">${_esc(s.name)}</td>` +
-                `<td class="text-nowrap">${_esc(s.ssrc || '—')}</td>` +
-                `<td>${s.mean != null ? num(s.mean) + 'ms' : '—'}</td>` +
-                `<td>${num(s.p50)}</td><td>${num(s.p95)}</td>` +
-                `<td>${s.count || '—'}</td>` +
-                `<td>${s.clock_offset_ms != null ? s.clock_offset_ms.toFixed(0) + 'ms' : '—'}</td>` +
-                `<td>${s.available ? _healthBadge(s.status) :
-                    '<span class="badge bg-secondary">未测到</span>'}</td></tr>`;
-            if (s.note) {
-                html += `<tr class="table-light"><td colspan="8" class="small text-muted">${_esc(s.note)}</td></tr>`;
-            }
-        });
-        html += '</tbody></table></div></div>';
+        html += _delayTableHtml(d) + '</div>';
     });
     if (dc.roundtrip && dc.roundtrip.length) {
         html += '<div class="small mt-1"><strong>往返参考（已抵消时钟差）：</strong>';
@@ -495,10 +532,12 @@ function _dirSsrcs(ahDir, dcDir) {
 }
 
 // 组装链路方向分组。audio 优先以无声诊断的方向为准（缺失时退回延迟链路
-// 的方向定义）；video 没有方向级检测，按流角色前缀归组（FS 中转流方向
-// 无法判定，单独归一组）。labels 是流展示标签数组（回放区传播放条目、
-// 详细报告传 media_quality 的键）。
-function _buildDirGroups(labels, report, kind, p2p) {
+// 的方向定义）；方向级检测没覆盖到的流（视频，或无声/延迟检测不可用时）
+// 按每条流的真实收发双方 flow 拼链路方向——上行（端→FS）与下行（FS→对端）
+// 合成"发送端 → 接收端"一个方向组；流上没有 flow 标注时最后退回按角色
+// 前缀归组。labels 是流展示标签数组（回放区传播放条目、详细报告传
+// media_quality 的键）；flowOf(label) 返回 {from:{label,ip}, to:{label,ip}}。
+function _buildDirGroups(labels, report, kind, p2p, flowOf, serverIp) {
     const bySsrc = {};
     labels.forEach(lb => {
         const { ssrc } = _parseStreamLabel(lb);
@@ -517,40 +556,146 @@ function _buildDirGroups(labels, report, kind, p2p) {
 
     const ahDirs = (report.audio_health && report.audio_health.directions) || [];
     const dcDirs = (report.delay_chains && report.delay_chains.directions) || [];
+    // 方向级检测的组一条流都没匹配到时不单独出空卡——否则同一条"谁到谁"
+    // 链路会出现两次（一次空卡带结论、一次 flow 兜底的卡带流）。
+    // 结论先存下，稍后挂到同方向的实际组头上
+    const pendingVerdicts = [];
     if (ahDirs.length) {
         ahDirs.forEach(d => {
             const dc = dcDirs.find(x => x.label === d.label);
-            groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
-                          verdict: d.verdict, verdictText: d.verdict_text, p2p,
-                          labels: takeBySsrc(_dirSsrcs(d, dc)) });
+            const gl = takeBySsrc(_dirSsrcs(d, dc));
+            if (gl.length) {
+                groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
+                              verdict: d.verdict, verdictText: d.verdict_text, p2p,
+                              ah: d, dc, labels: gl });
+            } else {
+                pendingVerdicts.push({ label: d.label, speaker: d.speaker, listener: d.listener,
+                                       verdict: d.verdict, verdictText: d.verdict_text, ah: d, dc });
+            }
         });
     } else if (dcDirs.length) {
         dcDirs.forEach(d => {
-            groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
-                          verdict: d.verdict, verdictText: d.verdict_text, p2p,
-                          labels: takeBySsrc(_dirSsrcs(null, d)) });
+            const gl = takeBySsrc(_dirSsrcs(null, d));
+            if (gl.length) {
+                groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
+                              verdict: d.verdict, verdictText: d.verdict_text, p2p,
+                              dc: d, labels: gl });
+            } else {
+                pendingVerdicts.push({ label: d.label, speaker: d.speaker, listener: d.listener,
+                                       verdict: d.verdict, verdictText: d.verdict_text, dc: d });
+            }
         });
-    } else {
-        // 视频流（或方向级检测全缺）：按角色前缀归组
-        [{ role: 'terminal', speaker: '主叫', listener: '被叫' },
-         { role: 'seat', speaker: '被叫', listener: '主叫' }].forEach(rg => {
-            const gl = labels.filter(lb => !used.has(lb) &&
-                _parseStreamLabel(lb).role === rg.role);
-            gl.forEach(lb => used.add(lb));
-            if (gl.length) groups.push({ label: `${rg.speaker} → ${rg.listener}`,
-                speaker: rg.speaker, listener: rg.listener, p2p, labels: gl });
+    }
+
+    // 方向级检测没覆盖到的流：先按真实收发双方（flow）拼链路方向，
+    // 拼不出（缺 flow 标注/拓扑怪异）再退回按角色前缀归组
+    if (labels.some(lb => !used.has(lb)) && flowOf) {
+        const fg = _flowDirGroups(labels.filter(lb => !used.has(lb)), flowOf, p2p, serverIp);
+        if (fg) fg.forEach(g => {
+            groups.push(g);
+            g.labels.forEach(lb => used.add(lb));
         });
-        const fsLabels = labels.filter(lb => !used.has(lb) &&
-            _parseStreamLabel(lb).role === 'fs');
-        if (fsLabels.length) {
-            fsLabels.forEach(lb => used.add(lb));
-            groups.push({ label: '', fsRelay: true, p2p: false, labels: fsLabels });
-        }
+    }
+
+    // 还剩的流按角色前缀归组
+    [{ role: 'terminal', speaker: '主叫', listener: '被叫' },
+     { role: 'seat', speaker: '被叫', listener: '主叫' }].forEach(rg => {
+        const gl = labels.filter(lb => !used.has(lb) &&
+            _parseStreamLabel(lb).role === rg.role);
+        gl.forEach(lb => used.add(lb));
+        if (gl.length) groups.push({ label: `${rg.speaker} → ${rg.listener}`,
+            speaker: rg.speaker, listener: rg.listener, p2p, labels: gl });
+    });
+    const fsLabels = labels.filter(lb => !used.has(lb) &&
+        _parseStreamLabel(lb).role === 'fs');
+    if (fsLabels.length) {
+        fsLabels.forEach(lb => used.add(lb));
+        groups.push({ label: '', fsRelay: true, p2p: false, labels: fsLabels });
     }
     // SSRC 没配上、角色也不认识的剩余流兜底成"其他流"组
     const rest = labels.filter(lb => !used.has(lb));
     if (rest.length) groups.push({ label: '', rest: true, labels: rest });
+    // 方向级检测没匹配到流的结论：挂到同"谁到谁"的组头上（无声诊断正常/
+    // 异常的判定仍然可见），找不到同方向宿主组就丢弃，绝不再出空卡
+    pendingVerdicts.forEach(pv => {
+        const host = groups.find(g => !g.rest && !g.fsRelay &&
+            ((g.speaker === pv.speaker && g.listener === pv.listener) ||
+             g.label === pv.label));
+        if (host && !host.verdict) {
+            host.verdict = pv.verdict;
+            host.verdictText = pv.verdictText;
+            host.ah = pv.ah;
+            host.dc = pv.dc;
+        }
+    });
     return groups;
+}
+
+// 方向组头用短角色名（主叫/被叫/FS）：分机号等身份编码只在流卡片上展示，
+// 方向链路只关心"谁到谁"的角色，带编码反而看不出链路形状
+const _shortParty = lb => {
+    const m = /^(主叫|被叫|FS)/.exec(lb || '');
+    return m ? m[1] : lb;
+};
+
+// 按每条流的真实收发双方（flow，后端从端口对 + SIP 身份标出）拼链路方向：
+// 端→FS 是上行腿、FS→对端是下行腿，同一路媒体经 FS 转发时上下行 SSRC 不同，
+// 只有收发双方能把两条腿接到同一条链路上（如"主叫 → 被叫"）。serverIp 是
+// 拓扑里给出的 FS IP；媒体不经过 FS（点对点）或拓扑不止两端时，每条真实
+// 链路腿单独成组（如"主叫 → FS"）；有流缺 flow 标注时返回 null，由调用方
+// 退回角色前缀归组。
+function _flowDirGroups(candidates, flowOf, p2p, serverIp) {
+    const items = candidates.map(lb => ({ lb, flow: flowOf(lb) }))
+        .filter(it => it.flow && it.flow.from && it.flow.to &&
+                      it.flow.from.ip && it.flow.to.ip);
+    if (!items.length || items.length < candidates.length) return null;
+
+    const nameOf = ip => {
+        const it = items.find(x => x.flow.from.ip === ip) ||
+                   items.find(x => x.flow.to.ip === ip);
+        return it ? _shortParty(it.flow.from.ip === ip ? it.flow.from.label
+                                                       : it.flow.to.label) : ip;
+    };
+
+    const items_ = items.map(it => ({ ...it, taken: false }));
+    const take = pred => {
+        const gl = [];
+        items_.forEach(it => {
+            if (!it.taken && pred(it)) { it.taken = true; gl.push(it.lb); }
+        });
+        return gl;
+    };
+
+    const groups = [];
+    if (serverIp && items.some(it => it.flow.from.ip === serverIp || it.flow.to.ip === serverIp)) {
+        const fs = serverIp;
+        const endpoints = [...new Set(items_.flatMap(it =>
+            [it.flow.from.ip, it.flow.to.ip]))].filter(ip => ip !== fs);
+        if (endpoints.length === 2) {
+            const [a, b] = endpoints;
+            [[a, b], [b, a]].forEach(([spk, lst]) => {
+                const gl = take(it => {
+                    const f = it.flow.from.ip, t = it.flow.to.ip;
+                    // 上行（发→FS）、下行（FS→收）、点对点直连都算这一路
+                    return (f === spk && t === fs) ||
+                           (f === fs && t === lst) ||
+                           (f === spk && t === lst);
+                });
+                if (gl.length) groups.push({
+                    label: `${nameOf(spk)} → ${nameOf(lst)}`,
+                    speaker: nameOf(spk), listener: nameOf(lst), p2p, labels: gl });
+            });
+        }
+    }
+    // 识别不出两端拓扑（多点会议 / 单侧抓包只见半程）：每条腿单独成组
+    items_.filter(it => !it.taken).forEach(it => {
+        const gl = take(x => x.flow.from.ip === it.flow.from.ip &&
+                             x.flow.to.ip === it.flow.to.ip);
+        groups.push({ label: `${_shortParty(it.flow.from.label)} → ${_shortParty(it.flow.to.label)}`,
+            speaker: _shortParty(it.flow.from.label),
+            listener: _shortParty(it.flow.to.label), p2p, labels: gl });
+    });
+    return groups.length ? groups : null;
 }
 
 // 严重（critical/P0）问题：用于流卡片顶部标红提示"这条流有问题"，
@@ -700,7 +845,14 @@ function _renderMediaSection(report, kind) {
     const mq = (report.media_quality || {})[kind] || {};
     const p2p = _mediaP2p(report);
     const groups = _buildDirGroups(Object.keys(mq), report, kind, p2p);
-    const globalProblems = _attributeProblems(pc, groups);
+    // 与回放区同构：每个链路方向一张卡，按"主叫 → 被叫"在前排序，
+    // 全部包进同一个整体容器；归不了链路的组放最后
+    const chain = groups.filter(g => g.label && !g.rest && !g.fsRelay)
+        .sort((a, b) => ((b.speaker || '').startsWith('主叫') ? 1 : 0) -
+                        ((a.speaker || '').startsWith('主叫') ? 1 : 0));
+    const others = groups.filter(g => !(g.label && !g.rest && !g.fsRelay));
+    const renderGroups = [...chain, ...others];
+    const globalProblems = _attributeProblems(pc, renderGroups);
 
     let html = `<h6 class="mt-3"><i class="bi ${meta.icon} text-primary"></i> ${meta.title}` +
         ` <span class="text-muted small fw-normal">对照《${_esc(meta.docName)}》清单，问题挂在对应的流下面</span></h6>`;
@@ -710,11 +862,12 @@ function _renderMediaSection(report, kind) {
     (pc.notes || []).forEach(n => {
         html += `<p class="small text-muted mb-2">${_esc(n)}</p>`;
     });
-    if (!groups.length) {
+    if (!renderGroups.length) {
         html += `<div class="alert alert-success py-2 mb-2">${_esc(meta.empty)}</div>`;
     }
-    groups.forEach(g => {
-        html += '<div class="dir-group border rounded p-2 mb-3">';
+    html += '<div class="border rounded p-2 mb-3 bg-body-tertiary">';
+    renderGroups.forEach(g => {
+        html += '<div class="bg-body border rounded p-2 mb-2">';
         html += _dirGroupHead(g, mq, kind, meta.feelNoun);
         if (g.labels.length) {
             html += '<div class="row g-2 mt-1">' + g.labels.map(lb =>
@@ -723,6 +876,7 @@ function _renderMediaSection(report, kind) {
         }
         html += '</div>';
     });
+    html += '</div>';
     html += _mediaSectionFooter(pc, globalProblems, meta.feelNoun);
     return html;
 }
@@ -1368,27 +1522,58 @@ function showMedia(manifest, report) {
         const meta = MEDIA_KIND_META[kind];
         const mq = (report.media_quality || {})[kind] || {};
         const labels = entries.map(_entryLabel);
-        const groups = _buildDirGroups(labels, report, kind, _mediaP2p(report));
-        const globalProblems = pc ? _attributeProblems(pc, groups) : [];
         const byLabel = {};
         entries.forEach(e => { byLabel[_entryLabel(e)] = e; });
+        // 每条流的真实收发双方（flow）用于把上行/下行两条腿拼成完整链路方向
+        const serverIp = (manifest.parties && manifest.parties[0] &&
+                          manifest.parties[0].server_ip) || null;
+        const groups = _buildDirGroups(labels, report, kind, _mediaP2p(report),
+                                       lb => (byLabel[lb] || {}).flow, serverIp);
+        // 每个链路方向一张卡（"谁到谁"），按"主叫 → 被叫"在前排序；
+        // 归不了链路的组（其他流 / FS 转发）放在最后
+        const chain = groups.filter(g => g.label && !g.rest && !g.fsRelay)
+            .sort((a, b) => ((b.speaker || '').startsWith('主叫') ? 1 : 0) -
+                            ((a.speaker || '').startsWith('主叫') ? 1 : 0));
+        const others = groups.filter(g => !(g.label && !g.rest && !g.fsRelay));
+        const renderGroups = [...chain, ...others];
+        const globalProblems = pc ? _attributeProblems(pc, renderGroups) : [];
 
         html += `<h6 class="mt-3 mb-2"><i class="bi ${meta.icon} text-primary"></i> ${meta.title}` +
             ` <span class="badge bg-light text-dark">${entries.length} 个媒体流</span></h6>`;
         if (pc && pc.summary) {
             html += `<div class="alert alert-secondary py-2 small mb-2">${_esc(pc.summary)}</div>`;
         }
-        groups.forEach(g => {
-            html += '<div class="dir-group border rounded p-2 mb-3">';
+        // 整体容器：本媒体类型下所有"谁到谁"的方向卡片都包在这个框里
+        // （浅灰底 + 内层白卡，让"大卡包两张方向卡"的层级一眼可见）
+        html += '<div class="border rounded p-2 mb-3 bg-body-tertiary">';
+        renderGroups.forEach(g => {
+            html += '<div class="bg-body border rounded p-2 mb-2">';
             html += _dirGroupHead(g, mq, kind, meta.feelNoun);
             if (g.labels.length) {
                 html += '<div class="row g-2 mt-1">' + g.labels.map(lb =>
                     _mediaItem(byLabel[lb], kind, mq[lb] || {},
-                               (g.streamProblems || {})[lb], meta.feelNoun)
+                               (g.streamProblems || {})[lb], meta.feelNoun, !!g.label)
                 ).join('') + '</div>';
+            }
+            // 音频方向卡尾部：无声诊断逐腿检查 / 分段延迟明细（原来是与卡头
+            // 重复链路头的独立区块，现折叠进卡里，整页每条链路只出现一次）
+            if (kind === 'audio' && (g.ah || g.dc)) {
+                html += '<details class="mt-1"><summary class="small text-muted user-select-none">' +
+                    '无声诊断逐腿检查 / 分段延迟明细（点开展开查看）</summary>';
+                if (g.ah) {
+                    html += '<div class="small mt-1"><strong>无声诊断（' +
+                        _esc(g.ah.verdict_text || '') + '）</strong></div>' + _audioLegsHtml(g.ah);
+                }
+                if (g.dc) {
+                    html += '<div class="small mt-2"><strong>分段延迟链路</strong>' +
+                        (g.dc.total_mean != null ? `（合计 ${g.dc.total_mean}ms）` : '') +
+                        '</div>' + _delayTableHtml(g.dc);
+                }
+                html += '</details>';
             }
             html += '</div>';
         });
+        html += '</div>';
         if (pc) html += _mediaSectionFooter(pc, globalProblems, meta.feelNoun);
     });
 
@@ -1425,14 +1610,15 @@ function _partyChainHtml(p, p2p) {
 
 // 回放卡片：播放器在上，下面直接挂该流的质量结论徽章、关键指标与问题——
 // 听音频/看画面时即可对号入座；有严重问题时卡片左侧红线强调
-function _mediaItem(entry, kind, q, problems, feelNoun) {
+function _mediaItem(entry, kind, q, problems, feelNoun, hideFlow) {
     const dirName = DIR_NAMES[entry.direction] || entry.direction;
     const dirBadge = DIR_BADGE[entry.direction] || 'bg-secondary';
     const dur = entry.duration_ms ? (entry.duration_ms / 1000).toFixed(1) + 's' : '';
 
-    // 谁到谁：发送方 → 接收方（SIP 识别的主叫/被叫身份，无信令时为角色名或 IP）
+    // 谁到谁：发送方 → 接收方。流已归入"谁到谁"方向卡时链路头已说明，
+    // 不再重复，只留 上行/下行 徽章区分两条腿
     let head = `<span class="badge ${dirBadge} me-1">${dirName}</span>`;
-    if (entry.flow) {
+    if (entry.flow && !hideFlow) {
         const side = s => `<strong>${_esc(s.label || '')}</strong>` +
             (s.ip && s.label !== s.ip ? `<span class="text-muted small ms-1">${s.ip}</span>` : '');
         head += side(entry.flow.from) +

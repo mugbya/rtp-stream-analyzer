@@ -432,7 +432,12 @@ def reconstruct_video_raw(packets: dict, ssrc: int, output_path: str, server_ip:
     
     sorted_seqs = sorted(stream_pkts.keys())
     result['total_packets'] = len(sorted_seqs)
-    
+
+    # 时长用抓包时间跨度估算（首末包到达时刻之差），与音频条目的
+    # duration_ms 字段对齐，回放卡片的指标行才能同样显示"时长 Xs"
+    capture_times = [v[0] for v in stream_pkts.values()]
+    result['duration_ms'] = round((max(capture_times) - min(capture_times)) * 1000, 1)
+
     # H.264 depacketization with FU-A reassembly
     # RFC 6184: NAL unit types
     NAL_TYPE_STAP_A = 24
@@ -687,6 +692,7 @@ def generate_all_media(captures: dict, classified: dict, output_dir: str,
                         'codec': codec_name or video_result['codec'],
                         'pt': video_result['pt'],
                         'total_packets': video_result['total_packets'],
+                        'duration_ms': video_result.get('duration_ms'),
                         'nal_units': video_result['nal_units'],
                         'fua_fragments': video_result['fua_fragments'],
                         'path': mp4_path if conv_result['success'] else raw_path,
