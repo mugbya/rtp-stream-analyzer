@@ -412,7 +412,7 @@ def _build_conclusion(results: dict) -> dict:
     fs_relay = results.get('fs_relay') or {}
     if fs_relay.get('available'):
         v = fs_relay.get('verdict')
-        if v in ('redirected', 'no_relay'):
+        if v in ('redirected', 'no_relay', 'partial_downlink'):
             issues.append({
                 'severity': 'critical',
                 'message': f"FS 媒体转发：{fs_relay.get('headline', '')}",

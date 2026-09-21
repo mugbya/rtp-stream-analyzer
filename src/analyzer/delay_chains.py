@@ -67,6 +67,10 @@ def build_delay_chains(captures: dict, call: dict, server_ip: str,
             'listener_role': listener_role,
             'speaker_ip': parties.get(spk_key),
             'listener_ip': parties.get(lst_key),
+            # NAT 别名：该端 SDP 宣告的另一个媒体地址（如私网 IP）。FS 侧
+            # 流的收发地址可能落在这个别名上，选流时长一并尝试
+            'speaker_alt_ips': parties.get(spk_key.replace('_ip', '_alt_ips')) or [],
+            'listener_alt_ips': parties.get(lst_key.replace('_ip', '_alt_ips')) or [],
             'speaker_name': _ROLE_NAMES.get(speaker_role, speaker_role),
             'listener_name': _ROLE_NAMES.get(listener_role, listener_role),
         })
@@ -132,7 +136,9 @@ def _chain_for_direction(captures, fs_cap, call_ssrcs, server_ip, p2p, spec):
         if uplink is None and p2p:
             uplink = pick_call_stream(spk_cap, call_ssrcs)
     if uplink is None and fs_cap and spec['speaker_ip']:
-        uplink = pick_call_stream(fs_cap, call_ssrcs, src_is=spec['speaker_ip'])
+        uplink = pick_call_stream(fs_cap, call_ssrcs,
+                                  src_is=[spec['speaker_ip'],
+                                          *spec.get('speaker_alt_ips', [])])
     downlink = None
     if lst_cap:
         if peer_of_listener:
@@ -140,7 +146,9 @@ def _chain_for_direction(captures, fs_cap, call_ssrcs, server_ip, p2p, spec):
         if downlink is None and p2p:
             downlink = pick_call_stream(lst_cap, call_ssrcs)
     if downlink is None and fs_cap and spec['listener_ip']:
-        downlink = pick_call_stream(fs_cap, call_ssrcs, dst_is=spec['listener_ip'])
+        downlink = pick_call_stream(fs_cap, call_ssrcs,
+                                    dst_is=[spec['listener_ip'],
+                                            *spec.get('listener_alt_ips', [])])
 
     if uplink is None and downlink is None:
         return None, {}

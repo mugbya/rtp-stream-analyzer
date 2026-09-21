@@ -391,11 +391,11 @@ def classify_problems(results: dict) -> dict:
         notes.append('无声诊断不可用（未选中通话或缺对应抓包点），单通/无声'
                      '只能靠流存在性间接判断')
 
-    # —— FS 媒体转发判定：改道 / 无上行同样是单通形态 ——
+    # —— FS 媒体转发判定：改道 / 无上行 / 单向转发缺失同样是单通形态 ——
     fs_relay = results.get('fs_relay') or {}
     if fs_relay.get('available'):
         v = fs_relay.get('verdict')
-        if v in ('redirected', 'no_relay'):
+        if v in ('redirected', 'no_relay', 'partial_downlink'):
             col.add('one_way_audio', f"FS 媒体转发：{fs_relay.get('headline', '')}",
                     'critical', 'FS 转发判定')
         elif v == 'partial_uplink':

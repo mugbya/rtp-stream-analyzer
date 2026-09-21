@@ -786,8 +786,11 @@ def extract_call_parties(call: dict, server_ip: str = None) -> dict:
       的 To 头——响应回显请求的 From，不能用作被叫身份。
 
     Returns:
-        {'caller_ip', 'caller_ident', 'answerer_ip', 'answerer_ident'}，
-        信令缺失时对应项为 None / 空 dict。
+        {'caller_ip', 'caller_ident', 'answerer_ip', 'answerer_ident',
+         'answerer_relayed', 'caller_alt_ips', 'answerer_alt_ips'}，
+        信令缺失时对应项为 None / 空 dict。alt_ips 是该端所在腿的 SDP 宣告
+        IP 里除信令 IP 外的别名地址（NAT 场景：终端宣告私网地址、RTP 实际
+        从公网地址发来）。
     """
     flow = call.get('sip_flow') or []
     inv = next((m for m in flow if m['method'] == 'INVITE'
@@ -836,18 +839,36 @@ def extract_call_parties(call: dict, server_ip: str = None) -> dict:
             answerer_ident = inv_to.get('to') or {}
             answerer_relayed = bool(_ident_label(answerer_ident))
 
+    # NAT 别名：该端所在腿的 SDP 宣告 IP 里除信令 IP 外的地址（终端宣告
+    # 私网地址、RTP 从 NAT 公网地址发来时，同一端在媒体层有两个 IP）。
+    # 同一 IP 在两条腿都宣告过时按信令对端归类，不作为别名
+    spi = call.get('sdp_party_ips') or {}
+
+    def _alt_ips(role):
+        other = 'callee' if role == 'caller' else 'caller'
+        raw = spi.get(role) or []
+        return [ip for ip in raw
+                if ip and ip != server_ip and ip != caller_ip
+                and ip != answerer_ip and ip not in (spi.get(other) or [])]
+
     return {'caller_ip': caller_ip, 'caller_ident': caller_ident,
             'answerer_ip': answerer_ip, 'answerer_ident': answerer_ident,
-            'answerer_relayed': answerer_relayed}
+            'answerer_relayed': answerer_relayed,
+            'caller_alt_ips': _alt_ips('caller'),
+            'answerer_alt_ips': _alt_ips('callee')}
 
 
 def _party_label(ip: str, parties: dict, server_ip: str, role_names: dict) -> str:
-    """端点 IP 的称呼：SIP 主叫/被叫身份 > 抓包角色名 > 原始 IP。"""
+    """端点 IP 的称呼：SIP 主叫/被叫身份 > 抓包角色名 > 原始 IP。
+
+    NAT 别名（该端 SDP 宣告的另一个媒体地址，如私网 IP）同样归到本端。"""
     if parties:
-        if ip and ip == parties.get('caller_ip'):
+        if ip and (ip == parties.get('caller_ip')
+                   or ip in (parties.get('caller_alt_ips') or [])):
             ident = _ident_label(parties.get('caller_ident'))
             return f'主叫 {ident}' if ident else '主叫'
-        if ip and ip == parties.get('answerer_ip'):
+        if ip and (ip == parties.get('answerer_ip')
+                   or ip in (parties.get('answerer_alt_ips') or [])):
             ident = _ident_label(parties.get('answerer_ident'))
             return f'被叫 {ident}' if ident else '被叫'
         if server_ip and ip == server_ip and parties.get('answerer_relayed'):
@@ -945,12 +966,19 @@ def describe_media_parties(manifest: dict, captures: dict, calls: list,
             return
         parties = _parties(call_of_ssrc.get(ssrc))
         # 媒体包的真实流向就是 src → dst（呼入 = 对端 → 本抓包点，呼出反之）
-        src_ip, dst_ip = port_pairs[0][0], port_pairs[0][2]
+        # 端口一并标出（ip:port 即 Wireshark 五元组，方便到原始抓包里追查）
+        src_ip, src_port, dst_ip, dst_port = port_pairs[0]
+        # NAT 标记：收发地址归属某端但不是该端信令 IP（SDP 宣告的别名地址，
+        # 如私网 IP）——展示层据此给"⚠ NAT"徽章，说明仍是本通通话的端
+        alt_ips = set()
+        if parties:
+            alt_ips = set(parties.get('caller_alt_ips') or []) \
+                | set(parties.get('answerer_alt_ips') or [])
         entry['flow'] = {
             'from': {'label': _party_label(src_ip, parties, server_ip, role_names),
-                     'ip': src_ip},
+                     'ip': src_ip, 'port': src_port, 'nat': src_ip in alt_ips},
             'to': {'label': _party_label(dst_ip, parties, server_ip, role_names),
-                   'ip': dst_ip},
+                   'ip': dst_ip, 'port': dst_port, 'nat': dst_ip in alt_ips},
         }
 
     for kind in ('audio', 'video', 'unsupported'):

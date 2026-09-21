@@ -599,6 +599,42 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             for i, info in flow_redirects.items()
         ]
 
+        # —— SDP 协商媒体（每条带 SDP 消息当时宣告的媒体地址/端口）——
+        # 排查 NAT 场景时需要直接看到"谁宣告了哪个地址、协商用了哪些端口"。
+        # 宣告地址不在本消息双方信令 IP 之内的（终端宣告私网地址、RTP 实际
+        # 从公网地址发来）标 NAT，并按腿角色给出归属与 RTP 实际来源的信令
+        # IP；信令 IP（如被叫宣告自己的公网地址）不会误标
+        pair_caller, pair_callee = _call_party_pair(flow, server_ip)
+        alias_owner = {}
+        for cid, info in (call.get('leg_codecs') or {}).items():
+            role = info.get('role')
+            label = '主叫' if role == 'caller' else '被叫'
+            party = pair_caller if role == 'caller' else pair_callee
+            for ip, _port in (call.get('sdp_endpoints_by_cid') or {}).get(cid) or ():
+                if ip and ip != server_ip and ip != party:
+                    alias_owner[ip] = (label, party)
+
+        def _sdp_media(e):
+            items, seen = [], set()
+            for ep in (e.get('sdp') or {}).get('endpoints') or []:
+                if not ep.get('addr') or not ep.get('port'):
+                    continue
+                key = (ep.get('kind'), ep['addr'], ep['port'])
+                if key in seen:
+                    continue
+                seen.add(key)
+                item = {'kind': ep.get('kind'), 'addr': ep['addr'],
+                        'port': ep['port']}
+                if ep['addr'] != e.get('src') and ep['addr'] != e.get('dst'):
+                    item['nat'] = True
+                    owner = alias_owner.get(ep['addr'])
+                    if owner:
+                        item['owner'] = owner[0]
+                        if owner[1]:
+                            item['via_ip'] = owner[1]
+                items.append(item)
+            return items or None
+
         call['sip_flow'] = [{
             'time': e['time'],
             'time_str': _fmt_time(e['time']),
@@ -616,6 +652,9 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             # 编码行插到应答行之后
             'sdp_codecs': ({k: e['sdp'][k] for k in ('audio', 'video')
                             if e['sdp'].get(k)} if e.get('sdp') else None),
+            # 带 SDP 的消息当时宣告的媒体地址/端口（NAT 别名带归属标注），
+            # 供信令阶梯图在该消息行下展示"协商媒体"行
+            'sdp_media': _sdp_media(e) if e.get('sdp') else None,
             # FS 在此消息里把对端媒体地址透传给了本端（媒体改道证据），供
             # 信令阶梯图在消息行上直接标注
             'media_redirect': flow_redirects.get(i),
@@ -880,7 +919,10 @@ def refine_calls(calls: list, server_ip: str = None) -> list:
        端点 ≤2 + 媒体结束时间对齐」并成通话——B2BUA 一通电话两侧腿媒体并
        发、挂断时同时停流，且只涉及两个设备端点（半呼叫形状）；冒出第 3 个
        端点、或挂断时刻对不上（共享同一设备 IP 的另一通电话会同时并发）即
-       另一通电话；
+       另一通电话。NAT 环境下终端 SDP 宣告私网地址、RTP 实际从 NAT 公网
+       地址发来，同一个终端在媒体层出现两个 IP：共享同一端点（ip:port）的
+       腿另一侧 IP 归并成同一设备后再数（FS 的一个 RTP 端口会话自始至终
+       只有一个对端设备），按 IP 直数会把一通电话的 A/B 腿拆成两通；
     4. 没绑上任何对话框的腿（RTCP 端口对、信令全缺的媒体）：非服务器 IP 与
        某组件相交且时间重叠的归入，否则按旧规则（时间重叠 + 共享 IP）自聚
        成无信令通话。
@@ -984,12 +1026,52 @@ def refine_calls(calls: list, server_ip: str = None) -> list:
     def unit_end(u) -> float:
         return max(leg['end'] for leg in u['legs'])
 
+    def device_count(*us) -> int:
+        """两个单元合并后的设备数：非服务器 IP 并集去重，但共享同一端点
+        （ip:port 相同）的两条腿另一侧 IP 视为同一台设备。
+
+        NAT 环境下终端 SDP 宣告私网地址、RTP 实际从 NAT 公网地址发来，同一
+        个终端在媒体层出现两个 IP（FS 的一个 RTP 端口会话自始至终只有一个
+        对端设备）；按 IP 直数会把一通电话的 A/B 腿拆成两通。
+        """
+        ips = {}
+        parent = []
+
+        def add(ip):
+            i = ips.get(ip)
+            if i is None:
+                i = len(parent)
+                ips[ip] = i
+                parent.append(i)
+            return i
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for u in us:
+            for ip in unit_devips(u):
+                add(ip)
+        all_legs = [leg for u in us for leg in u['legs']]
+        for a in range(len(all_legs)):
+            for b in range(a + 1, len(all_legs)):
+                ea, eb = all_legs[a]['endpoints'], all_legs[b]['endpoints']
+                for s in (0, 1):
+                    o = 1 - s
+                    if ea[s] == eb[s] and ea[o][0] != eb[o][0]:
+                        ra, rb = find(add(ea[o][0])), find(add(eb[o][0]))
+                        if ra != rb:
+                            parent[rb] = ra
+        return len({find(i) for i in ips.values()})
+
     changed = True
     while changed:
         changed = False
         for i in range(len(units)):
             for j in range(i + 1, len(units)):
-                if (len(unit_devips(units[i]) | unit_devips(units[j])) > 2
+                if (device_count(units[i], units[j]) > 2
                         or abs(unit_end(units[i]) - unit_end(units[j])) > END_ALIGN_S
                         or _legs_time_overlap(units[i]['legs'],
                                               units[j]['legs']) <= 0):
@@ -1118,11 +1200,16 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
 
     实测判据是各设备与 FS 之间的 RTP 上/下行（腿内每条 SSRC 流方向恒定），
     信令判据是 SDP 透传改道（media_redirects）。结论按排查优先级组织：
-    1. 中转问题优先——FS 改道直连（SDP 透传）、或两端都没有向 FS 上行 RTP，
-       说明媒体没走 FS 中转，先查 FS 中转配置（bypass media / 媒体地址通告），
+    1. 中转问题优先——FS 改道直连（SDP 透传）、两端都没有向 FS 上行 RTP，
+       或 FS 收到某端上行却对该端 0 回发同类媒体（partial_downlink，单向
+       转发缺失，听者侧单通），说明问题在 FS 中转/发送侧，先查 FS 配置，
        不要先怀疑网络；
     2. 网络问题其次——只有部分端点/媒体有上行时（发了的和没发的混着），
        才往网络方向排查。
+
+    NAT 场景下 FS 的下行发往对端 SDP 宣告地址（如私网 IP），与该端 RTP 的
+    实际上行来源不同：统计前先按 SDP 宣告端点 × 腿角色建别名映射，把下行
+    归并到真实设备，并生成一条 rtp-auto-adjust 配置提示。
 
     Returns None 表示无需此判定（点对点直连通话已有专门提示，或无服务器 IP）。
     """
@@ -1138,9 +1225,23 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
                             '（需在 FS 上或其镜像口抓包）',
                 'advice': '', 'redirects': [], 'devices': [], 'notes': []}
 
+    # 主被叫 IP + NAT 别名映射：SDP 宣告地址（如私网 IP）→ 信令识别的端 IP。
+    # 不映射的话同一下行会被拆到一台"幻影设备"上，误判成该端零下行
+    caller_ip, callee_ip = _call_party_pair(call.get('sip_flow') or [], server_ip)
+    alias_to_party = {}
+    for cid, info in (call.get('leg_codecs') or {}).items():
+        party = caller_ip if info.get('role') == 'caller' else callee_ip
+        if not party:
+            continue
+        for ip, _port in (call.get('sdp_endpoints_by_cid') or {}).get(cid) or ():
+            if ip and ip != server_ip and ip != party:
+                alias_to_party[ip] = party
+
     # 每台设备与 FS 之间按媒体类别的上下行实测
     stream_kinds = _stream_kinds(captures)
     stats = {}   # device_ip -> {'up': {kind: agg}, 'down': {kind: agg}}
+    # 下行发往 SDP 宣告的别名地址的记录（NAT 场景提示用）
+    nat_down = {}
     for leg in call['legs']:
         if server_ip not in leg['ips']:
             continue
@@ -1154,6 +1255,12 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
             kind = _pt_kind(stream_kinds, ssrc, st['pt'])
             if not kind:
                 continue
+            mapped = alias_to_party.get(dev)
+            if mapped and mapped != dev:
+                nat_down.setdefault((dev, kind),
+                                    {'ip': dev, 'port': st['dst_port'],
+                                     'party': mapped, 'kind': kind})
+                dev = mapped
             agg = (stats.setdefault(dev, {'up': {}, 'down': {}})[direction]
                         .setdefault(kind, {'pkts': 0,
                                            'first': st['start'], 'last': st['end']}))
@@ -1163,7 +1270,6 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
 
     # 期望参与转发的设备集：信令识别出的主叫/被叫，缺信令时退回媒体腿上
     # 与 FS 通信过的非服务器 IP
-    caller_ip, callee_ip = _call_party_pair(call.get('sip_flow') or [], server_ip)
     expected = [ip for ip in (caller_ip, callee_ip) if ip and ip != server_ip]
     if not expected:
         expected = sorted({ip for leg in call['legs'] if server_ip in leg['ips']
@@ -1196,8 +1302,29 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
 
     redirs = call.get('media_redirects') or []
     notes = []
+    for nd in nat_down.values():
+        kname = '音频' if nd['kind'] == 'audio' else '视频'
+        notes.append(f"FS 的{kname}下行发往 SDP 宣告地址 {nd['ip']}:{nd['port']}"
+                     f"（{_label(nd['party'])} 的另一个地址，该端 RTP 实际来源是"
+                     f" {nd['party']}）——NAT 场景下若该端收不到下行，检查 FS 的"
+                     ' rtp-auto-adjust（RTP 对端地址自动调整）配置')
     up_devs = [d for d in devices if any(v['pkts'] > 0 for v in d['uplink'].values())]
     no_up_devs = [d for d in devices if not any(v['pkts'] > 0 for v in d['uplink'].values())]
+
+    # 单向转发缺失：FS 收到了某端对端的上行，却从未向该端回发同类媒体。
+    # 全部端点都有上行时才算（否则 partial_uplink 已覆盖；改道时 FS 看不到
+    # 端到端媒体，不下此结论）
+    missing_down = []
+    if not redirs and len(up_devs) == len(devices):
+        for d in devices:
+            peer = next((x for x in devices if x['ip'] != d['ip']), None)
+            if not peer:
+                continue
+            kinds = [k for k in ('audio', 'video')
+                     if not d['downlink'][k]['pkts']
+                     and peer['uplink'][k]['pkts'] > 0]
+            if kinds:
+                missing_down.append({'dev': d, 'kinds': kinds})
 
     if redirs:
         r0 = redirs[0]
@@ -1234,10 +1361,25 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
     elif no_up_devs:
         sent = '、'.join(d['label'] for d in up_devs)
         missing = '、'.join(d['label'] for d in no_up_devs)
-        headline = (f'只有 {sent} 向 FS 发送了媒体，{missing} 没有任何上行 RTP。')
+        headline = f'只有 {sent} 向 FS 发送了媒体，{missing} 没有任何上行 RTP。'
         advice = ('排查优先级：一部分发了、一部分没发 → 这种情况才考虑网络问题：'
                   '先在未发送端本地抓包，确认它确实在发（排除终端自身不发），'
                   '再逐段检查链路、防火墙/NAT。')
+    elif missing_down:
+        parts = []
+        for m in missing_down:
+            kname = '、'.join('音频' if k == 'audio' else '视频' for k in m['kinds'])
+            peer = next((x for x in devices if x['ip'] != m['dev']['ip']), None)
+            up = max((peer['uplink'][k]['pkts'] for k in m['kinds']), default=0)
+            parts.append(f"{m['dev']['label']} 缺{kname}下发"
+                         f"（对端上行 {up} 包，FS 回发 0 包）")
+        headline = ('各端都在向 FS 发送媒体，但 FS 收到后从未回发——'
+                    + '；'.join(parts) + '，单向转发缺失（听者侧单通）')
+        advice = ('排查优先级：这不是网络问题——FS 与该端点之间的其他媒体流正常，'
+                  '对端也一直在等（持续探测、RTCP 显示该类媒体零接收）。FS 收得到'
+                  '上行却没回发，查 FS 侧该腿的音频发送通道：bridge 是否真正建立、'
+                  'write codec 是否激活（uuid_dump / show channels）、该平台对这条'
+                  '腿有无 bypass / 媒体方向相关的特殊配置。')
     else:
         headline = '各端都有上行、FS 也有下行——媒体确实经过 FS 中转。'
         advice = ''
@@ -1270,7 +1412,8 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
     return {'available': True, 'verdict': (
                 'redirected' if redirs else
                 'no_relay' if not up_devs else
-                'partial_uplink' if no_up_devs else 'relayed'),
+                'partial_uplink' if no_up_devs else
+                'partial_downlink' if missing_down else 'relayed'),
             'headline': headline, 'advice': advice,
             'redirects': [{'time_str': r['time_str'], 'label': r['label'],
                            'dst': _label(r['dst']) if r['dst'] != server_ip else r['dst'],
@@ -1387,6 +1530,16 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
         talk_dur = talk[1] - talk[0]
 
         p2p = _is_direct_media(call, server_ip)
+        # 各腿 SDP 宣告的非服务器 IP（按主叫/被叫腿分组）：媒体清单标注用，
+        # NAT 环境下终端宣告私网地址、RTP 从公网地址发来时与信令 IP 不同
+        sdp_party_ips = {'caller': [], 'callee': []}
+        for cid, info in (call.get('leg_codecs') or {}).items():
+            role = info.get('role')
+            if role not in sdp_party_ips:
+                continue
+            for ip, _port in (call.get('sdp_endpoints_by_cid') or {}).get(cid) or ():
+                if ip and ip != server_ip and ip not in sdp_party_ips[role]:
+                    sdp_party_ips[role].append(ip)
         results.append({
             'call_id': f'call_{idx + 1}',
             'start': call['start'],
@@ -1416,6 +1569,8 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             'sdp_answered': call.get('sdp_answered', True),
             'ssrcs': sorted(call['ssrcs']),
             'is_p2p': p2p,
+            # 各腿 SDP 宣告的非服务器 IP：NAT 别名归属（主叫/被叫的另一地址）
+            'sdp_party_ips': sdp_party_ips,
             # 点对点直连时给出两端 IP，供提示文案直接展示（一眼确认）
             'p2p_endpoints': sorted({ip for leg in call['legs']
                                      for ip in leg['ips']}) if p2p else [],

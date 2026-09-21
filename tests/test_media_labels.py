@@ -94,13 +94,13 @@ def test_fs_streams_labeled_with_caller_callee():
 
     flows = {e['ssrc']: e['flow'] for e in manifest['audio']}
     assert flows['0x0000aaaa'] == {
-        'from': {'label': '主叫 张三（1001）', 'ip': TERM},
-        'to': {'label': 'FS', 'ip': SERVER}}, flows['0x0000aaaa']
+        'from': {'label': '主叫 张三（1001）', 'ip': TERM, 'port': 7080, 'nat': False},
+        'to': {'label': 'FS', 'ip': SERVER, 'port': 34576, 'nat': False}}, flows['0x0000aaaa']
     assert flows['0x0000bbbb']['from']['label'] == 'FS'
     assert flows['0x0000bbbb']['to']['label'] == '主叫 张三（1001）'
     assert flows['0x0000cccc'] == {
-        'from': {'label': '被叫 李四（1002）', 'ip': SEAT},
-        'to': {'label': 'FS', 'ip': SERVER}}, flows['0x0000cccc']
+        'from': {'label': '被叫 李四（1002）', 'ip': SEAT, 'port': 6000, 'nat': False},
+        'to': {'label': 'FS', 'ip': SERVER, 'port': 34580, 'nat': False}}, flows['0x0000cccc']
     assert flows['0x0000dddd']['from']['label'] == 'FS'
     assert flows['0x0000dddd']['to']['label'] == '被叫 李四（1002）'
 
@@ -129,12 +129,12 @@ def test_endpoint_captures_share_ssrc_labels():
     describe_media_parties(manifest, captures, [call], SERVER, FILES_INFO)
 
     seat = manifest['audio'][0]['flow']
-    assert seat['from'] == {'label': 'FS', 'ip': SERVER}
-    assert seat['to'] == {'label': '被叫 李四（1002）', 'ip': SEAT}
+    assert seat['from'] == {'label': 'FS', 'ip': SERVER, 'port': 34582, 'nat': False}
+    assert seat['to'] == {'label': '被叫 李四（1002）', 'ip': SEAT, 'port': 6000, 'nat': False}
 
     term = manifest['audio'][1]['flow']
-    assert term['from'] == {'label': '主叫 张三（1001）', 'ip': TERM}
-    assert term['to'] == {'label': 'FS', 'ip': SERVER}
+    assert term['from'] == {'label': '主叫 张三（1001）', 'ip': TERM, 'port': 7080, 'nat': False}
+    assert term['to'] == {'label': 'FS', 'ip': SERVER, 'port': 34576, 'nat': False}
     print("PASS: endpoint captures label their own receive/send side")
 
 
@@ -174,8 +174,8 @@ def test_unsupported_entries_get_flow():
     describe_media_parties(manifest, captures, [call], SERVER, FILES_INFO)
 
     flow = manifest['unsupported'][0]['flow']
-    assert flow == {'from': {'label': '主叫 张三（1001）', 'ip': TERM},
-                    'to': {'label': 'FS', 'ip': SERVER}}, flow
+    assert flow == {'from': {'label': '主叫 张三（1001）', 'ip': TERM, 'port': 7080, 'nat': False},
+                    'to': {'label': 'FS', 'ip': SERVER, 'port': 34576, 'nat': False}}, flow
     print("PASS: unsupported entries get flow labels (from src->dst port pair)")
 
 
@@ -241,7 +241,8 @@ def test_extract_call_parties_fallbacks():
     empty = extract_call_parties({'sip_flow': []}, SERVER)
     assert empty == {'caller_ip': None, 'caller_ident': {},
                      'answerer_ip': None, 'answerer_ident': {},
-                     'answerer_relayed': False}
+                     'answerer_relayed': False,
+                     'caller_alt_ips': [], 'answerer_alt_ips': []}
     print("PASS: party extraction fallbacks")
 
 

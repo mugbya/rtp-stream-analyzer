@@ -502,6 +502,16 @@ def run_analysis():
     results['audio_quality'] = audio_quality
     results['video_quality'] = video_quality
 
+    # 把每条流的收发双方（flow）并入质量结果：报告区的链路方向头与回放区
+    # 同构，也要标"谁到谁"的真实 IP（回放区直接从媒体清单条目取 flow）
+    for kind, quality in (('audio', audio_quality), ('video', video_quality)):
+        for entry in media_manifest.get(kind) or []:
+            if not entry.get('flow'):
+                continue
+            lbl = f"{entry.get('role')} (SSRC={entry.get('ssrc')})"
+            if lbl in quality:
+                quality[lbl]['flow'] = entry['flow']
+
     # === FS 内部延迟 ===
     fs_delay = None
     if check_delay and ('fs' in captures or 'FS' in captures):

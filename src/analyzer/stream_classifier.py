@@ -233,6 +233,19 @@ def detect_server_ip(all_streams: dict, sip_events: list = None) -> str:
     return ranked[0][0]
 
 
+def _norm_ip_cond(cond):
+    """归一化 src_is/dst_is 的 IP 条件。
+
+    单个 IP（str）→ 单元素元组；否则原样（list/tuple/set 均可 `in` 匹配）。
+    不能把 IP 字符串当子串做 `in` 判断（如 '10.1' in '10.1.2.3' 会误命中）。
+    """
+    if cond is None:
+        return None
+    if isinstance(cond, str):
+        return (cond,)
+    return tuple(cond)
+
+
 def pick_call_stream(cap: dict, call_ssrcs, src_is=None, dst_is=None):
     """在一份抓包里按收发 IP 条件选通话音频流（多个命中取包数最多的）。
 
@@ -240,10 +253,14 @@ def pick_call_stream(cap: dict, call_ssrcs, src_is=None, dst_is=None):
         cap: extract_rtp_packets 的输出（含 streams）。
         call_ssrcs: 通话的候选 SSRC 集合。
         src_is / dst_is: 要求流出现在 src→dst 方向的 IP 条件，None 不限制。
+            可传单个 IP 字符串，或 IP 可迭代对象（NAT 场景下同一端有信令 IP
+            与 SDP 宣告的别名地址，任一命中即可）。
 
     Returns:
         命中的 SSRC，或 None。
     """
+    src_cond = _norm_ip_cond(src_is)
+    dst_cond = _norm_ip_cond(dst_is)
     best, best_n = None, 0
     for ssrc in call_ssrcs:
         info = (cap.get('streams') or {}).get(ssrc)
@@ -254,9 +271,9 @@ def pick_call_stream(cap: dict, call_ssrcs, src_is=None, dst_is=None):
                 not any(pt in AUDIO_PT for pt in info.get('pt', [])):
             continue
         for pp in info.get('port_pairs') or []:
-            if src_is and pp[0] != src_is:
+            if src_cond and pp[0] not in src_cond:
                 continue
-            if dst_is and pp[2] != dst_is:
+            if dst_cond and pp[2] not in dst_cond:
                 continue
             if info['count'] > best_n:
                 best, best_n = ssrc, info['count']

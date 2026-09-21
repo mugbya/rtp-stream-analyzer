@@ -1173,6 +1173,155 @@ def test_call_party_pair_unanswered_callee_fallback():
     print("PASS: unanswered call callee via peer fallback in party pair")
 
 
+def test_nat_call_merge_and_alias_downlink():
+    """NAT 场景（主叫 SDP 宣告私网地址、RTP 从公网地址发来）：
+
+    主叫同一台设备在媒体层出现两个 IP——SDP 宣告的私网 IP（FS 下行发往
+    它）+ 实际上行的公网 IP。旧版设备计数按 IP 直数出 3 台"设备"，A/B
+    两个半呼叫拒绝合并，一通电话被拆成两通。现在按"共享同一端点的腿另一
+    侧 IP 归并为同一设备"计数后正确并回一通；FS 发往私网地址的下行也归并
+    回主叫设备，并给出 rtp-auto-adjust 配置提示。
+    """
+    from analyzer.media_extractor import extract_call_parties, _party_label
+
+    TERM_PUB, TERM_PRIV = '172.110.249.67', '10.22.68.170'
+    streams = [
+        # 主叫上行：RTP 实际从 NAT 公网地址发往 FS 的 A 腿媒体端口
+        (0x1111, 10002, 22532, 100, 160, 0, TERM_PUB, SERVER, 0, 0.02),
+        # FS 下行：发往主叫 SDP 宣告的私网地址
+        (0x1112, 22532, 10002, 100, 160, 0, SERVER, TERM_PRIV, 0, 0.02),
+        # 被叫腿（无 NAT，上下行同端口对）
+        (0x1113, 6000, 22632, 100, 160, 0, SEAT, SERVER, 0, 0.02),
+        (0x1114, 22632, 6000, 100, 160, 0, SERVER, SEAT, 0, 0.02),
+    ]
+    sip = [
+        make_sip_event(95, 'INVITE', 'a', 1, TERM_PUB, SERVER,
+                       sdp=_sdp([(TERM_PRIV, 10002)])),
+        make_sip_event(99, '200', 'a', 1, SERVER, TERM_PUB,
+                       sdp=_sdp([(SERVER, 22532)]), cseq_method='INVITE'),
+        make_sip_event(96, 'INVITE', 'b', 1, SERVER, SEAT,
+                       sdp=_sdp([(SERVER, 22632)])),
+        make_sip_event(100, '200', 'b', 1, SEAT, SERVER,
+                       sdp=_sdp([(SEAT, 6000)]), cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, TERM_PUB, SERVER),
+        make_sip_event(165.5, 'BYE', 'b', 2, SERVER, SEAT),
+    ]
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    rd['ips'] = {SERVER, TERM_PUB, TERM_PRIV, SEAT}
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 1, f"NAT call split into {len(calls)} calls"
+    call = calls[0]
+    assert set(call['sip_call_ids']) == {'a', 'b'}, call['sip_call_ids']
+    assert call['stream_count'] == 4, call['ssrcs']
+    assert call['completeness']['status'] == 'complete'
+
+    # 各腿 SDP 宣告的非服务器 IP 按腿角色导出：主叫腿宣告了私网别名
+    assert call['sdp_party_ips'] == {'caller': [TERM_PRIV], 'callee': [SEAT]}, \
+        call['sdp_party_ips']
+
+    # FS 发往私网地址的下行归并回主叫设备（不再是"幻影设备"零下行）
+    relay = call['fs_relay']
+    assert relay['available'] and relay['verdict'] == 'relayed', relay
+    caller_dev = next(d for d in relay['devices'] if d['ip'] == TERM_PUB)
+    assert caller_dev['downlink']['audio']['pkts'] > 0, caller_dev
+    nat_notes = [n for n in relay['notes'] if 'rtp-auto-adjust' in n]
+    assert nat_notes and TERM_PRIV in nat_notes[0] and TERM_PUB in nat_notes[0], \
+        relay['notes']
+
+    # 媒体清单侧：私网地址标注为主叫的别名地址，不再出现"未知 IP"
+    parties = extract_call_parties(call, SERVER)
+    assert parties['caller_alt_ips'] == [TERM_PRIV], parties
+    assert parties['answerer_alt_ips'] == [], parties
+    assert _party_label(TERM_PRIV, parties, SERVER, {}) == '主叫', \
+        _party_label(TERM_PRIV, parties, SERVER, {})
+
+    # 信令流程带 SDP 协商媒体：主叫 INVITE 宣告的私网地址不在消息双方信令
+    # IP 之内 → 标 NAT 并给出归属与 RTP 实际来源；FS 应答宣告自己的媒体
+    # 地址不误标
+    inv_a = next(m for m in call['sip_flow'] if m['method'] == 'INVITE'
+                 and m.get('call_id') == 'a')
+    assert inv_a['sdp_media'] == [
+        {'kind': 'audio', 'addr': TERM_PRIV, 'port': 10002,
+         'nat': True, 'owner': '主叫', 'via_ip': TERM_PUB}], inv_a['sdp_media']
+    ok_a = next(m for m in call['sip_flow'] if m['method'] == '200'
+                and m.get('call_id') == 'a')
+    assert ok_a['sdp_media'] == [
+        {'kind': 'audio', 'addr': SERVER, 'port': 22532}], ok_a['sdp_media']
+    print("PASS: NAT call merged into one; alias downlink folded to caller; "
+          "alt-IP labeled as caller")
+
+
+def test_fs_relay_partial_downlink():
+    """单向转发缺失（partial_downlink）：FS 收到被叫音频上行却 0 回发，
+    判定链排在 partial_uplink 之后、relayed 之前，结论指向 FS 侧发送通道
+    （bridge / write codec），明确"不是网络问题"。"""
+    streams = [
+        (0x1111, 5000, 6000, 100, 160, 0, TERM, SERVER, 0, 0.02),
+        (0x1112, 6000, 5000, 100, 160, 0, SERVER, TERM, 0, 0.02),
+        # 被叫音频只有上行；FS → 被叫的音频下行整通 0 包
+        (0x1113, 7000, 8000, 100, 160, 0, SEAT, SERVER, 0, 0.02),
+    ]
+    sip = [
+        make_sip_event(95, 'INVITE', 'a', 1, TERM, SERVER,
+                       sdp=make_sdp(audio=['PCMU'])),
+        make_sip_event(99, '200', 'a', 1, SERVER, TERM,
+                       sdp=make_sdp(audio=['PCMU']), cseq_method='INVITE'),
+        make_sip_event(96, 'INVITE', 'b', 1, SERVER, SEAT,
+                       sdp=make_sdp(audio=['PCMU'])),
+        make_sip_event(100, '200', 'b', 1, SEAT, SERVER,
+                       sdp=make_sdp(audio=['PCMU']), cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, TERM, SERVER),
+        make_sip_event(165.5, 'BYE', 'b', 2, SERVER, SEAT),
+    ]
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    rd['ips'] = {SERVER, TERM, SEAT}
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 1, f"expected 1 call, got {len(calls)}"
+    relay = calls[0]['fs_relay']
+    assert relay['available'] and relay['verdict'] == 'partial_downlink', relay
+    seat_dev = next(d for d in relay['devices'] if d['ip'] == SEAT)
+    term_dev = next(d for d in relay['devices'] if d['ip'] == TERM)
+    assert seat_dev['uplink']['audio']['pkts'] > 0, seat_dev
+    assert seat_dev['downlink']['audio']['pkts'] == 0, seat_dev
+    assert term_dev['downlink']['audio']['pkts'] > 0, term_dev
+    assert '缺音频下发' in relay['headline'] and SEAT in relay['headline'], \
+        relay['headline']
+    assert 'uuid_dump' in relay['advice'] and '不是网络问题' in relay['advice'], \
+        relay['advice']
+    # 下行来源核对提示仍如实记录该方向未发生转发
+    assert any('该方向未发生转发' in n for n in relay['notes']), relay['notes']
+    print("PASS: FS uplink-with-no-downlink -> verdict partial_downlink "
+          "pointing at FS send path")
+
+
+def test_partial_downlink_not_when_partial_uplink():
+    """判定优先级：只有部分端点有上行时仍是 partial_uplink（缺上行本身
+    已解释缺下行），不叠加 partial_downlink 结论。"""
+    streams = [
+        (0x1111, 5000, 6000, 100, 160, 0, TERM, SERVER, 0, 0.02),
+        (0x1112, 6000, 5000, 100, 160, 0, SERVER, TERM, 0, 0.02),
+        # 被叫整通无任何 RTP：partial_uplink，而不是 partial_downlink
+    ]
+    sip = [
+        make_sip_event(95, 'INVITE', 'a', 1, TERM, SERVER,
+                       sdp=make_sdp(audio=['PCMU'])),
+        make_sip_event(99, '200', 'a', 1, SERVER, TERM,
+                       sdp=make_sdp(audio=['PCMU']), cseq_method='INVITE'),
+        make_sip_event(96, 'INVITE', 'b', 1, SERVER, SEAT,
+                       sdp=make_sdp(audio=['PCMU'])),
+        make_sip_event(100, '200', 'b', 1, SEAT, SERVER,
+                       sdp=make_sdp(audio=['PCMU']), cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, TERM, SERVER),
+        make_sip_event(165.5, 'BYE', 'b', 2, SERVER, SEAT),
+    ]
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    rd['ips'] = {SERVER, TERM}
+    calls = detect_calls({'fs': rd}, SERVER)
+    relay = calls[0]['fs_relay']
+    assert relay['verdict'] == 'partial_uplink', relay
+    print("PASS: callee with no RTP at all stays partial_uplink")
+
+
 if __name__ == '__main__':
     test_two_sequential_calls()
     test_port_reuse_same_ports()
@@ -1201,4 +1350,7 @@ if __name__ == '__main__':
     test_fs_media_unknown_single_leg()
     test_fs_media_clock_rate_mismatch()
     test_call_party_pair_unanswered_callee_fallback()
+    test_nat_call_merge_and_alias_downlink()
+    test_fs_relay_partial_downlink()
+    test_partial_downlink_not_when_partial_uplink()
     print("\n=== ALL CALL DETECTOR TESTS PASSED ===")

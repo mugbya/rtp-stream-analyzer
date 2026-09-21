@@ -404,7 +404,7 @@ function renderCalls(calls, captureWarning, uploads) {
                 <span class="badge bg-light text-dark">${c.stream_count} 条流</span>
                 <span class="badge bg-light text-dark">${media}</span>
                 ${_callSourceBadges(c, uploads)}
-                ${_callPartyChain(flow)}
+                ${_callPartyChain(flow, c)}
             </div>
             ${_fsRelayHtml(relay)}
             ${flowHtml}
@@ -535,6 +535,52 @@ function _sdpListRow(m) {
         `<i class="bi bi-file-earmark-code"></i> ${_sdpTag(m)}</span> ${parts.join('，')}</div>`;
 }
 
+// SDP 协商媒体行：该消息当时宣告的媒体地址/端口（🎵 音频 ip:port / 🎬 视频
+// ip:port）。排查 NAT 场景时直接看得到"谁宣告了哪个地址、协商用了哪些端口"。
+// 宣告地址不在本消息双方信令 IP 之内的标红色 ⚠NAT，tooltip 注明归属与该端
+// RTP 实际来源；信令 IP（如被叫宣告自己的公网地址）不会误标。
+// 同一条腿重复协商且端口不变时不重复展示（shown 按 call_id 去重）
+function _sdpMediaChips(m, shown) {
+    let items = m.sdp_media || [];
+    if (m.call_id) {
+        const s = shown[m.call_id] || (shown[m.call_id] = new Set());
+        items = items.filter(it => {
+            const key = `${it.kind}|${it.addr}|${it.port}`;
+            if (s.has(key)) return false;
+            s.add(key);
+            return true;
+        });
+    }
+    return items.map(it => {
+        const icon = it.kind === 'video' ? 'bi-camera-video' : 'bi-music-note-beamed';
+        const name = it.kind === 'video' ? '视频' : '音频';
+        let nat = '';
+        if (it.nat) {
+            let tip = '该地址不在本消息双方信令 IP 之内（NAT 场景：终端宣告的' +
+                '地址与 RTP 实际来源不同），仍属于本通通话';
+            if (it.owner) {
+                tip = it.via_ip
+                    ? `${it.owner}在 SDP 里宣告的另一个地址（NAT）：RTP 实际从 ` +
+                      `${it.via_ip} 发来——属于${it.owner}那一端，不是其他通话的设备`
+                    : `${it.owner}在 SDP 里宣告的另一个地址（NAT）`;
+            }
+            nat = ` <span class="badge bg-danger" title="${_esc(tip)}">⚠NAT</span>`;
+        }
+        return `<span class="badge text-bg-light border" ` +
+            `title="该消息 SDP 宣告的${name}媒体地址">` +
+            `<i class="bi ${icon}"></i> ${name} ${_esc(it.addr)}:${it.port}${nat}</span>`;
+    }).join('');
+}
+
+function _sdpMediaRow(m, shown) {
+    const items = m.sdp_media || [];
+    if (!items.length) return '';
+    const chips = _sdpMediaChips(m, shown);
+    if (!chips) return '';
+    return `<div class="sl-sdplist"><span class="sl-sdp">` +
+        `<i class="bi bi-geo-alt"></i> 协商媒体</span> ${chips}</div>`;
+}
+
 function _sipLadder(flow, call) {
     if (!flow || !flow.length) return '';
     const { cols, server, caller, answerer, msgs } = _sipParties(flow);
@@ -581,6 +627,8 @@ function _sipLadder(flow, call) {
     // 每条消息的行区间，供标线/协商行按消息下标锚定。
     const rows = [];
     const rowBefore = {}, rowAfter = {};
+    // 协商媒体按 call_id 去重：同一腿反复 re-INVITE 且地址端口不变只展示一次
+    const shownMedia = {};
     msgs.forEach((m, i) => {
         const a = colOf(m.src), b = colOf(m.dst);
         const kindCls = SIP_KIND_CLASS[m.kind] || '';
@@ -601,6 +649,8 @@ function _sipLadder(flow, call) {
             `<div class="sl-track" style="grid-template-columns:repeat(${n},1fr)">${inner}</div></div>`);
         const list = _sdpListRow(m);
         if (list) rows.push(list);
+        const mediaRow = _sdpMediaRow(m, shownMedia);
+        if (mediaRow) rows.push(mediaRow);
         rowAfter[i] = rows.length;
     });
     if (call) {
@@ -713,8 +763,10 @@ function _sipLadder(flow, call) {
     return html + rows.join('') + `</div>`;
 }
 
-// 卡片头部的「谁打给谁」摘要：主叫 → （FS）→ 被叫，身份与阶梯图列头一致
-function _callPartyChain(flow) {
+// 卡片头部的「谁打给谁」摘要：主叫 → （FS）→ 被叫，身份与阶梯图列头一致。
+// 第一行是角色徽章链路（三段式：经 FS；两段式：端到端），第二行给原始 IP
+// 的「谁到谁」链路，并标出 NAT 别名（该端 SDP 宣告了另一个媒体地址）
+function _callPartyChain(flow, call) {
     if (!flow || !flow.length) return '';
     const { server, caller, answerer, msgs } = _sipParties(flow);
     const idents = _sipIdents(msgs, caller, answerer);
@@ -725,10 +777,42 @@ function _callPartyChain(flow) {
             `<span class="text-muted">${ip}</span>`;
     };
     const arrow = '<i class="bi bi-arrow-right text-muted"></i>';
-    let html = seg('主叫', 'bg-primary', caller, idents[caller]);
-    if (server) html += arrow + '<span class="badge bg-dark">FS</span>';
-    if (answerer) html += arrow + seg('被叫', 'bg-success', answerer, idents[answerer]);
-    return `<span class="d-inline-flex align-items-center gap-1 flex-wrap small">${html}</span>`;
+    let top = seg('主叫', 'bg-primary', caller, idents[caller]);
+    if (server) top += arrow + '<span class="badge bg-dark">FS</span>' +
+        `<span class="text-muted">${_esc(server)}</span>`;
+    if (answerer) top += arrow + seg('被叫', 'bg-success', answerer, idents[answerer]);
+
+    // NAT 别名：该端所在腿 SDP 宣告、既不是本端信令 IP、也没有在另一条腿
+    // 也宣告过的地址（终端宣告私网、RTP 走公网；FS 转投对端地址会同时出现
+    // 在两腿的 SDP 里，不算别名）
+    const spi = (call && call.sdp_party_ips) || {};
+    const aliasOf = role => {
+        const other = role === 'caller' ? 'callee' : 'caller';
+        const sig = role === 'caller' ? caller : answerer;
+        const otherSig = role === 'caller' ? answerer : caller;
+        const own = spi[role] || [];
+        const otherList = spi[other] || [];
+        return (own.filter(ip => ip && ip !== server && ip !== sig &&
+            ip !== otherSig && !otherList.includes(ip)))[0] || null;
+    };
+    const natBadge = alias => alias
+        ? ` <span class="badge bg-danger" title="该端在 SDP 里宣告了另一个媒体地址 ${_esc(alias)}（NAT）：RTP 实际从本端信令 IP 发来">⚠NAT</span>`
+        : '';
+
+    const hops = [];
+    if (caller) hops.push({ ip: caller, nat: natBadge(aliasOf('caller')) });
+    if (server) hops.push({ ip: server, nat: '' });
+    if (answerer) hops.push({ ip: answerer, nat: natBadge(aliasOf('callee')) });
+    let ipLine = '';
+    if (hops.length >= 2) {
+        ipLine = `<div class="text-muted small"><i class="bi bi-arrow-left-right me-1"></i>媒体 IP：` +
+            hops.map(h => `${_esc(h.ip)}${h.nat}`)
+                .join(' <i class="bi bi-arrow-right text-muted"></i> ') +
+            '</div>';
+    }
+    return `<span class="d-inline-flex flex-column align-items-start small">` +
+        `<span class="d-inline-flex align-items-center gap-1 flex-wrap">${top}</span>` +
+        ipLine + `</span>`;
 }
 
 // ====== 分析配置面板 ======

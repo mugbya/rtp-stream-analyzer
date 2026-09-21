@@ -501,13 +501,52 @@ function _chainNodeBadge(name) {
     return `<span class="badge ${cls}">${_esc(name)}</span>`;
 }
 
-// 链路：主叫 → FS → 被叫；点对点（p2p=true）时中间的 FS 不展示
-function _chainHtml(speaker, listener, p2p) {
+// 链路：主叫 → FS → 被叫；点对点（p2p=true）时中间的 FS 不展示。
+// ipMap（_partyIpMap 的输出）可选：键为节点短名（主叫/被叫/FS/服务端），
+// 值为该端的实际 IP 列表（含 NAT 别名）——每个节点旁标注 IP 供追查
+function _chainHtml(speaker, listener, p2p, ipMap) {
     const arrow = '<i class="bi bi-arrow-right text-muted mx-1"></i>';
-    let html = _chainNodeBadge(speaker || '主叫');
-    if (!p2p) html += arrow + '<span class="badge bg-dark">服务端</span>';
-    html += arrow + _chainNodeBadge(listener || '被叫');
+    const node = name => {
+        let h = _chainNodeBadge(name);
+        const list = ipMap && ipMap[name];
+        if (list && list.length) {
+            h += `<span class="text-muted small ms-1">${list.map(o =>
+                o.nat ? `${_esc(o.ip)}（NAT）` : _esc(o.ip)).join(' / ')}</span>`;
+        }
+        return h;
+    };
+    let html = node(speaker || '主叫');
+    if (!p2p) html += arrow + node('服务端');
+    html += arrow + node(listener || '被叫');
     return `<span class="chain-line d-inline-flex align-items-center flex-wrap">${html}</span>`;
+}
+
+// 汇总"链路节点短名 → 实际 IP 列表"：通话拓扑（信令识别的各端 IP）打底，
+// 每条媒体流的真实收发地址（flow，含 NAT 别名）补充。链路头的每个节点
+// （主叫/被叫/FS/服务端）旁据此标注 IP——追查时不用再翻原始抓包对地址
+function _partyIpMap(parties, entries) {
+    const map = {};
+    const add = (label, ip, nat) => {
+        if (!ip) return;
+        const key = label ? _shortParty(label) : 'FS';
+        if (!key) return;
+        const list = map[key] = map[key] || [];
+        let it = list.find(o => o.ip === ip);
+        if (!it) { it = { ip, nat: false }; list.push(it); }
+        if (nat) it.nat = true;
+    };
+    (parties || []).forEach(p => {
+        if (p.caller) add(p.caller.label, p.caller.ip);
+        if (p.answerer) add(p.answerer.label, p.answerer.ip);
+        if (p.server_ip) { add('FS', p.server_ip); add('服务端', p.server_ip); }
+    });
+    (entries || []).forEach(e => {
+        const f = e.flow;
+        if (!f || !f.from || !f.to) return;
+        add(f.from.label, f.from.ip, f.from.nat);
+        add(f.to.label, f.to.ip, f.to.nat);
+    });
+    return map;
 }
 
 // 旧会话数据的 p2p 兜底：无声诊断的直连腿名带"直连"字样
@@ -608,11 +647,22 @@ function _buildDirGroups(labels, report, kind, p2p, flowOf, serverIp) {
             const glSsrcs = new Set(gl.map(lb => _parseStreamLabel(lb).ssrc).filter(Boolean));
             const legChain = _singleLegChain(d.legs, glSsrcs);
             if (legChain) {
-                // 半程卡：只抓到这条腿，头就标实际的"谁 → 谁"（如 主叫 → FS），
-                // 方向级结论是针对完整链路的，不再挂上来（明细仍在折叠区）
-                const [spk, lst] = legChain.split('→').map(s => s.trim());
-                groups.push({ label: legChain, speaker: spk, listener: lst,
-                              legOnly: true, p2p: true, ah: d, dc, labels: gl });
+                // 半程卡：方向里只匹配到一条腿。若方向级判定是真实路径故障
+                // （FS 未桥接转发 / 整条断裂，即 blocked / no_source），链路
+                // 本身仍是完整的「主叫 → 服务端 → 被叫」三段式，只是某条腿
+                // 没流——保留完整三段式并挂方向结论，缺失腿在 verdict_text
+                // 里点名；否则（单侧抓包只能见到半程）才退回实际的半程头。
+                const fault = !!(d.verdict && !['ok', 'unknown'].includes(d.verdict));
+                if (fault) {
+                    groups.push({ label: d.label, speaker: d.speaker,
+                                  listener: d.listener,
+                                  verdict: d.verdict, verdictText: d.verdict_text,
+                                  p2p, ah: d, dc, labels: gl });
+                } else {
+                    const [spk, lst] = legChain.split('→').map(s => s.trim());
+                    groups.push({ label: legChain, speaker: spk, listener: lst,
+                                  legOnly: true, p2p: true, ah: d, dc, labels: gl });
+                }
             } else {
                 groups.push({ label: d.label, speaker: d.speaker, listener: d.listener,
                               verdict: d.verdict, verdictText: d.verdict_text, p2p,
@@ -858,17 +908,17 @@ function _attributeProblems(pc, groups) {
     return globalProblems;
 }
 
-// 方向组头：链路徽章 + 方向判定 + 挂组头的方向级问题
-function _dirGroupHead(g, mq, kind, feelNoun) {
+// 方向组头：链路徽章（各节点旁标注实际 IP）+ 方向判定 + 挂组头的方向级问题
+function _dirGroupHead(g, mq, kind, feelNoun, ipMap) {
     let html = '<div class="d-flex flex-wrap align-items-center gap-2">';
     if (g.rest) {
         html += '<strong class="small">其他流</strong>' +
             '<span class="text-muted small">（未能归入链路方向）</span>';
     } else if (g.fsRelay) {
-        html += _chainHtml(g.speaker || '主叫', g.listener || '被叫', false) +
+        html += _chainHtml(g.speaker || '主叫', g.listener || '被叫', false, ipMap) +
             '<span class="text-muted small">（服务端转发流，方向无法判定）</span>';
     } else {
-        html += _chainHtml(g.speaker, g.listener, g.p2p);
+        html += _chainHtml(g.speaker, g.listener, g.p2p, ipMap);
         if (g.verdict) html += _healthBadge(g.verdict);
         if (g.verdictText) {
             html += `<span class="small text-muted">${_esc(g.verdictText)}</span>`;
@@ -916,7 +966,9 @@ function _renderMediaSection(report, kind) {
     const mq = (report.media_quality || {})[kind] || {};
     const p2p = _mediaP2p(report);
     const groups = _buildDirGroups(Object.keys(mq), report, kind, p2p);
-    // 与回放区同构：每个链路方向一张卡，按"主叫 → 被叫"在前排序，
+    // 质量条目里并入的 flow（后端合并）+ 无信令拓扑：节点 IP 从流的真实
+    // 收发地址汇总
+    const ipMap = _partyIpMap(null, Object.values(mq));    // 与回放区同构：每个链路方向一张卡，按"主叫 → 被叫"在前排序，
     // 全部包进同一个整体容器；归不了链路的组放最后
     const chain = groups.filter(g => g.label && !g.rest && !g.fsRelay)
         .sort((a, b) => ((b.speaker || '').startsWith('主叫') ? 1 : 0) -
@@ -939,7 +991,7 @@ function _renderMediaSection(report, kind) {
     html += '<div class="border rounded p-2 mb-3 bg-body-tertiary">';
     renderGroups.forEach(g => {
         html += '<div class="bg-body border rounded p-2 mb-2">';
-        html += _dirGroupHead(g, mq, kind, meta.feelNoun);
+        html += _dirGroupHead(g, mq, kind, meta.feelNoun, ipMap);
         if (g.labels.length) {
             html += '<div class="row g-2 mt-1">' + g.labels.map(lb =>
                 _streamCard(lb, mq[lb] || {}, kind, (g.streamProblems || {})[lb], meta.feelNoun)
@@ -1152,6 +1204,52 @@ function _sdpListRow(m) {
         `<i class="bi bi-file-earmark-code"></i> ${_sdpTag(m)}</span> ${parts.join('，')}</div>`;
 }
 
+// SDP 协商媒体行：该消息当时宣告的媒体地址/端口（🎵 音频 ip:port / 🎬 视频
+// ip:port）。排查 NAT 场景时直接看得到"谁宣告了哪个地址、协商用了哪些端口"。
+// 宣告地址不在本消息双方信令 IP 之内的标红色 ⚠NAT，tooltip 注明归属与该端
+// RTP 实际来源；信令 IP（如被叫宣告自己的公网地址）不会误标。
+// 同一条腿重复协商且端口不变时不重复展示（shown 按 call_id 去重）
+function _sdpMediaChips(m, shown) {
+    let items = m.sdp_media || [];
+    if (m.call_id) {
+        const s = shown[m.call_id] || (shown[m.call_id] = new Set());
+        items = items.filter(it => {
+            const key = `${it.kind}|${it.addr}|${it.port}`;
+            if (s.has(key)) return false;
+            s.add(key);
+            return true;
+        });
+    }
+    return items.map(it => {
+        const icon = it.kind === 'video' ? 'bi-camera-video' : 'bi-music-note-beamed';
+        const name = it.kind === 'video' ? '视频' : '音频';
+        let nat = '';
+        if (it.nat) {
+            let tip = '该地址不在本消息双方信令 IP 之内（NAT 场景：终端宣告的' +
+                '地址与 RTP 实际来源不同），仍属于本通通话';
+            if (it.owner) {
+                tip = it.via_ip
+                    ? `${it.owner}在 SDP 里宣告的另一个地址（NAT）：RTP 实际从 ` +
+                      `${it.via_ip} 发来——属于${it.owner}那一端，不是其他通话的设备`
+                    : `${it.owner}在 SDP 里宣告的另一个地址（NAT）`;
+            }
+            nat = ` <span class="badge bg-danger" title="${_esc(tip)}">⚠NAT</span>`;
+        }
+        return `<span class="badge text-bg-light border" ` +
+            `title="该消息 SDP 宣告的${name}媒体地址">` +
+            `<i class="bi ${icon}"></i> ${name} ${_esc(it.addr)}:${it.port}${nat}</span>`;
+    }).join('');
+}
+
+function _sdpMediaRow(m, shown) {
+    const items = m.sdp_media || [];
+    if (!items.length) return '';
+    const chips = _sdpMediaChips(m, shown);
+    if (!chips) return '';
+    return `<div class="sl-sdplist"><span class="sl-sdp">` +
+        `<i class="bi bi-geo-alt"></i> 协商媒体</span> ${chips}</div>`;
+}
+
 function _sipLadder(flow, call) {
     if (!flow || !flow.length) return '';
     const { cols, server, caller, answerer, msgs } = _sipParties(flow);
@@ -1198,6 +1296,8 @@ function _sipLadder(flow, call) {
     // 每条消息的行区间，供标线/协商行按消息下标锚定。
     const rows = [];
     const rowBefore = {}, rowAfter = {};
+    // 同腿重复协商去重：call_id -> 已展示过的 "kind|addr|port" 集
+    const shownMedia = {};
     msgs.forEach((m, i) => {
         const a = colOf(m.src), b = colOf(m.dst);
         const kindCls = SIP_KIND_CLASS[m.kind] || '';
@@ -1218,6 +1318,8 @@ function _sipLadder(flow, call) {
             `<div class="sl-track" style="grid-template-columns:repeat(${n},1fr)">${inner}</div></div>`);
         const list = _sdpListRow(m);
         if (list) rows.push(list);
+        const mediaRow = _sdpMediaRow(m, shownMedia);
+        if (mediaRow) rows.push(mediaRow);
         rowAfter[i] = rows.length;
     });
     if (call) {
@@ -1330,8 +1432,10 @@ function _sipLadder(flow, call) {
     return html + rows.join('') + `</div>`;
 }
 
-// 卡片头部的「谁打给谁」摘要：主叫 → （FS）→ 被叫，身份与阶梯图列头一致
-function _callPartyChain(flow) {
+// 卡片头部的「谁打给谁」摘要：主叫 → （FS）→ 被叫，身份与阶梯图列头一致。
+// 第一行是角色徽章链路（三段式：经服务端；两段式：端到端），第二行给原始
+// IP 的「谁到谁」链路，并标出 NAT 别名（该端 SDP 宣告了另一个媒体地址）
+function _callPartyChain(flow, call) {
     if (!flow || !flow.length) return '';
     const { server, caller, answerer, msgs } = _sipParties(flow);
     const idents = _sipIdents(msgs, caller, answerer);
@@ -1342,10 +1446,42 @@ function _callPartyChain(flow) {
             `<span class="text-muted">${ip}</span>`;
     };
     const arrow = '<i class="bi bi-arrow-right text-muted"></i>';
-    let html = seg('主叫', 'bg-primary', caller, idents[caller]);
-    if (server) html += arrow + '<span class="badge bg-dark">服务端</span>';
-    if (answerer) html += arrow + seg('被叫', 'bg-success', answerer, idents[answerer]);
-    return `<span class="d-inline-flex align-items-center gap-1 flex-wrap small">${html}</span>`;
+    let top = seg('主叫', 'bg-primary', caller, idents[caller]);
+    if (server) top += arrow + '<span class="badge bg-dark">服务端</span>' +
+        `<span class="text-muted">${_esc(server)}</span>`;
+    if (answerer) top += arrow + seg('被叫', 'bg-success', answerer, idents[answerer]);
+
+    // NAT 别名：该端所在腿 SDP 宣告、既不是本端信令 IP、也没有在另一条腿
+    // 也宣告过的地址（终端宣告私网、RTP 走公网；FS 转投对端地址会同时出现
+    // 在两腿的 SDP 里，不算别名）
+    const spi = (call && call.sdp_party_ips) || {};
+    const aliasOf = role => {
+        const other = role === 'caller' ? 'callee' : 'caller';
+        const sig = role === 'caller' ? caller : answerer;
+        const otherSig = role === 'caller' ? answerer : caller;
+        const own = spi[role] || [];
+        const otherList = spi[other] || [];
+        return (own.filter(ip => ip && ip !== server && ip !== sig &&
+            ip !== otherSig && !otherList.includes(ip)))[0] || null;
+    };
+    const natBadge = alias => alias
+        ? ` <span class="badge bg-danger" title="该端在 SDP 里宣告了另一个媒体地址 ${_esc(alias)}（NAT）：RTP 实际从本端信令 IP 发来">⚠NAT</span>`
+        : '';
+
+    const hops = [];
+    if (caller) hops.push({ ip: caller, nat: natBadge(aliasOf('caller')) });
+    if (server) hops.push({ ip: server, nat: '' });
+    if (answerer) hops.push({ ip: answerer, nat: natBadge(aliasOf('callee')) });
+    let ipLine = '';
+    if (hops.length >= 2) {
+        ipLine = `<div class="text-muted small"><i class="bi bi-arrow-left-right me-1"></i>媒体 IP：` +
+            hops.map(h => `${_esc(h.ip)}${h.nat}`)
+                .join(' <i class="bi bi-arrow-right text-muted"></i> ') +
+            '</div>';
+    }
+    return `<span class="d-inline-flex flex-column align-items-start small">` +
+        `<span class="d-inline-flex align-items-center gap-1 flex-wrap">${top}</span>` +
+        ipLine + `</span>`;
 }
 
 function buildIpRoleMap(files, serverIp) {
@@ -1642,7 +1778,7 @@ function renderCalls(calls, captureWarning, uploads) {
                 ${FS_MEDIA_BADGES[c.fs_media?.verdict] || ''}
                 <span class="badge bg-light text-dark">${c.stream_count} 条流</span>
                 ${_callSourceBadges(c, uploads)}
-                ${_callPartyChain(flow)}
+                ${_callPartyChain(flow, c)}
             </div>
             ${flow.length ? `<details open class="mt-1">
                 <summary class="text-muted small" style="cursor:pointer">
@@ -1724,6 +1860,9 @@ function showMedia(manifest, report) {
                           manifest.parties[0].server_ip) || null;
         const groups = _buildDirGroups(labels, report, kind, _mediaP2p(report),
                                        lb => (byLabel[lb] || {}).flow, serverIp);
+        // 链路头各节点旁标注的实际 IP：信令拓扑（parties）打底，媒体流的
+        // 真实收发地址（flow，含 NAT 别名）补充
+        const ipMap = _partyIpMap(manifest.parties, entries);
         // 每个链路方向一张卡（"谁到谁"），按"主叫 → 被叫"在前排序；
         // 归不了链路的组（其他流 / FS 转发）放在最后
         const chain = groups.filter(g => g.label && !g.rest && !g.fsRelay)
@@ -1764,7 +1903,7 @@ function showMedia(manifest, report) {
         html += '<div class="border rounded p-2 mb-3 bg-body-tertiary">';
         renderGroups.forEach(g => {
             html += '<div class="bg-body border rounded p-2 mb-2">';
-            html += _dirGroupHead(g, mq, kind, meta.feelNoun);
+            html += _dirGroupHead(g, mq, kind, meta.feelNoun, ipMap);
             if (g.labels.length) {
                 html += '<div class="row g-2 mt-1">' + g.labels.map(lb =>
                     _mediaItem(byLabel[lb], kind, mq[lb] || {},
@@ -1862,6 +2001,18 @@ function _mediaItem(entry, kind, q, problems, feelNoun, serverIp) {
     if (entry.total_packets) meta += ` · ${entry.total_packets} 包`;
     if (entry.lost_packets) meta += ` · 丢 ${entry.lost_packets} 包`;
     meta += '</span>';
+    // 真实收发五元组（ip:port → ip:port）：Wireshark 过滤追查直接可用；
+    // NAT 别名地址单独标出（归属本通通话的端，但不是信令 IP）
+    if (entry.flow && entry.flow.from && entry.flow.from.ip &&
+        entry.flow.to && entry.flow.to.ip) {
+        const fp = entry.flow.from, tp = entry.flow.to;
+        meta += `<div class="small mt-1"><i class="bi bi-arrow-left-right me-1"></i>` +
+            `<code class="text-nowrap">${_esc(fp.ip)}:${fp.port || '?'}` +
+            ` <i class="bi bi-arrow-right mx-1"></i> ${_esc(tp.ip)}:${tp.port || '?'}</code>` +
+            ((fp.nat || tp.nat)
+                ? ` <span class="badge bg-danger" title="该地址是本端在 SDP 里宣告的另一个媒体地址（NAT 场景），仍归属本通通话的端">⚠NAT</span>`
+                : '') + '</div>';
+    }
 
     let player;
     if (kind === 'audio') {

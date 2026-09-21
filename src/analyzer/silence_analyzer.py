@@ -308,6 +308,10 @@ def diagnose_audio(captures: dict, call: dict, server_ip: str,
             'listener_role': listener_role,
             'speaker_ip': parties.get(spk_key),
             'listener_ip': parties.get(lst_key),
+            # NAT 别名：该端 SDP 宣告的另一个媒体地址（如私网 IP）。FS 侧流
+            # 的收发地址可能落在这个别名上而非信令 IP，选流时长一并尝试
+            'speaker_alt_ips': parties.get(spk_key.replace('_ip', '_alt_ips')) or [],
+            'listener_alt_ips': parties.get(lst_key.replace('_ip', '_alt_ips')) or [],
             'speaker_name': '主叫' if speaker_role == 'terminal' else '被叫',
             'listener_name': '被叫' if listener_role == 'seat' else '主叫',
         })
@@ -356,7 +360,9 @@ def _diagnose_direction(spk_cap, lst_cap, fs_cap, call_ssrcs, server_ip,
         uplink = pick_call_stream(spk_cap, call_ssrcs, dst_is=peer_of_speaker)
         uplink_at = speaker_role
     if uplink is None and fs_cap and spec['speaker_ip']:
-        uplink = pick_call_stream(fs_cap, call_ssrcs, src_is=spec['speaker_ip'])
+        uplink = pick_call_stream(fs_cap, call_ssrcs,
+                                  src_is=[spec['speaker_ip'],
+                                          *spec.get('speaker_alt_ips', [])])
         uplink_at = 'fs'
     # 下行流：优先从听者抓包选（最靠近汇），FS 抓包按听者 IP 兜底
     downlink, downlink_at = None, None
@@ -364,7 +370,9 @@ def _diagnose_direction(spk_cap, lst_cap, fs_cap, call_ssrcs, server_ip,
         downlink = pick_call_stream(lst_cap, call_ssrcs, src_is=peer_of_listener)
         downlink_at = listener_role
     if downlink is None and fs_cap and spec['listener_ip']:
-        downlink = pick_call_stream(fs_cap, call_ssrcs, dst_is=spec['listener_ip'])
+        downlink = pick_call_stream(fs_cap, call_ssrcs,
+                                    dst_is=[spec['listener_ip'],
+                                            *spec.get('listener_alt_ips', [])])
         downlink_at = 'fs'
 
     if uplink is None and downlink is None:
