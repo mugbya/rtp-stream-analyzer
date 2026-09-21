@@ -756,9 +756,14 @@ details > summary:hover {
     position: relative;
     z-index: 1;
     margin: 0 0 3px 66px;   /* 时间线内，与 .sl-codecs 同缩进 */
-    font-size: 0.66rem;
+    font-size: 0.78rem;
     color: #475569;
     line-height: 1.6;
+}
+/* 协商媒体行里的徽章（含 ⚠NAT/多网卡）不再继承 .badge 的 0.75em 缩小，
+   保证小字号阶梯图里白字在红底上也清晰可读 */
+.sl-sdplist .badge {
+    font-size: 0.8rem;
 }
 .sl-msg.sip-req  { color: #4f46e5; }
 .sl-msg.sip-prov { color: #94a3b8; }

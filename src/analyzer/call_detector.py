@@ -1058,12 +1058,21 @@ def refine_calls(calls: list, server_ip: str = None) -> list:
         for a in range(len(all_legs)):
             for b in range(a + 1, len(all_legs)):
                 ea, eb = all_legs[a]['endpoints'], all_legs[b]['endpoints']
-                for s in (0, 1):
-                    o = 1 - s
-                    if ea[s] == eb[s] and ea[o][0] != eb[o][0]:
-                        ra, rb = find(add(ea[o][0])), find(add(eb[o][0]))
-                        if ra != rb:
-                            parent[rb] = ra
+                # 两条腿共享的端点（ip:port 完全相同）：FS 的一个 RTP 端口会话
+                # 自始至终只有一个对端设备，共享端点另一侧的 IP 是同一台设备的
+                # 两个地址（NAT 私网/公网、多网卡）。端点在 leg 里按 (ip,port)
+                # 排序，服务器排在第几位取决于对端 IP 的大小（如对端 172.28.x
+                # 排在 FS 172.110.3.x 之后、172.110.249.x 之前），所以必须按
+                # 共享端点本身定位，不能按固定下标配对
+                shared = next((ep for ep in ea if ep in eb), None)
+                if shared is None:
+                    continue
+                other_a = next(ep for ep in ea if ep != shared)
+                other_b = next(ep for ep in eb if ep != shared)
+                if other_a[0] != other_b[0]:
+                    ra, rb = find(add(other_a[0])), find(add(other_b[0]))
+                    if ra != rb:
+                        parent[rb] = ra
         return len({find(i) for i in ips.values()})
 
     changed = True
@@ -1311,9 +1320,21 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
     up_devs = [d for d in devices if any(v['pkts'] > 0 for v in d['uplink'].values())]
     no_up_devs = [d for d in devices if not any(v['pkts'] > 0 for v in d['uplink'].values())]
 
+    # 该端是否协商过某类媒体：没协商过（如主叫只协商了音频、没有视频 m= 行）
+    # 就不该期望 FS 向它下发该类媒体——对端上行了视频而本端 0 下发是正常现象，
+    # 不能算单向转发缺失。协商数据缺失时放行，不下"不该有"的结论
+    negotiated = call.get('negotiated_per_leg') or {}
+
+    def _expects_media(ip: str, kind: str) -> bool:
+        role = 'caller' if ip == caller_ip else 'callee' if ip == callee_ip else None
+        leg = (negotiated.get(role) or {}) if role else {}
+        if not leg:
+            return True
+        return bool(leg.get(kind))
+
     # 单向转发缺失：FS 收到了某端对端的上行，却从未向该端回发同类媒体。
     # 全部端点都有上行时才算（否则 partial_uplink 已覆盖；改道时 FS 看不到
-    # 端到端媒体，不下此结论）
+    # 端到端媒体，不下此结论）。只对该端协商过的媒体类判定
     missing_down = []
     if not redirs and len(up_devs) == len(devices):
         for d in devices:
@@ -1322,7 +1343,8 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
                 continue
             kinds = [k for k in ('audio', 'video')
                      if not d['downlink'][k]['pkts']
-                     and peer['uplink'][k]['pkts'] > 0]
+                     and peer['uplink'][k]['pkts'] > 0
+                     and _expects_media(d['ip'], k)]
             if kinds:
                 missing_down.append({'dev': d, 'kinds': kinds})
 
@@ -1394,7 +1416,9 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
             up = peer['uplink'][kind]
             down = d['downlink'][kind]
             if not down['pkts']:
-                if up['pkts']:
+                # 该端没协商过这类媒体（如主叫无视频 m= 行）时，FS 不下发是
+                # 正常现象，不必提示
+                if up['pkts'] and _expects_media(d['ip'], kind):
                     notes.append(f"FS 从未向 {d['label']} 下发{kname}"
                                  f"（0 包，而对端 {peer['label']} 上行过"
                                  f" {up['pkts']} 包）——该方向未发生转发")
@@ -1421,6 +1445,57 @@ def _fs_relay_verdict(call: dict, captures: dict, server_ip: str) -> dict | None
                           for r in redirs],
             'devices': devices,
             'notes': notes}
+
+
+def _media_alias_warning(call: dict, sdp_party_ips: dict,
+                         server_ip: str = None) -> dict | None:
+    """识别被归并为同一端的多个媒体地址（NAT 私网/公网、多网卡），给用户提醒。
+
+    同一端设备在媒体层出现两个 IP：SDP 宣告的媒体地址（FS 的下行发往它，如
+    私网 172.28.16.1）与 RTP 实际上行的来源地址（如公网 172.110.249.67）。
+    通话归属靠「FS 的同一媒体端口会话只有一个对端」这一启发式把两个地址归并
+    成同一台设备，一通电话才合得拢——这是推断而非确凿事实。用户看到"两通
+    合成一通"时需要知道归并的依据与代价：若两地址实际不属于同一台设备（中间
+    设备改写地址、抓包混入其他流），该端的上/下行统计会被并到一起，包数、
+    丢包、延迟的归属可能失真；NAT 场景下 FS 的下行发往 SDP 宣告地址而非实际
+    上行来源，该地址从 FS 不可达时该端收不到下行（单通），需核对 FS 的
+    rtp-auto-adjust 配置。
+
+    Args:
+        call: 通话对象（用 sip_flow 识别主被叫 IP）。
+        sdp_party_ips: detect_calls 里按腿角色收集的 SDP 宣告非服务器 IP
+            （{'caller': [...], 'callee': [...]}）。
+
+    Returns:
+        None 表示没有别名地址；否则 {'aliases': [{'role', 'label',
+        'party_ip', 'alias_ip'}, ...], 'text': 提醒正文}。
+    """
+    caller_ip, callee_ip = _call_party_pair(call.get('sip_flow') or [], server_ip)
+    roles = {'caller': ('主叫', caller_ip, callee_ip),
+             'callee': ('被叫', callee_ip, caller_ip)}
+    aliases = []
+    for role, (label, party_ip, other_ip) in roles.items():
+        if not party_ip:
+            continue
+        for ip in sdp_party_ips.get(role) or []:
+            if (ip and ip != server_ip and ip != party_ip and ip != other_ip
+                    and all(a['alias_ip'] != ip for a in aliases)):
+                aliases.append({'role': role, 'label': label,
+                                'party_ip': party_ip, 'alias_ip': ip})
+    if not aliases:
+        return None
+    summary = '；'.join(
+        f"{a['label']}端媒体出现两个地址：RTP 实际从 {a['party_ip']} 发来，"
+        f"SDP 宣告的媒体地址是 {a['alias_ip']}（FS 的下行发往它）"
+        for a in aliases)
+    text = (f"{summary}。工具按「FS 的同一媒体端口会话只有一个对端」这一启发式"
+            '把两个地址归并为同一台设备，这通电话因此合并为一通。注意：这是推断'
+            '而非确凿事实——若两个地址实际不属于同一台设备（如中间设备改写了地址、'
+            '抓包混入了其他流的媒体），归并后该端的上/下行统计会被并到一起，包数、'
+            '丢包、延迟的归属可能失真；NAT 场景下 FS 的下行发往 SDP 宣告地址而非'
+            ' RTP 实际上行来源，若该地址从 FS 不可达，该端会收不到下行（单通），'
+            '需核对 FS 的 rtp-auto-adjust（RTP 对端地址自动调整）配置。')
+    return {'aliases': aliases, 'text': text}
 
 
 def _stream_kinds(captures: dict) -> dict:
@@ -1540,6 +1615,9 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             for ip, _port in (call.get('sdp_endpoints_by_cid') or {}).get(cid) or ():
                 if ip and ip != server_ip and ip not in sdp_party_ips[role]:
                     sdp_party_ips[role].append(ip)
+        # 多地址归并提醒（NAT 私网/公网、多网卡）：一通被合并的通话要交代
+        # 归并依据与代价
+        media_alias = _media_alias_warning(call, sdp_party_ips, server_ip)
         results.append({
             'call_id': f'call_{idx + 1}',
             'start': call['start'],
@@ -1571,6 +1649,9 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             'is_p2p': p2p,
             # 各腿 SDP 宣告的非服务器 IP：NAT 别名归属（主叫/被叫的另一地址）
             'sdp_party_ips': sdp_party_ips,
+            # 多地址归并提醒：该端媒体出现两个地址被归并为同一设备时的
+            # 依据与风险说明（无别名时为 None）
+            'media_alias_warning': media_alias,
             # 点对点直连时给出两端 IP，供提示文案直接展示（一眼确认）
             'p2p_endpoints': sorted({ip for leg in call['legs']
                                      for ip in leg['ips']}) if p2p else [],

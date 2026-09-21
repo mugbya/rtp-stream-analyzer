@@ -337,6 +337,21 @@ function _callSourceBadges(c, uploads) {
         `<i class="bi bi-files"></i> 见于 ${present.join('、')}</span>`;
 }
 
+// 多网卡/NAT 地址归并提醒：后端按「FS 同一媒体端口会话只有一个对端」的启发式，
+// 把同一个端点 SDP 里宣告的另一个媒体地址归并为同一台设备（这通电话因此合并
+// 为一通）。这里把归并了哪些地址、以及归并后的推断性风险展示给用户，而不是
+// 默默合并。aliases 是结构化归并清单，text 是后端拼好的完整警示文案。
+function _mediaAliasWarningHtml(c) {
+    const w = c.media_alias_warning;
+    if (!w || !w.text) return '';
+    const aliases = (w.aliases || []).map(a =>
+        `<li>${_esc(a.label)}：${_esc(a.party_ip)} ↔ 别名 ${_esc(a.alias_ip)}</li>`).join('');
+    return `<div class="alert alert-warning w-100 mb-2 py-2 small">` +
+        `<strong><i class="bi bi-diagram-3 me-1"></i>多网卡/NAT 地址归并提醒（推断结果）</strong>` +
+        (aliases ? `<ul class="mb-1 ps-3">${aliases}</ul>` : '') +
+        `<div class="mt-1">${_esc(w.text)}</div></div>`;
+}
+
 function renderCalls(calls, captureWarning, uploads) {
     const container = document.getElementById('calls-detail');
 
@@ -406,6 +421,7 @@ function renderCalls(calls, captureWarning, uploads) {
                 ${_callSourceBadges(c, uploads)}
                 ${_callPartyChain(flow, c)}
             </div>
+            ${_mediaAliasWarningHtml(c)}
             ${_fsRelayHtml(relay)}
             ${flowHtml}
             ${reasons ? `<details class="mt-1">
@@ -537,7 +553,7 @@ function _sdpListRow(m) {
 
 // SDP 协商媒体行：该消息当时宣告的媒体地址/端口（🎵 音频 ip:port / 🎬 视频
 // ip:port）。排查 NAT 场景时直接看得到"谁宣告了哪个地址、协商用了哪些端口"。
-// 宣告地址不在本消息双方信令 IP 之内的标红色 ⚠NAT，tooltip 注明归属与该端
+// 宣告地址不在本消息双方信令 IP 之内的标红色 ⚠NAT/多网卡，tooltip 注明归属与该端
 // RTP 实际来源；信令 IP（如被叫宣告自己的公网地址）不会误标。
 // 同一条腿重复协商且端口不变时不重复展示（shown 按 call_id 去重）
 function _sdpMediaChips(m, shown) {
@@ -556,15 +572,15 @@ function _sdpMediaChips(m, shown) {
         const name = it.kind === 'video' ? '视频' : '音频';
         let nat = '';
         if (it.nat) {
-            let tip = '该地址不在本消息双方信令 IP 之内（NAT 场景：终端宣告的' +
+            let tip = '该地址不在本消息双方信令 IP 之内（NAT/多网卡场景：终端宣告的' +
                 '地址与 RTP 实际来源不同），仍属于本通通话';
             if (it.owner) {
                 tip = it.via_ip
-                    ? `${it.owner}在 SDP 里宣告的另一个地址（NAT）：RTP 实际从 ` +
+                    ? `${it.owner}在 SDP 里宣告的另一个地址（NAT/多网卡）：RTP 实际从 ` +
                       `${it.via_ip} 发来——属于${it.owner}那一端，不是其他通话的设备`
-                    : `${it.owner}在 SDP 里宣告的另一个地址（NAT）`;
+                    : `${it.owner}在 SDP 里宣告的另一个地址（NAT/多网卡）`;
             }
-            nat = ` <span class="badge bg-danger" title="${_esc(tip)}">⚠NAT</span>`;
+            nat = ` <span class="badge bg-danger" title="${_esc(tip)}">⚠NAT/多网卡</span>`;
         }
         return `<span class="badge text-bg-light border" ` +
             `title="该消息 SDP 宣告的${name}媒体地址">` +
@@ -796,7 +812,7 @@ function _callPartyChain(flow, call) {
             ip !== otherSig && !otherList.includes(ip)))[0] || null;
     };
     const natBadge = alias => alias
-        ? ` <span class="badge bg-danger" title="该端在 SDP 里宣告了另一个媒体地址 ${_esc(alias)}（NAT）：RTP 实际从本端信令 IP 发来">⚠NAT</span>`
+        ? ` <span class="badge bg-danger" title="该端在 SDP 里宣告了另一个媒体地址 ${_esc(alias)}（NAT/多网卡）：RTP 实际从本端信令 IP 发来">⚠NAT/多网卡</span>`
         : '';
 
     const hops = [];
