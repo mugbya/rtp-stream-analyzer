@@ -153,6 +153,7 @@ def _init_db():
                 session_id TEXT DEFAULT '',
                 media_type TEXT DEFAULT '',
                 call_id TEXT DEFAULT '',
+                sip_call_id TEXT DEFAULT '',
                 domain TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_analyses_day ON analyses(day);
@@ -170,6 +171,10 @@ def _migrate():
             if 'country' not in cols:
                 conn.execute(
                     f'ALTER TABLE {table} ADD COLUMN country TEXT DEFAULT ""')
+            if table == 'analyses' and 'sip_call_id' not in cols:
+                conn.execute(
+                    f'ALTER TABLE {table} ADD COLUMN sip_call_id '
+                    f'TEXT DEFAULT ""')
 
 
 _init_db()
@@ -195,18 +200,20 @@ def record_visit(vid, ip, path, domain=''):
         pass  # 统计是旁路功能，任何失败都不影响主流程
 
 
-def record_analysis(vid, ip, session_id, media_type, call_id, domain=''):
+def record_analysis(vid, ip, session_id, media_type, call_id,
+                    sip_call_id='', domain=''):
     try:
         country, province, city = lookup_region(ip)
         now = time.time()
         with _connect() as conn:
             conn.execute(
                 'INSERT INTO analyses (ts, day, vid, ip, country, province, '
-                'city, session_id, media_type, call_id, domain) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'city, session_id, media_type, call_id, sip_call_id, domain) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (int(now), time.strftime('%Y-%m-%d', time.localtime(now)),
                  vid, ip, country, province, city, session_id or '',
-                 media_type or '', str(call_id or ''), domain or ''))
+                 media_type or '', str(call_id or ''), str(sip_call_id or ''),
+                 domain or ''))
     except Exception:
         pass
 
@@ -217,14 +224,6 @@ def _q(sql, args=()):
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
         return [dict(r) for r in conn.execute(sql, args).fetchall()]
-
-
-def _mask_ip(ip):
-    """展示用 IP 打码：223.104.5.66 → 223.104.5.*，非 IPv4 原样。"""
-    parts = ip.split('.')
-    if len(parts) == 4 and all(p.isdigit() for p in parts):
-        return '.'.join(parts[:3]) + '.*'
-    return (ip[:8] + '…') if len(ip) > 12 else ip
 
 
 def query_summary():
@@ -304,7 +303,6 @@ def _region_label(r):
 def query_recent_visits(limit=50):
     rows = _q('SELECT * FROM visits ORDER BY id DESC LIMIT ?', (limit,))
     for r in rows:
-        r['ip_masked'] = _mask_ip(r['ip'])
         r['time'] = time.strftime('%m-%d %H:%M:%S', time.localtime(r['ts']))
         r['region'] = _region_label(r)
     return rows
@@ -313,7 +311,6 @@ def query_recent_visits(limit=50):
 def query_recent_analyses(limit=50):
     rows = _q('SELECT * FROM analyses ORDER BY id DESC LIMIT ?', (limit,))
     for r in rows:
-        r['ip_masked'] = _mask_ip(r['ip'])
         r['time'] = time.strftime('%m-%d %H:%M:%S', time.localtime(r['ts']))
         r['region'] = _region_label(r)
     return rows

@@ -574,6 +574,10 @@ def run_analysis():
             or 'ip:' + stats_mod.client_ip(request),
             stats_mod.client_ip(request), session_id, media_type,
             selected_call['call_id'] if selected_call else None,
+            # 真实 SIP Call-ID（B2BUA 一通电话每条腿一个），管理页展示用；
+            # 内部编号对不上 Wireshark，展示和检索都以它为准
+            (', '.join(sorted(selected_call.get('sip_call_ids') or []))
+             if selected_call else ''),
             stats_mod.request_domain(request))
     except Exception:
         pass

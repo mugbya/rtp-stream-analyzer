@@ -159,7 +159,7 @@
                         <tr>
                             <td class="text-nowrap">{{ v.time }}</td>
                             <td class="text-nowrap">{{ v.region }}</td>
-                            <td class="text-nowrap text-muted">{{ v.ip_masked }}</td>
+                            <td class="text-nowrap text-muted">{{ v.ip }}</td>
                             <td>{{ v.path }}</td>
                             <td class="text-muted">{{ v.domain or '—' }}</td>
                         </tr>
@@ -187,7 +187,7 @@
                             <td class="text-nowrap">{{ a.time }}</td>
                             <td class="text-nowrap">{{ a.region }}</td>
                             <td>{{ {'audio': '音频', 'video': '视频', 'all': '音视频'}.get(a.media_type, a.media_type or '—') }}</td>
-                            <td class="text-muted text-truncate" style="max-width: 10rem;">{{ a.call_id or '—' }}</td>
+                            <td class="text-muted text-truncate" style="max-width: 10rem;">{{ a.sip_call_id or a.call_id or '—' }}</td>
                         </tr>
                         {% else %}
                         <tr><td colspan="4" class="text-center text-muted py-4">暂无数据</td></tr>
