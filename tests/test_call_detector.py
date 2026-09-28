@@ -1322,6 +1322,104 @@ def test_partial_downlink_not_when_partial_uplink():
     print("PASS: callee with no RTP at all stays partial_uplink")
 
 
+def test_retrans_count_single_file():
+    """同一抓包文件内 6 个同 CSeq 的 INVITE（UDP 重传）→ 阶梯图 1 条
+    INVITE 行 retrans=6，且 INVITE 无响应提示带「共发送 6 次（含重传）」。
+
+    去重窗口 32s 对齐 Timer B：全部重传包跨约 31.5s，最后一个重传包
+    不能被漏成第二条「新消息」。
+    """
+    streams = [(0x1111, 5000, 6000, 105, 160, 0, TERM, SERVER, 0, 0.02)]
+    sip = [make_sip_event(t, 'INVITE', 'a', 1, TERM, SERVER)
+           for t in (100, 100.5, 101, 102, 104, 108)]   # 重传间隔 0.5s 起倍增
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    calls = detect_calls({'fs': rd}, SERVER)
+    assert len(calls) == 1
+    flow = calls[0]['sip_flow']
+    invites = [m for m in flow if m['method'] == 'INVITE']
+    assert len(invites) == 1, f"expected 1 INVITE row, got {len(invites)}"
+    assert invites[0]['retrans'] == 6, invites[0]
+    issues = calls[0]['sip_issues']
+    assert len(issues) == 1 and issues[0]['kind'] == 'no_response', issues
+    assert '共发送 6 次（含重传）' in issues[0]['text'], issues[0]
+    print("PASS: 6 same-CSeq INVITEs -> 1 row retrans=6 + no-response hint")
+
+
+def test_retrans_two_transactions_counted_separately():
+    """双事务（无鉴权 401 + 带鉴权重发，CSeq 不同）→ 两行 INVITE，
+    各标自己的重传次数；都有最终响应则不触发无响应提示。"""
+    streams = [(0x1111, 5000, 6000, 105, 160, 0, TERM, SERVER, 0, 0.02)]
+    sip = [
+        # 事务 1：3 个 INVITE（CSeq 1），收到 401
+        make_sip_event(100, 'INVITE', 'a', 1, TERM, SERVER),
+        make_sip_event(100.5, 'INVITE', 'a', 1, TERM, SERVER),
+        make_sip_event(101.5, 'INVITE', 'a', 1, TERM, SERVER),
+        make_sip_event(102, '401', 'a', 1, SERVER, TERM, cseq_method='INVITE'),
+        # 事务 2：2 个 INVITE（CSeq 2，带鉴权重发），收到 200
+        make_sip_event(104, 'INVITE', 'a', 2, TERM, SERVER),
+        make_sip_event(105, 'INVITE', 'a', 2, TERM, SERVER),
+        make_sip_event(107, '200', 'a', 2, SERVER, TERM, cseq_method='INVITE'),
+    ]
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    calls = detect_calls({'fs': rd}, SERVER)
+    flow = calls[0]['sip_flow']
+    invites = [m for m in flow if m['method'] == 'INVITE']
+    assert len(invites) == 2, f"expected 2 INVITE rows, got {len(invites)}"
+    assert invites[0]['retrans'] == 3 and invites[1]['retrans'] == 2, invites
+    assert calls[0]['sip_issues'] == [], calls[0]['sip_issues']
+    print("PASS: two transactions -> 2 rows with own retrans counts, no hint")
+
+
+def test_retrans_cross_file_copies_not_counted():
+    """多抓包上传：同一消息在 N 份抓包里的副本 → 不计重传（保持 1），
+    按 FS 端优先保留一份。"""
+    streams = [(0x1111, 5000, 6000, 105, 160, 0, TERM, SERVER, 0, 0.02)]
+    sip = [make_sip_event(100, 'INVITE', 'a', 1, TERM, SERVER)]
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    seat_rd = make_rtp_data(streams, 90, 200,
+                            sip_events=[make_sip_event(100.8, 'INVITE', 'a', 1, TERM, SERVER)])
+    calls = detect_calls({'fs': rd, 'terminal': seat_rd}, SERVER)
+    invites = [m for m in calls[0]['sip_flow'] if m['method'] == 'INVITE']
+    assert len(invites) == 1
+    assert invites[0]['retrans'] is None, invites[0]   # 跨文件副本不算重传
+    assert abs(invites[0]['time'] - 100.0) < 1e-6      # 保留 FS 端副本
+    print("PASS: cross-file copies merged without counting as retrans")
+
+
+def test_normal_call_no_retrans_no_issues():
+    """正常通话（INVITE→180→200）→ 不出现 ×N、不触发无响应提示。"""
+    streams = [(0x1111, 5000, 6000, 105, 160, 0, TERM, SERVER, 0, 0.02)]
+    sip = [
+        make_sip_event(100, 'INVITE', 'a', 1, TERM, SERVER),
+        make_sip_event(101, '180', 'a', 1, SERVER, TERM, cseq_method='INVITE'),
+        make_sip_event(104, '200', 'a', 1, SERVER, TERM, cseq_method='INVITE'),
+        make_sip_event(165, 'BYE', 'a', 2, TERM, SERVER),
+    ]
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    calls = detect_calls({'fs': rd}, SERVER)
+    flow = calls[0]['sip_flow']
+    assert all(not m.get('retrans') for m in flow), flow
+    assert calls[0]['sip_issues'] == [], calls[0]['sip_issues']
+    print("PASS: normal call -> no retrans badges, no issues")
+
+
+def test_invite_provisional_only_hint():
+    """INVITE 只收到 1xx 没有最终应答 → 事务悬挂提示（带重传次数）。"""
+    streams = [(0x1111, 5000, 6000, 105, 160, 0, TERM, SERVER, 0, 0.02)]
+    sip = [
+        make_sip_event(100, 'INVITE', 'a', 1, TERM, SERVER),
+        make_sip_event(100.5, 'INVITE', 'a', 1, TERM, SERVER),
+        make_sip_event(103, '180', 'a', 1, SERVER, TERM, cseq_method='INVITE'),
+    ]
+    rd = make_rtp_data(streams, 90, 200, sip_events=sip)
+    calls = detect_calls({'fs': rd}, SERVER)
+    issues = calls[0]['sip_issues']
+    assert len(issues) == 1 and issues[0]['kind'] == 'provisional_only', issues
+    assert '共发送 2 次（含重传）' in issues[0]['text'], issues[0]
+    assert '未收到最终应答' in issues[0]['text'], issues[0]
+    print("PASS: provisional-only INVITE -> hanging-transaction hint with count")
+
+
 if __name__ == '__main__':
     test_two_sequential_calls()
     test_port_reuse_same_ports()
@@ -1353,4 +1451,9 @@ if __name__ == '__main__':
     test_nat_call_merge_and_alias_downlink()
     test_fs_relay_partial_downlink()
     test_partial_downlink_not_when_partial_uplink()
+    test_retrans_count_single_file()
+    test_retrans_two_transactions_counted_separately()
+    test_retrans_cross_file_copies_not_counted()
+    test_normal_call_no_retrans_no_issues()
+    test_invite_provisional_only_hint()
     print("\n=== ALL CALL DETECTOR TESTS PASSED ===")

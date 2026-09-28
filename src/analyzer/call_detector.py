@@ -315,8 +315,10 @@ def assess_call_completeness(call: dict, file_info: dict, server_ip: str = None)
 # Events whose timestamps differ by less than this across capture files are the
 # same signaling packet seen at two capture points (capture clocks differ by <1s
 # but retransmissions can persist tens of seconds; same CSeq+method+src+dst is
-# definitionally one message of one transaction)
-SIP_DUP_WINDOW_S = 30.0
+# definitionally one message of one transaction). 32s 对齐 SIP UDP 重传的
+# Timer B：重传间隔 0.5s 起倍增、上限 32s，全部重传包跨约 31.5s——窗口比它
+# 小会把最后一个重传包漏成第二条「新消息」
+SIP_DUP_WINDOW_S = 32.0
 # 同一条信令在多个抓包里都有副本时保留哪份：FS 端单一时钟、两侧腿都看得见，
 # 时序自洽，最优先；其次终端（主叫端）；最后坐席端。混用不同机器时钟的消息
 # 会因时钟偏差在时间线上排错序
@@ -352,10 +354,15 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
                 'src': ev.get('src', ''),
                 'dst': ev.get('dst', ''),
                 'file': role,
+                # 合并掉的同一抓包文件内的重复次数（= 线上真实重传次数）；
+                # 跨抓包文件的副本是同包多处抓到，不算重传
+                'retrans': 1,
             })
+
     if not all_events:
         for c in calls:
             c['sip_flow'] = []
+            c['sip_issues'] = []
             c['answer_time'] = c['bye_time'] = None
             c['negotiated_codecs'] = {'audio': [], 'video': []}
             c['negotiated_per_leg'] = {}
@@ -385,11 +392,17 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
                 break
         if dup_idx is None:
             deduped.append(ev)
-        elif (ROLE_PRIORITY.get(ev['file'], 9)
-                < ROLE_PRIORITY.get(deduped[dup_idx]['file'], 9)):
-            # 同一条消息的多抓包副本：换成本次上传里优先级更高的那份，
-            # 保证整条时间线出自同一台机器的时钟
-            deduped[dup_idx] = ev
+        else:
+            dup = deduped[dup_idx]
+            if ev['file'] == dup['file']:
+                # 同一抓包文件内的重复 = 对端没等到响应才重发的真实重传
+                dup['retrans'] += 1
+            elif (ROLE_PRIORITY.get(ev['file'], 9)
+                    < ROLE_PRIORITY.get(dup['file'], 9)):
+                # 同一条消息的多抓包副本：换成本次上传里优先级更高的那份，
+                # 保证整条时间线出自同一台机器的时钟；重传计数随保留副本带走
+                ev['retrans'] = dup['retrans']
+                deduped[dup_idx] = ev
     deduped.sort(key=lambda e: e['time'])
 
     # Group remaining messages by Call-ID
@@ -446,6 +459,9 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
         flow = [e for cid, i in attach.items() if i == idx for e in by_call_id[cid]]
         flow.sort(key=lambda e: e['time'])
         call['sip_call_ids'] = {cid for cid, i in attach.items() if i == idx}
+        # 信令完整性检查：逐腿看每个 INVITE 事务有没有得到响应（无响应 /
+        # 只有 1xx 悬挂），提示带重传次数——信令没打通的直接证据
+        call['sip_issues'] = _sip_invite_issues(flow)
         # 本通话信令里宣告的媒体端点（SDP c=/m= 行的 ip:port），按 Call-ID 分组：
         # 精确圈定本通话的 RTP 流，供 refine_calls 把误并入的其他通话腿剔除/
         # 拆分。B2BUA 一通电话的 A/B 腿是两个 Call-ID，分组保留这一结构
@@ -646,6 +662,9 @@ def build_sip_flows(calls: list, captures: dict, server_ip: str = None) -> None:
             'call_id': e.get('call_id'),
             'from': e.get('from') or {},
             'to': e.get('to') or {},
+            # 同一抓包点捕获的总次数（含重传）：仅同文件重复累加，<=1 时为
+            # None（不展示）。信令没打通时重传次数是直接证据
+            'retrans': e['retrans'] if e['retrans'] > 1 else None,
             'label': e['method'] + (' ' + e['reason'] if e['reason'] else ''),
             'kind': _sip_kind(e['method']),
             # 带 SDP 的消息（offer/answer）标注其列出的编码，供前端把协商
@@ -672,6 +691,61 @@ def _sip_kind(method: str) -> str:
         if code < 300:
             return 'success'
     return 'error'
+
+
+def _sip_invite_issues(flow: list) -> list:
+    """逐 Call-ID（腿）检查每个 INVITE 事务有没有得到响应（信令完整性）。
+
+    响应按时间归属：落在该 INVITE 之后、同腿下一条 INVITE 之前的应答都算
+    它的响应；响应判定直接看状态码数字——1xx 是临时响应，2xx~6xx 是最终
+    应答。两种异常：
+
+    - no_response：未收到任何响应——SIP 事务未完成，信令没打通（对端/
+      服务器不可达、拒收或离线），呼叫建立不起来；
+    - provisional_only：只收到 1xx 没有最终应答——呼叫没被接通也没被明确
+      拒绝，事务悬挂在振铃/早媒体阶段。
+
+    提示带该 INVITE 的重传次数（同一抓包点共捕获 N 次，来自去重合并的
+    retrans 计数）——重传本身就是「对端没回」的直接证据。
+    """
+    issues = []
+    by_cid = defaultdict(list)
+    for e in flow:
+        by_cid[e.get('call_id') or ''].append(e)
+    for cid, evs in by_cid.items():
+        invites = [e for e in evs if e['method'] == 'INVITE']
+        for i, inv in enumerate(invites):
+            nxt = invites[i + 1]['time'] if i + 1 < len(invites) else None
+            codes = [int(e['method']) for e in evs
+                     if e['method'].isdigit()
+                     and inv['time'] <= e['time']
+                     and (nxt is None or e['time'] < nxt)]
+            n = inv.get('retrans') or 1
+            ret = f'共发送 {n} 次（含重传），' if n > 1 else ''
+            head = (f"{_fmt_time(inv['time'])} 发出的 INVITE（Call-ID {cid}）{ret}")
+            if not codes:
+                issues.append({
+                    'kind': 'no_response', 'level': 'danger',
+                    'time_str': _fmt_time(inv['time']), 'call_id': cid,
+                    'retrans': n if n > 1 else None,
+                    'text': head + '未收到任何响应——SIP 事务未完成，信令没打通：'
+                            '对端/服务器没有回（不可达、拒收或离线），呼叫建立不起来。'
+                            '若抓包点只抓到单向信令也会漏收响应，换到双向路径上的'
+                            '抓包点核对。',
+                })
+            elif not any(c >= 200 for c in codes):
+                prov = '、'.join(str(c) for c in sorted(set(codes)))
+                issues.append({
+                    'kind': 'provisional_only', 'level': 'warning',
+                    'time_str': _fmt_time(inv['time']), 'call_id': cid,
+                    'retrans': n if n > 1 else None,
+                    'text': head + f'只收到临时响应（{prov}），未收到最终应答——'
+                            '呼叫没有被接通也没有被明确拒绝：对端/服务器停在振铃或'
+                            '早媒体阶段后事务悬挂（超时、CANCEL 或最终应答没有出现在'
+                            '抓包里）。',
+                })
+    issues.sort(key=lambda x: x['time_str'])
+    return issues
 
 
 def _sdp_codec_idents(sdp: dict, kind: str) -> list:
@@ -1658,6 +1732,8 @@ def detect_calls(captures: dict, server_ip: str = None) -> list:
             'completeness': completeness,
             'sip_flow': call.get('sip_flow', []),
             'sip_call_ids': sorted(call.get('sip_call_ids', set())),
+            # 信令完整性问题（INVITE 无响应 / 只有 1xx 悬挂），带重传次数
+            'sip_issues': call.get('sip_issues') or [],
         })
     return results
 

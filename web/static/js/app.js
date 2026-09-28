@@ -28,6 +28,37 @@ function callLabel(callId) {
     return (callId || '').replace('call_', '通话 ');
 }
 
+// ====== 真实 SIP Call-ID 展示 ======
+// 通话的内部编号（call_1…）只是界面称呼，用户对 Wireshark 靠的是真实
+// Call-ID（在通话的 sip_call_ids 列表里，B2BUA 一通电话每条腿一个）。
+// 1 条腿完整显示；多腿显示第一个 +（共 N 条腿）；无信令显示（无信令）。
+// 悬停 title 逐行列出全部，方便复制去 Wireshark 搜索
+function sipCallIdText(c) {
+    const ids = (c && c.sip_call_ids) || [];
+    if (!ids.length) return '（无信令）';
+    return ids.length === 1 ? ids[0] : `${ids[0]}（共 ${ids.length} 条腿）`;
+}
+
+function sipCallIdTitle(c) {
+    const ids = (c && c.sip_call_ids) || [];
+    if (!ids.length) return '该通话没有抓到 SIP 信令';
+    return 'Call-ID（可复制去 Wireshark 过滤）：\n' + ids.join('\n');
+}
+
+function sipCallIdBadge(c) {
+    if (!c) return '';
+    return `<span class="badge bg-light text-dark border" title="${_esc(sipCallIdTitle(c))}">` +
+        `<i class="bi bi-fingerprint"></i> Call-ID: ${_esc(sipCallIdText(c))}</span>`;
+}
+
+// 信令重传徽章：同一抓包点共捕获 N 次（含重传）。信令没打通时重传次数
+// 是直接证据，阶梯图与 Wireshark 的包数借此可以直接对上
+function _retransTag(m) {
+    if (!m.retrans || m.retrans <= 1) return '';
+    const tip = `${m.label}：同一抓包点共捕获 ${m.retrans} 次（含重传）`;
+    return ` <span class="badge bg-warning text-dark sl-retrans" title="${_esc(tip)}">×${m.retrans}</span>`;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     setupFileUploads();
     setupAnalyzeButton();
@@ -390,6 +421,12 @@ function renderCalls(calls, captureWarning, uploads) {
         }
 
         const flow = c.sip_flow || [];
+        // 信令完整性问题（INVITE 无响应 / 只有 1xx 悬挂）：置顶展示，重传
+        // 次数说明信令没打通的直接证据
+        const issuesHtml = (c.sip_issues || []).map(i =>
+            `<div class="alert alert-${i.level} py-2 small mb-1">` +
+            `<strong><i class="bi bi-exclamation-triangle me-1"></i>信令未完成</strong> ` +
+            `${_esc(i.text)}</div>`).join('');
         let flowHtml = '';
         if (flow.length) {
             const msgCount = _sipParties(flow).msgs.length;
@@ -411,6 +448,7 @@ function renderCalls(calls, captureWarning, uploads) {
         <div class="border rounded p-2 mb-2 bg-light">
             <div class="d-flex flex-wrap align-items-center gap-2">
                 <strong>${callLabel(c.call_id)}</strong>
+                ${sipCallIdBadge(c)}
                 <span class="text-muted small">${c.start_str} ~ ${c.end_str}（${c.duration_s}s）</span>
                 <span class="badge ${st.badge}"><i class="bi ${st.icon}"></i> ${st.label}</span>
                 ${c.is_p2p ? '<span class="badge bg-info text-dark"><i class="bi bi-arrow-left-right"></i> 点对点直连</span>' : ''}
@@ -422,6 +460,7 @@ function renderCalls(calls, captureWarning, uploads) {
                 ${_callPartyChain(flow, c)}
             </div>
             ${_mediaAliasWarningHtml(c)}
+            ${issuesHtml}
             ${_fsRelayHtml(relay)}
             ${flowHtml}
             ${reasons ? `<details class="mt-1">
@@ -651,14 +690,14 @@ function _sipLadder(flow, call) {
         let inner;
         if (a === b) {
             inner = `<div class="sl-msg ${kindCls} sl-self" style="left:${pct((a + 0.5) / n)}">` +
-                `<span class="lb">${m.label}${_sdpTags(m)}${_redirectTag(m)}</span></div>`;
+                `<span class="lb">${m.label}${_retransTag(m)}${_sdpTags(m)}${_redirectTag(m)}</span></div>`;
         } else {
             const lo = Math.min(a, b), hi = Math.max(a, b);
             const lSeg = a < b ? '<i class="ln"></i>' : '<i class="ln arr-l"></i>';
             const rSeg = a < b ? '<i class="ln arr-r"></i>' : '<i class="ln"></i>';
             inner = `<div class="sl-msg ${kindCls}" ` +
                 `style="left:${pct((lo + 0.5) / n)};width:${pct((hi - lo) / n)}">` +
-                `${lSeg}<span class="lb">${m.label}${_sdpTags(m)}${_redirectTag(m)}</span>${rSeg}</div>`;
+                `${lSeg}<span class="lb">${m.label}${_retransTag(m)}${_sdpTags(m)}${_redirectTag(m)}</span>${rSeg}</div>`;
         }
         rowBefore[i] = rows.length;
         rows.push(`<div class="sl-row"><span class="sl-t">${m.time_str}</span>` +
@@ -1018,9 +1057,10 @@ function renderCallSelector(calls, captureWarning) {
             ? ' <span class="badge bg-info text-dark"><i class="bi bi-arrow-left-right"></i> 点对点直连</span>' : '';
         const fmBadge = FS_MEDIA_BADGES[c.fs_media?.verdict] || '';
         html += `
-            <label class="direction-option">
+            <label class="direction-option" title="${_esc(sipCallIdTitle(c))}">
                 <input type="radio" name="call-select" value="${c.call_id}" ${checked} style="display:none">
                 ${callLabel(c.call_id)} ${c.start_str}~${c.end_str}（${c.duration_s}s）${p2pBadge}${fmBadge}
+                ${sipCallIdBadge(c)}
                 <span class="badge ${st.badge}">${st.label}</span>
             </label>`;
     });

@@ -765,6 +765,13 @@ details > summary:hover {
 .sl-sdplist .badge {
     font-size: 0.8rem;
 }
+/* 阶梯图消息行里的重传徽章（×N）：.lb 本身只有 0.72rem，.badge 默认再乘
+   0.75em 后实际仅约 8px，黄底黑字糊成一团——固定字号并压低行高 */
+.sl-msg .lb .badge {
+    font-size: 0.66rem;
+    line-height: 1.3;
+    padding: 0 4px;
+}
 .sl-msg.sip-req  { color: #4f46e5; }
 .sl-msg.sip-prov { color: #94a3b8; }
 .sl-msg.sip-ok   { color: #059669; }

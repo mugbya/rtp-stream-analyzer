@@ -4,7 +4,7 @@
 {% block content %}
 <div class="page-results">
     <div class="page-head">
-        <h2><i class="bi bi-clipboard-data"></i> 分析结果</h2>
+        <h2><i class="bi bi-clipboard-data"></i> 分析结果<span class="ms-2 fs-6 fw-normal text-muted" id="result-callid"></span></h2>
         <a href="/" class="btn btn-outline-primary">
             <i class="bi bi-arrow-left"></i> 返回首页
         </a>
@@ -98,6 +98,19 @@ document.addEventListener('DOMContentLoaded', () => {
 function showResults(results) {
     document.getElementById('result-loading').classList.add('d-none');
     document.getElementById('result-content').classList.remove('d-none');
+
+    // 标题附上选中通话的真实 SIP Call-ID（与 Wireshark 一致；无信令或混杂
+    // 分析时退回内部编号/不显示）
+    const cidEl = document.getElementById('result-callid');
+    if (cidEl) {
+        const ids = results.sip_call_ids || [];
+        if (ids.length) {
+            cidEl.textContent = `· Call-ID ${ids[0]}${ids.length > 1 ? `（共 ${ids.length} 条腿）` : ''}`;
+            cidEl.title = 'Call-ID（可复制去 Wireshark 过滤）：\n' + ids.join('\n');
+        } else if (results.call_id) {
+            cidEl.textContent = `· ${callLabel(results.call_id)}（无信令）`;
+        }
+    }
 
     // 摘要卡片
     const summary = results.summary;
@@ -1098,6 +1111,37 @@ function callLabel(callId) {
     return (callId || '').replace('call_', '通话 ');
 }
 
+// ====== 真实 SIP Call-ID 展示 ======
+// 通话的内部编号（call_1…）只是界面称呼，用户对 Wireshark 靠的是真实
+// Call-ID（在通话的 sip_call_ids 列表里，B2BUA 一通电话每条腿一个）。
+// 1 条腿完整显示；多腿显示第一个 +（共 N 条腿）；无信令显示（无信令）。
+// 悬停 title 逐行列出全部，方便复制去 Wireshark 搜索
+function sipCallIdText(c) {
+    const ids = (c && c.sip_call_ids) || [];
+    if (!ids.length) return '（无信令）';
+    return ids.length === 1 ? ids[0] : `${ids[0]}（共 ${ids.length} 条腿）`;
+}
+
+function sipCallIdTitle(c) {
+    const ids = (c && c.sip_call_ids) || [];
+    if (!ids.length) return '该通话没有抓到 SIP 信令';
+    return 'Call-ID（可复制去 Wireshark 过滤）：\n' + ids.join('\n');
+}
+
+function sipCallIdBadge(c) {
+    if (!c) return '';
+    return `<span class="badge bg-light text-dark border" title="${_esc(sipCallIdTitle(c))}">` +
+        `<i class="bi bi-fingerprint"></i> Call-ID: ${_esc(sipCallIdText(c))}</span>`;
+}
+
+// 信令重传徽章：同一抓包点共捕获 N 次（含重传）。信令没打通时重传次数
+// 是直接证据，阶梯图与 Wireshark 的包数借此可以直接对上
+function _retransTag(m) {
+    if (!m.retrans || m.retrans <= 1) return '';
+    const tip = `${m.label}：同一抓包点共捕获 ${m.retrans} 次（含重传）`;
+    return ` <span class="badge bg-warning text-dark sl-retrans" title="${_esc(tip)}">×${m.retrans}</span>`;
+}
+
 // From/To 显示名/分机号是抓包里的自由文本，插入 innerHTML 前需转义
 // 展示术语：服务端不绑定具体实现（FS/FreeSWITCH 只是其中一种），
 // 界面统一说"服务端"；后端返回的腿名/段名/说明里出现 FS 也在这里转掉
@@ -1304,14 +1348,14 @@ function _sipLadder(flow, call) {
         let inner;
         if (a === b) {
             inner = `<div class="sl-msg ${kindCls} sl-self" style="left:${pct((a + 0.5) / n)}">` +
-                `<span class="lb">${m.label}${_sdpTags(m)}</span></div>`;
+                `<span class="lb">${m.label}${_retransTag(m)}${_sdpTags(m)}</span></div>`;
         } else {
             const lo = Math.min(a, b), hi = Math.max(a, b);
             const lSeg = a < b ? '<i class="ln"></i>' : '<i class="ln arr-l"></i>';
             const rSeg = a < b ? '<i class="ln arr-r"></i>' : '<i class="ln"></i>';
             inner = `<div class="sl-msg ${kindCls}" ` +
                 `style="left:${pct((lo + 0.5) / n)};width:${pct((hi - lo) / n)}">` +
-                `${lSeg}<span class="lb">${m.label}${_sdpTags(m)}</span>${rSeg}</div>`;
+                `${lSeg}<span class="lb">${m.label}${_retransTag(m)}${_sdpTags(m)}</span>${rSeg}</div>`;
         }
         rowBefore[i] = rows.length;
         rows.push(`<div class="sl-row"><span class="sl-t">${m.time_str}</span>` +
@@ -1548,15 +1592,20 @@ function renderCallSwitcher(calls, currentCallId, results, uploads) {
     const banner = document.getElementById('call-switch-banner');
     const mediaType = results.media_type || 'audio';
     const direction = results.direction || 'auto';
+    const curCall = calls.find(c => c.call_id === currentCallId);
+    const curCidTxt = curCall
+        ? `（Call-ID: ${_esc(sipCallIdText(curCall))}）`
+        : '';
     const curTxt = currentCallId
-        ? `当前分析的是<strong>${callLabel(currentCallId)}</strong>，可切换到其他通话：`
+        ? `当前分析的是<strong>${callLabel(currentCallId)}</strong>${curCidTxt}，可切换到其他通话：`
         : '当前展示的是所有通话混在一起的结果，建议选择具体通话分析：';
     const btns = calls.map(c => {
         const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
         const cur = c.call_id === currentCallId;
         const cls = cur ? 'btn-primary' : 'btn-outline-primary';
         const dis = cur || switchingCall ? 'disabled' : '';
-        const title = `${c.start_str} ~ ${c.end_str} · ${c.stream_count} 条流`;
+        const range = `${c.start_str} ~ ${c.end_str}（${c.duration_s}s）`;
+        const tip = `${range} · ${c.stream_count} 条流\n` + sipCallIdTitle(c);
         // 单来源通话在切换按钮上也要醒目：这通电话其余抓包里没有
         const onlySrc = uploads && uploads.length > 1 && (c.files || []).length === 1
             ? `<span class="badge bg-danger ms-1" title="${(c.files || [])
@@ -1568,10 +1617,10 @@ function renderCallSwitcher(calls, currentCallId, results, uploads) {
         }[c.fs_media?.verdict] || '';
         return `<button type="button" class="btn btn-sm ${cls}" ${dis}
                     onclick="switchCall('${c.call_id}', '${mediaType}', '${direction}')"
-                    title="${title}">
+                    title="${_esc(tip)}">
                     <i class="bi bi-telephone"></i> ${callLabel(c.call_id)}
                     <span class="badge ${st.badge} ms-1"><i class="bi ${st.icon}"></i> ${st.label}</span>${fmBadge}${onlySrc}
-                    <span class="ms-1 small">${title}</span>
+                    <span class="ms-1 small">${range}</span>
                 </button>`;
     }).join('');
     banner.classList.remove('d-none');
@@ -1766,6 +1815,12 @@ function renderCalls(calls, captureWarning, uploads) {
     calls.forEach(c => {
         const st = CALL_STATUS[c.completeness.status] || CALL_STATUS.complete;
         const flow = c.sip_flow || [];
+        // 信令完整性问题（INVITE 无响应 / 只有 1xx 悬挂）：置顶展示，重传
+        // 次数说明信令没打通的直接证据
+        const issuesHtml = (c.sip_issues || []).map(i =>
+            `<div class="alert alert-${i.level} py-2 small mb-1">` +
+            `<strong><i class="bi bi-exclamation-triangle me-1"></i>信令未完成</strong> ` +
+            `${_esc(i.text)}</div>`).join('');
         // 摘要行给出两腿各自协商的编码与 FS 媒体处理判定，不用展开
         const negTxt = legNegotiationSummary(c);
         const fmShort = {transcode: '服务端转码', same: '服务端未转码',
@@ -1787,6 +1842,7 @@ function renderCalls(calls, captureWarning, uploads) {
         <div class="border rounded p-2 mb-2 bg-light">
             <div class="d-flex flex-wrap align-items-center gap-2">
                 <strong>${callLabel(c.call_id)}</strong>
+                ${sipCallIdBadge(c)}
                 <span class="text-muted small">${c.start_str} ~ ${c.end_str}（${c.duration_s}s）</span>
                 <span class="badge ${st.badge}"><i class="bi ${st.icon}"></i> ${st.label}</span>
                 ${FS_MEDIA_BADGES[c.fs_media?.verdict] || ''}
@@ -1795,6 +1851,7 @@ function renderCalls(calls, captureWarning, uploads) {
                 ${_callPartyChain(flow, c)}
             </div>
             ${_mediaAliasWarningHtml(c)}
+            ${issuesHtml}
             ${flow.length ? `<details open class="mt-1">
                 <summary class="text-muted small" style="cursor:pointer">
                     SIP 信令流程（${_sipParties(flow).msgs.length} 条消息${negTxt ? ` · ${negTxt}` : ''}${fmShort ? ` · ${fmShort}` : ''}）
@@ -1842,10 +1899,19 @@ function showMedia(manifest, report) {
     report = report || {};
 
     let html = '';
-    // 所属通话标注（分析限定在某通通话时）
+    // 所属通话标注（分析限定在某通通话时）：内部编号后附真实 SIP Call-ID
+    //（悬停 title 列出全部），用户拿它去 Wireshark 过滤才能与抓包对上
     if (manifest.call_id) {
+        const ids = manifest.sip_call_ids || [];
+        const cidTxt = ids.length
+            ? (ids.length === 1 ? ids[0] : `${ids[0]}（共 ${ids.length} 条腿）`)
+            : '（无信令）';
+        const cidTitle = ids.length
+            ? 'Call-ID（可复制去 Wireshark 过滤）：\n' + ids.join('\n')
+            : '该通话没有抓到 SIP 信令';
         html += `<div class="mb-2">
             <span class="badge bg-primary"><i class="bi bi-telephone"></i> ${manifest.call_id.replace('call_', '通话 ')}</span>
+            <span class="badge bg-light text-dark border" title="${_esc(cidTitle)}"><i class="bi bi-fingerprint"></i> Call-ID: ${_esc(cidTxt)}</span>
             <span class="text-muted small">以下媒体流均来自该通话</span>
         </div>`;
     }

@@ -344,6 +344,10 @@ def run_analysis():
         'media_type': media_type,
         'checks': {'delay': check_delay, 'quality': check_quality},
         'call_id': selected_call['call_id'] if selected_call else None,
+        # 选中通话的真实 SIP Call-ID（可能多条腿多个）：展示层用它替换内部
+        # 编号，用户拿去 Wireshark 过滤才能对上；内部编号仍是界面关联键
+        'sip_call_ids': (sorted(selected_call.get('sip_call_ids', set()))
+                         if selected_call else []),
         'num_captures': len(captures),
         'capture_roles': {fi['role']: fi['filename'] for fi in files_info},
         'ips_info': {fi['role']: {'ips': fi['ips'], 'stream_count': fi['stream_count']} 
@@ -474,6 +478,9 @@ def run_analysis():
                                         ssrc_filter=call_ssrcs,
                                         call_id=selected_call['call_id'] if selected_call else None)
     media_manifest = get_media_urls(media_manifest, session_id, output_date)
+    # 回放区「通话」徽章展示真实 SIP Call-ID（内部编号对不上 Wireshark）
+    media_manifest['sip_call_ids'] = (sorted(selected_call.get('sip_call_ids', set()))
+                                      if selected_call else [])
     # 给每条媒体流标注收发双方（谁到谁），并在清单汇总通话拓扑（主叫↔FS↔被叫）
     describe_media_parties(media_manifest, captures, calls, server_ip, files_info)
     results['media_manifest'] = media_manifest
