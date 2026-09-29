@@ -77,8 +77,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     renderCallSwitcher(data.calls, data.results.call_id, data.results,
                                        data.files || []);
                 }
-                // 抓包完整性提醒（截短包/文件尾损坏）：无通话也展示
-                const integrityHtml = _integrityWarningHtml(data.files);
+                // 抓包完整性提醒（截短包/文件尾损坏）：无通话也展示；
+                // 本次分析的通话本身完整（首尾俱全）时不再提示——文件虽可能
+                // 截短，这通电话却是完整的
+                const analyzedCall = (data.calls || [])
+                    .find(c => c.call_id === data.results.call_id);
+                const analyzedComplete = !!(analyzedCall &&
+                    analyzedCall.completeness &&
+                    analyzedCall.completeness.status === 'complete');
+                const integrityHtml = analyzedComplete
+                    ? '' : _integrityWarningHtml(data.files);
                 if (integrityHtml) {
                     document.getElementById('calls-card').classList.remove('d-none');
                     document.getElementById('calls-container')

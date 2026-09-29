@@ -339,6 +339,12 @@ def run_analysis():
         target_streams = {s: info for s, info in target_streams.items()
                           if s in call_ssrcs}
 
+    # 选中通话本身完整（首尾俱全）时，整份抓包的截短提示对这通电话没有
+    # 意义——文件虽可能截短，这通通话却是完整的，报告不再附带完整性说明
+    selected_call_complete = bool(
+        selected_call and
+        (selected_call.get('completeness') or {}).get('status') == 'complete')
+
     results = {
         'direction': direction,
         'media_type': media_type,
@@ -355,10 +361,11 @@ def run_analysis():
         'detected_server_ip': server_ip,
         'streams': all_streams,
         'classified_streams': classified,
-        # 每份抓包的完整性结论（截短/文件尾损坏），报告据此加数据说明
-        'capture_integrity': {role: cap['integrity']
-                              for role, cap in captures.items()
-                              if cap.get('integrity')},
+        # 每份抓包的完整性结论（截短/文件尾损坏），报告据此加数据说明；
+        # 选中的通话完整时置空——用户明确要求这种情况不再提示完整性
+        'capture_integrity': {} if selected_call_complete else
+        {role: cap['integrity'] for role, cap in captures.items()
+         if cap.get('integrity')},
     }
     
     # === 抖动分析 ===

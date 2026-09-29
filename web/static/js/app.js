@@ -1035,12 +1035,21 @@ function _captureWarningHtml(w) {
 function renderCallSelector(calls, captureWarning) {
     const section = document.getElementById('call-select-section');
     const container = document.getElementById('call-options');
+    const hint = document.getElementById('call-select-hint');
 
-    if (calls.length <= 1) {
+    if (!calls.length) {
         section.classList.add('d-none');
         return;
     }
     section.classList.remove('d-none');
+    // 单通也展示选择器并默认勾选：用户能看到分析对象是谁，直接点开始即可。
+    // 提示语按通话数量切换（单通时不再是"混分析会失真"的告警）
+    if (hint) {
+        hint.textContent = calls.length === 1
+            ? '已自动选中唯一的通话，可直接点「开始分析」'
+            : '多通通话混在一起分析会使延迟/抖动结果失真，建议选择具体通话';
+        hint.classList.toggle('text-danger', calls.length > 1);
+    }
 
     // 默认选覆盖抓包最多的一通（多端共有的通话最可能是想分析的），其次完整的
     let defaultIdx = 0, bestScore = -1;
@@ -1064,15 +1073,16 @@ function renderCallSelector(calls, captureWarning) {
                 <span class="badge ${st.badge}">${st.label}</span>
             </label>`;
     });
-    // 抓包之间没有共同通话时，混合分析会把不同通话搅在一起，直接不给选
-    if (!captureWarning) {
+    // 抓包之间没有共同通话时，混合分析会把不同通话搅在一起，直接不给选。
+    // 只有一通电话时没有"混合"可言，也不给这个选项
+    if (!captureWarning && calls.length > 1) {
         html += `
             <label class="direction-option">
                 <input type="radio" name="call-select" value="all" style="display:none">
                 全部通话（混合分析）
                 <span class="badge bg-danger">结果易失真</span>
             </label>`;
-    } else {
+    } else if (captureWarning) {
         const note = captureWarning.kind === 'p2p'
             ? '存在点对点直连通话（分析它不会使用 FS 数据），请选择要分析的通话。'
             : '抓包之间可能不是同一次通话，请以其中一通为准进行分析。';
@@ -1124,13 +1134,6 @@ async function runAnalysis(callIdOverride = null) {
     }
     if (analyzing) return;
 
-    // 抓包不完整：先弹窗让用户确认（继续分析 / 放弃分析），确认过不再重复
-    if (integrityWarning && !integrityConfirmed) {
-        pendingCallIdOverride = callIdOverride;
-        showIntegrityConfirmModal();
-        return;
-    }
-
     // 获取选中的通话（多通时；"all" = 全部混合）
     let callId = callIdOverride;
     if (callId === null) {
@@ -1139,6 +1142,19 @@ async function runAnalysis(callIdOverride = null) {
             callId = callRadio.value;
         }
     }
+
+    // 抓包不完整时先弹窗让用户确认（继续分析 / 放弃分析），确认过不再重复。
+    // 但选中的通话本身完整（首尾俱全）时不拦：整个文件虽可能有截短，这通
+    // 电话却是完整的，完整性提示对它没有意义
+    const selCall = callId ? detectedCalls.find(c => c.call_id === callId) : null;
+    const selCallComplete = !!(selCall &&
+        selCall.completeness && selCall.completeness.status === 'complete');
+    if (integrityWarning && !integrityConfirmed && !selCallComplete) {
+        pendingCallIdOverride = callIdOverride;
+        showIntegrityConfirmModal();
+        return;
+    }
+
     const params = currentAnalysisParams(callId);
 
     analyzing = true;
