@@ -307,12 +307,19 @@ def run_analysis():
     server_ip = session.get('server_ip')
     calls = session.get('calls') or []
     
-    # 加载所有抓包数据（含 RTP 载荷，用于音视频重建）
+    # 加载所有抓包数据（含 RTP 载荷，用于音视频重建）。
+    # 解析结果按存储文件名缓存在会话里：换媒体类型/换通话重跑分析时直接
+    # 复用，不再重复解析；超过缓存阈值的抓包改为每次现解析（防内存吃紧）
     # _role 为规范化角色（terminal/seat/fs），供无声诊断/延迟链路按角色锚定
+    parsed_cache = session.setdefault('parsed_full', {})
     captures = {}
     for fi in files_info:
         filepath = os.path.join(session_dir, fi['stored'])
-        cap = extract_rtp_packets(filepath, include_payload=True)
+        cap = parsed_cache.get(fi['stored'])
+        if cap is None:
+            cap = extract_rtp_packets(filepath, include_payload=True)
+            if os.path.getsize(filepath) <= config.PARSE_CACHE_MAX_BYTES:
+                parsed_cache[fi['stored']] = cap
         cap['_role'] = _canonical_role(fi['role'])
         captures[fi['role']] = cap
     

@@ -9,6 +9,7 @@ from collections import defaultdict
 import os
 import re
 
+from analyzer import fast_pcap
 from analyzer.rtcp_parser import parse_rtcp
 from analyzer.capture_integrity import TRUNC_MIN_BYTES, build_integrity, scan_pcap_headers
 from analyzer.stream_classifier import resolve_stream_kind
@@ -261,22 +262,57 @@ def parse_rtp_header(payload: bytes):
 
 
 def _read_capture(filepath: str):
-    """读取抓包文件（等价 rdpcap），文件中途损坏时保留已解析的包。
+    """读取抓包文件，返回 (packets, file_cut)。
 
-    返回 (packets, file_cut)。file_cut=True 表示读取中途出错（文件传输出错/
-    抓包被强制终止）——像 Wireshark 一样带提示继续分析，而不是整份拒收。
-    一个包都读不出时属于格式无效，交由上层报错。
+    优先走 fast_pcap 纯 struct 快速读取器（比 scapy 快一个数量级以上）；
+    格式/链路层不支持或整份读不出来时回退 scapy 旧路径。file_cut=True
+    表示读取中途出错（文件传输出错/抓包被强制终止）——像 Wireshark 一样
+    带提示继续分析，而不是整份拒收；一个包都读不出时属于格式无效，
+    交由上层报错。
     """
     pkts = []
     try:
-        with PcapReader(filepath) as reader:
-            for p in reader:
-                pkts.append(p)
+        for p in fast_pcap.iter_packets(filepath):
+            pkts.append(p)
         return pkts, False
+    except fast_pcap.UnsupportedCapture:
+        if pkts:
+            # 中途才遇到不认识的封装：保留已读部分，标记不完整
+            return pkts, True
+        return _read_capture_scapy(filepath)
     except Exception:
         if not pkts:
             raise
         return pkts, True
+
+
+def _read_capture_scapy(filepath: str):
+    """scapy 兜底读取（罕见封装，如 802.11）：产出统一转成 FastPacket，
+    后续解析逻辑对两种来源完全一致。"""
+    raw_pkts = []
+    file_cut = False
+    try:
+        with PcapReader(filepath) as reader:
+            for p in reader:
+                raw_pkts.append(p)
+    except Exception:
+        if not raw_pkts:
+            raise
+        file_cut = True
+
+    # 大 SDP 的 SIP 消息超过 MTU 时会被 IP 分片：只有首片带 UDP 头，SDP 正文
+    # 往往落在后续分片里。先重组再遍历，否则这些消息只剩半截、SDP 解析不到
+    # （快速读取器在 _parse_ipv4 里自行做 IPv4 分片重组，不走这里）
+    pkts = []
+    for p in defragment(raw_pkts):
+        t = float(p.time)
+        if IP in p and UDP in p and Raw in p:
+            pkts.append(fast_pcap.FastPacket(
+                t, p.wirelen, len(p),
+                p[IP].src, p[IP].dst, p[UDP].sport, p[UDP].dport, bytes(p[Raw])))
+        else:
+            pkts.append(fast_pcap.FastPacket(t, p.wirelen, len(p)))
+    return pkts, file_cut
 
 
 def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
@@ -304,10 +340,9 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
         }
     """
     raw_pkts, file_cut = _read_capture(filepath)
-    # 大 SDP 的 SIP 消息超过 MTU 时会被 IP 分片：只有首片带 UDP 头，SDP 正文
-    # 往往落在后续分片里。先重组再遍历，否则这些消息只剩半截、SDP 解析不到
-    # （协商编码、媒体端点全丢，直接影响信令流程与通话归属判定）
-    pkts = defragment(raw_pkts)
+    # 快速读取器/scapy 兜底都把 UDP 载荷整理成 FastPacket；IPv4 分片重组
+    # 已在读取层完成（大 SDP 的 SIP 消息超 MTU 时 SDP 正文能完整解析）
+    pkts = raw_pkts
     packets = {}
     ips = set()
     ssrcs = set()
@@ -328,65 +363,66 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
 
     for p in pkts:
         all_count += 1
-        t = float(p.time)
+        t = p.ts
         if capture_start is None or t < capture_start:
             capture_start = t
         if capture_end is None or t > capture_end:
             capture_end = t
         wirelen = p.wirelen
-        missing = (wirelen - len(p)) if wirelen else 0
+        missing = (wirelen - p.caplen) if wirelen else 0
         truncated = missing >= TRUNC_MIN_BYTES
         if truncated:
             trunc_all += 1
             max_missing = max(max_missing, missing)
-        if IP in p and UDP in p and Raw in p:
-            # SIP signaling (completeness signal + per-call flow display)
-            if p[UDP].sport == 5060 or p[UDP].dport == 5060:
-                ev = _parse_sip_event(bytes(p[Raw]))
-                if ev:
-                    ev['time'] = t
-                    ev['src'] = p[IP].src
-                    ev['dst'] = p[IP].dst
-                    sip_events.append(ev)
-                continue
-            rtp = parse_rtp_header(bytes(p[Raw]))
-            if rtp:
-                pt, seq, ts, ssrc, payload = rtp
-                if truncated:
-                    trunc_rtp += 1
-                src_ip = p[IP].src
-                dst_ip = p[IP].dst
-                src_port = p[UDP].sport
-                dst_port = p[UDP].dport
-                key = (ssrc, seq)
+        if p.src_ip is None:               # 非 UDP 包：只参与计数与时间范围
+            continue
+        # SIP signaling (completeness signal + per-call flow display)
+        if p.sport == 5060 or p.dport == 5060:
+            ev = _parse_sip_event(p.payload)
+            if ev:
+                ev['time'] = t
+                ev['src'] = p.src_ip
+                ev['dst'] = p.dst_ip
+                sip_events.append(ev)
+            continue
+        rtp = parse_rtp_header(p.payload)
+        if rtp:
+            pt, seq, ts, ssrc, payload = rtp
+            if truncated:
+                trunc_rtp += 1
+            src_ip = p.src_ip
+            dst_ip = p.dst_ip
+            src_port = p.sport
+            dst_port = p.dport
+            key = (ssrc, seq)
 
-                # Only keep the first occurrence of each packet (dedup)
-                if key not in packets:
-                    if include_payload:
-                        packets[key] = (float(p.time), ts, pt, src_ip, dst_ip, src_port, dst_port, payload)
-                    else:
-                        packets[key] = (float(p.time), ts, pt, src_ip, dst_ip, src_port, dst_port)
+            # Only keep the first occurrence of each packet (dedup)
+            if key not in packets:
+                if include_payload:
+                    packets[key] = (t, ts, pt, src_ip, dst_ip, src_port, dst_port, payload)
+                else:
+                    packets[key] = (t, ts, pt, src_ip, dst_ip, src_port, dst_port)
 
-                ips.add(src_ip)
-                ips.add(dst_ip)
-                ssrcs.add(ssrc)
-                streams[ssrc]['count'] += 1
-                streams[ssrc]['pt'].add(pt)
-                streams[ssrc]['ips'].add((src_ip, dst_ip))
-                streams[ssrc]['port_pairs'].add((src_ip, src_port, dst_ip, dst_port))
-                sample = ts_samples[ssrc]
-                if len(sample) >= CLOCK_SAMPLE_MAX:
-                    sample.pop(0)
-                sample.append((t, ts))
-            else:
-                # RTCP（SR/RR）：RTP 解析会把类型 200/201 拒掉，落到这里。
-                # SR 证明发送端在产媒体并携带 NTP↔RTP 映射，RR 是接收端对
-                # 入流的丢包/抖动亲历上报，无声与延迟诊断都用得上
-                for ev in parse_rtcp(bytes(p[Raw])):
-                    ev['time'] = t
-                    ev['src'] = p[IP].src
-                    ev['dst'] = p[IP].dst
-                    rtcp_events.append(ev)
+            ips.add(src_ip)
+            ips.add(dst_ip)
+            ssrcs.add(ssrc)
+            streams[ssrc]['count'] += 1
+            streams[ssrc]['pt'].add(pt)
+            streams[ssrc]['ips'].add((src_ip, dst_ip))
+            streams[ssrc]['port_pairs'].add((src_ip, src_port, dst_ip, dst_port))
+            sample = ts_samples[ssrc]
+            if len(sample) >= CLOCK_SAMPLE_MAX:
+                sample.pop(0)
+            sample.append((t, ts))
+        else:
+            # RTCP（SR/RR）：RTP 解析会把类型 200/201 拒掉，落到这里。
+            # SR 证明发送端在产媒体并携带 NTP↔RTP 映射，RR 是接收端对
+            # 入流的丢包/抖动亲历上报，无声与延迟诊断都用得上
+            for ev in parse_rtcp(p.payload):
+                ev['time'] = t
+                ev['src'] = p.src_ip
+                ev['dst'] = p.dst_ip
+                rtcp_events.append(ev)
     
     # —— 流种类/编码解析 ——
     # 动态 PT（96-127）按媒体种类独立分配（audio 96=OPUS 与 video 96=H264 可
@@ -437,9 +473,10 @@ def extract_rtp_packets(filepath: str, include_payload: bool = False) -> dict:
             }
     
     # 文件级走查：取快照长度与记录头级别的截短数（能区分“快照截短”与
-    # “文件尾半包”）；走查失败时退回按包统计
+    # “文件尾半包”）；走查失败时退回按包统计。快速读取器遇到尾部半包
+    # 是静默停止的，file_cut 要把走查发现的 tail_incomplete 并进来
     scan = scan_pcap_headers(filepath) or {}
-    scan['file_cut'] = file_cut
+    scan['file_cut'] = file_cut or bool(scan.get('tail_incomplete'))
     scan['header_truncated'] = scan.get('truncated_records')
     scan.setdefault('truncated', trunc_all)
     scan.setdefault('max_missing_bytes', max_missing)

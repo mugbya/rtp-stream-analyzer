@@ -155,11 +155,18 @@ function setupFileUploads() {
     document.getElementById('btn-upload').addEventListener('click', uploadFiles);
 }
 
-async function uploadFiles() {
+// 上传进度条（Bootstrap 结构）：传输阶段显示百分比，传完后切到服务端解析
+function _uploadProgress(pct, label) {
+    return `<div class="w-100"><div class="d-flex justify-content-between small">` +
+        `<span>${label}</span><span>${pct}%</span></div>` +
+        `<div class="progress mt-1" style="height: 6px;">` +
+        `<div class="progress-bar progress-bar-striped ${pct < 100 ? 'progress-bar-animated' : ''}" ` +
+        `role="progressbar" style="width: ${pct}%"></div></div></div>`;
+}
+
+function uploadFiles() {
     const btn = document.getElementById('btn-upload');
     const status = document.getElementById('upload-status');
-    btn.disabled = true;
-    status.innerHTML = '<span class="text-primary"><div class="spinner-border spinner-border-sm me-2"></div>正在上传并识别...</span>';
 
     const formData = new FormData();
     const fileInputs = document.querySelectorAll('.file-input');
@@ -174,16 +181,31 @@ async function uploadFiles() {
 
     if (!hasFiles) {
         status.innerHTML = '<span class="text-danger">请至少上传一个抓包文件</span>';
-        btn.disabled = false;
         return;
     }
+    btn.disabled = true;
+    status.innerHTML = _uploadProgress(0, '正在上传');
 
-    try {
-        const resp = await fetch('/api/upload', { method: 'POST', body: formData });
-        const data = await resp.json();
-
-        if (data.error) {
-            status.innerHTML = `<span class="text-danger">${data.error}</span>`;
+    // XHR 才有上传进度事件：先按传输字节显示百分比，传输完成后请求仍会
+    // 挂着（服务端在解析抓包、识别通话），此时切换到"解析中"提示
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload');
+    xhr.responseType = 'json';
+    xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && e.total > 0) {
+            const pct = Math.min(100, Math.round(e.loaded / e.total * 100));
+            status.innerHTML = _uploadProgress(pct, '正在上传');
+        }
+    };
+    xhr.upload.onload = () => {
+        status.innerHTML =
+            '<span class="text-primary"><div class="spinner-border spinner-border-sm me-2"></div>' +
+            '上传完成，正在解析抓包与识别通话…（大文件需要一些时间）</span>';
+    };
+    xhr.onload = () => {
+        const data = xhr.response;
+        if (!data || data.error) {
+            status.innerHTML = `<span class="text-danger">${(data && data.error) || ('上传失败 (HTTP ' + xhr.status + ')')}</span>`;
             btn.disabled = false;
             return;
         }
@@ -199,11 +221,12 @@ async function uploadFiles() {
         showDetectionResults(data);
         // 显示分析配置
         showConfigPanel(data);
-
-    } catch (err) {
-        status.innerHTML = `<span class="text-danger">上传失败: ${err.message}</span>`;
+    };
+    xhr.onerror = () => {
+        status.innerHTML = '<span class="text-danger">上传失败：网络错误，请检查连接后重试</span>';
         btn.disabled = false;
-    }
+    };
+    xhr.send(formData);
 }
 
 // ====== 识别结果展示 ======
@@ -1161,7 +1184,13 @@ async function runAnalysis(callIdOverride = null) {
     const btn = document.getElementById('btn-analyze');
     const status = document.getElementById('analyze-status');
     btn.disabled = true;
-    status.innerHTML = '<span class="text-warning"><div class="spinner-border spinner-border-sm me-2"></div>正在分析中，请稍候...</span>';
+    const t0 = Date.now();
+    const showAnalyzing = () => {
+        const sec = Math.round((Date.now() - t0) / 1000);
+        status.innerHTML = `<span class="text-warning"><div class="spinner-border spinner-border-sm me-2"></div>正在分析中，已用 ${sec} 秒…</span>`;
+    };
+    showAnalyzing();
+    const timer = setInterval(showAnalyzing, 1000);
 
     try {
         const resp = await fetch('/api/analyze', {
@@ -1185,6 +1214,7 @@ async function runAnalysis(callIdOverride = null) {
     } catch (err) {
         status.innerHTML = `<span class="text-danger">分析失败: ${err.message}</span>`;
     } finally {
+        clearInterval(timer);
         // 跳转完成前恢复按钮；导航成功后页面随即卸载
         analyzing = false;
         btn.disabled = false;
