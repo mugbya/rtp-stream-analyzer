@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{% if lang == 'en' %}en{% else %}zh-CN{% endif %}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,6 +10,17 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     {% block extra_head %}{% endblock %}
+    <script>
+        // 当前界面语言(g.lang,按域名判定,?lang= 预览时为显式值)。
+        // 英文预览(?lang=en)只作用于页面请求,fetch 的接口请求不带语言,
+        // 服务器会按域名回中文,这里把语言注入 JS 供接口调用续传。
+        window.APP_LANG = '{{ lang }}';
+        window.apiLang = function (u) {
+            return window.APP_LANG === 'en'
+                ? u + (u.indexOf('?') >= 0 ? '&' : '?') + 'lang=en'
+                : u;
+        };
+    </script>
 </head>
 <body>
     <nav class="navbar navbar-dark navbar-app">

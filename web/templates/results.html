@@ -64,7 +64,7 @@
 const SESSION_ID = '{{ session_id }}';
 
 document.addEventListener('DOMContentLoaded', () => {
-    fetch(`/api/session/${SESSION_ID}`)
+    fetch(window.apiLang(`/api/session/${SESSION_ID}`))
         .then(r => r.json().then(data => ({ok: r.ok, status: r.status, data})))
         .then(({ok, status, data}) => {
             if (!ok && data.error === 'session_expired') {
@@ -438,7 +438,8 @@ function renderDelayChains(dc, merged) {
     }
     // 点对点通话链路只有一段网络路径，方向头不带 FS
     const p2p = dc.p2p || (dc.directions || []).some(d =>
-        (d.segments || []).some(s => (s.name || '').includes('直连')));
+        (d.segments || []).some(s => (s.name || '').includes('直连') ||
+            (s.name || '').includes('Direct')));
     html += `<p class="small text-muted mb-2">把每个方向拆成 ${p2p ? '发声端 → 听者 一段' : '发声端→服务端、服务端内部、服务端→听者 三段'}测量。` +
         `跨抓包段包含抓包机时钟差，绝对值仅供参考；两段往返之和可抵消时钟差。</p>`;
     dc.directions.forEach(d => {
@@ -587,7 +588,8 @@ function _partyIpMap(parties, entries) {
 // 旧会话数据的 p2p 兜底：无声诊断的直连腿名带"直连"字样
 function _p2pFallback(directions) {
     return (directions || []).some(d =>
-        (d.legs || []).some(l => (l.leg || '').includes('直连')));
+        (d.legs || []).some(l => (l.leg || '').includes('直连') ||
+            (l.leg || '').includes('Direct')));
 }
 
 // 流展示标签形如 "seat (SSRC=0x00ff2b3a)"，解析角色与 SSRC
@@ -634,7 +636,8 @@ function _singleLegChain(legs, glSsrcs) {
 function _singleLegChainFromSegments(segs, glSsrcs) {
     const hit = s => s.ssrc && String(s.ssrc).toLowerCase().split('→')
         .some(x => glSsrcs.has(x.trim()));
-    const isLeg = s => (s.name || '').includes('→') && !(s.name || '').includes('内部');
+    const isLeg = s => (s.name || '').includes('→') &&
+        !(s.name || '').includes('内部') && !(s.name || '').includes('internal');
     const legs = (segs || []).filter(isLeg);
     const hits = legs.filter(hit);
     if (legs.length < 2 || hits.length !== 1) return null;
@@ -1725,7 +1728,7 @@ function renderCallSwitcher(calls, currentCallId, results, uploads) {
 function switchCall(callId, mediaType, direction) {
     if (switchingCall) return;
     switchingCall = true;
-    fetch('/api/analyze', {
+    fetch(window.apiLang('/api/analyze'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1802,7 +1805,7 @@ function switchMediaType(mediaType) {
         status.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>' +
             '正在分析中，媒体重建可能需要一些时间，完成后自动刷新页面…';
     }
-    fetch('/api/analyze', {
+    fetch(window.apiLang('/api/analyze'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

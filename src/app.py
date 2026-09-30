@@ -21,9 +21,10 @@ import threading
 import time
 from datetime import date
 from flask import (Flask, render_template, request, jsonify, send_file,
-                   url_for, make_response)
+                   url_for, make_response, g)
 
 import config
+import i18n as i18n_mod
 
 from analyzer.rtp_parser import extract_rtp_packets, get_stream_packets
 from analyzer.stream_classifier import (
@@ -71,9 +72,21 @@ def _add_static_version(endpoint, values):
     if not filename:
         return
     try:
-        values['v'] = int(os.stat(os.path.join(app.static_folder, filename)).st_mtime)
+        v = int(os.stat(os.path.join(app.static_folder, filename)).st_mtime)
     except OSError:
-        pass
+        return
+    if filename == 'js/app.js':
+        # app.js 内容随语言与翻译字典而变（见 static_js_app），版本号要同时
+        # 覆盖三个维度：文件 mtime、字典指纹、语言。语言不进版本号的话，
+        # 同一浏览器先看过英文再回中文（或反之），两个语言共用同一 URL，
+        # 会命中对方语言的长缓存，出现"中文界面配英文文案"
+        lang = g.get('lang', 'zh')
+        v = '{}-{}-{}'.format(v, i18n_mod.fingerprint(), lang)
+        # URL 还必须带上 lang 参数：浏览器拉静态资源时只有 ?v=，没有语言信息，
+        # 服务器按域名/默认值判定会把英文页面（如本地 ?lang=en 预览）配成中文 JS。
+        # before_request 识别 ?lang= 后 g.lang 即为请求语言，static_js_app 据此翻译
+        values['lang'] = lang
+    values['v'] = v
 
 # 静态资源 URL 已带版本号，可以放心长缓存；HTML 是动态页面，禁止缓存，
 # 否则缓存的旧 HTML 还会引用旧版本号的静态资源。
@@ -194,6 +207,80 @@ def _no_cache_html(response):
     if response.content_type.startswith('text/html'):
         response.headers['Cache-Control'] = 'no-cache'
     return response
+
+
+# ---------------------------------------------------------------------------
+# 多语言：按访问域名切语言（config.DOMAIN_LANGUAGES），一套代码一套部署。
+# 英文站不在输出层做模板分支，而是把中文按字典替换成英文（src/i18n.py）：
+# HTML 渲染结果整体替换、/api JSON 字符串值深度替换、app.js 翻译源码后下发。
+# 字典没有的中文保持原样兜底，/admin 管理页不翻译。
+# ?lang=zh/en 仅对当次请求生效（本地预览用），不做记忆，语言始终以域名为准。
+# ---------------------------------------------------------------------------
+
+
+@app.before_request
+def _i18n_detect_language():
+    lang = request.args.get('lang')
+    if lang not in ('zh', 'en'):
+        host = (request.host or '').split(':')[0].lower()
+        lang = config.DOMAIN_LANGUAGES.get(host, config.DEFAULT_LANGUAGE)
+    g.lang = lang
+
+
+@app.after_request
+def _i18n_translate_response(response):
+    if g.get('lang') != 'en':
+        return response
+    path = request.path
+    if path.startswith('/admin') or path.startswith('/media'):
+        return response
+    try:
+        if response.mimetype == 'text/html':
+            response.set_data(i18n_mod.translate(
+                response.get_data(as_text=True), code=True))
+        elif response.mimetype == 'application/json' and path.startswith('/api'):
+            data = json.loads(response.get_data(as_text=True))
+            response.set_data(json.dumps(
+                i18n_mod.deep_translate(data), ensure_ascii=False))
+    except Exception:
+        pass  # 翻译尽力而为，任何异常都不能影响响应返回
+    return response
+
+
+@app.context_processor
+def _i18n_inject_lang():
+    return {'lang': g.get('lang', 'zh')}
+
+
+# app.js 按语言翻译后下发：与 /static/ 其余文件不同，响应内容依赖语言，
+# 单独路由接管；URL 仍走 url_for('static') 生成（带 v= 版本号），
+# Werkzeug 对纯静态路径的路由优先级更高，请求会落到本视图。
+_app_js_cache = {}
+
+
+@app.route('/static/js/app.js')
+def static_js_app():
+    lang = g.get('lang', 'zh')
+    path = os.path.join(app.static_folder, 'js', 'app.js')
+    try:
+        mtime = os.stat(path).st_mtime
+    except OSError:
+        return 'Not Found', 404
+    key = (lang, mtime)
+    body = _app_js_cache.get(key)
+    if body is None:
+        with open(path, encoding='utf-8') as fp:
+            src = fp.read()
+        if lang == 'en':
+            src = i18n_mod.translate(src, code=True)
+        body = src.encode('utf-8')
+        _app_js_cache.clear()  # 只缓存最新一份，进程内存不随历史版本膨胀
+        _app_js_cache[key] = body
+    resp = app.response_class(body, mimetype='application/javascript')
+    # 与静态资源一致的长缓存；版本号在 _add_static_version 里同时含文件
+    # mtime 与字典指纹，文件或字典任一更新 URL 即失效
+    resp.headers['Cache-Control'] = 'public, max-age=31536000'
+    return resp
 
 
 @app.route('/')

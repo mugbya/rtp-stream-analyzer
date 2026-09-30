@@ -189,7 +189,7 @@ async function _uploadChunkWithRetry(sessionId, field, index, blob, retries) {
             fd.append('field', field);
             fd.append('index', index);
             fd.append('chunk', blob);
-            const resp = await fetch('/api/upload/chunk', { method: 'POST', body: fd });
+            const resp = await fetch(window.apiLang('/api/upload/chunk'), { method: 'POST', body: fd });
             if (!resp.ok) {
                 const data = await resp.json().catch(() => ({}));
                 throw new Error(data.error || ('HTTP ' + resp.status));
@@ -312,7 +312,7 @@ async function _uploadChunked(entries, totalBytes, status) {
         '<span class="text-primary"><div class="spinner-border spinner-border-sm me-2"></div>' +
         '上传完成，正在合并分片并识别通话…</span>';
 
-    const resp = await fetch('/api/upload/assemble', {
+    const resp = await fetch(window.apiLang('/api/upload/assemble'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, files: fileMetas }),
@@ -1370,7 +1370,7 @@ async function runAnalysis(callIdOverride = null) {
     const timer = setInterval(showAnalyzing, 1000);
 
     try {
-        const resp = await fetch('/api/analyze', {
+        const resp = await fetch(window.apiLang('/api/analyze'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session_id: sessionId, ...params }),
@@ -1386,7 +1386,7 @@ async function runAnalysis(callIdOverride = null) {
         // 存进会话，跳转过去统一展示。首页不再内嵌渲染结果，避免两套展示
         // 逻辑各自维护（展示逻辑只存在于 templates/results.html）
         status.innerHTML = '<span class="text-success">✓ 分析完成，正在打开结果页…</span>';
-        window.location.href = `/results/${sessionId}`;
+        window.location.href = window.apiLang(`/results/${sessionId}`);
 
     } catch (err) {
         status.innerHTML = `<span class="text-danger">分析失败: ${err.message}</span>`;
