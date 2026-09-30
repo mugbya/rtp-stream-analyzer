@@ -579,6 +579,67 @@ details > summary:hover {
     max-height: 380px;
     overflow-y: auto;
 }
+/* ====== SIP 信令流程 — 放大弹窗 ======
+   卡片右上角的放大按钮：实心主题色胶囊 + 投影，一眼能看到 */
+.sip-flow-box { position: relative; }
+.sip-flow-zoom {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 5;
+    font-size: 0.8rem;
+    font-weight: 600;
+    line-height: 1.2;
+    padding: 4px 12px;
+    color: #fff;
+    background: #4f46e5;
+    border: 1px solid #4f46e5;
+    border-radius: 20px;
+    box-shadow: 0 2px 6px rgba(79, 70, 229, .35);
+}
+.sip-flow-zoom:hover, .sip-flow-zoom:focus {
+    color: #fff;
+    background: #4338ca;
+    border-color: #4338ca;
+}
+/* 全屏弹窗：默认整图等比缩放适配窗口高度（不用滚动看完整个流程），
+   「原始大小」切回 1:1 并允许内部滚动（列头吸顶仍生效） */
+.sip-flow-modal .modal-dialog {
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    margin: 0;
+}
+.sip-flow-modal .modal-content {
+    height: 100%;
+    border: none;
+    border-radius: 0;
+}
+.sip-flow-modal .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0.5rem;
+}
+.sip-flow-modal .sfm-fit { height: 100%; transform-origin: top center; }
+.sip-flow-modal .sip-flow-pop { max-height: none; }
+/* 弹窗里加大基础字号：消息行 min-height 固定不随字号变，缩放适配后
+   净字面大小比沿用页面内小字号显著更大（这是「不滚动看全图 + 看得清」
+   的关键——弹窗内只加大字号、不放大行距） */
+.sip-flow-pop .sl-msg .lb { font-size: 0.95rem; }
+.sip-flow-pop .sl-msg .lb .badge { font-size: 0.75rem; }
+.sip-flow-pop .sl-name { font-size: 0.92rem; }
+.sip-flow-pop .sl-ip { font-size: 0.78rem; }
+.sip-flow-pop .sl-role { font-size: 0.75rem; }
+.sip-flow-pop .sl-t { font-size: 0.7rem; }
+.sip-flow-pop .sl-sdp { font-size: 0.74rem; }
+.sip-flow-pop .sl-sdplist { font-size: 0.92rem; }
+.sip-flow-pop .sl-sdplist .badge { font-size: 0.85rem; }
+.sip-flow-pop .sl-codecs { font-size: 0.85rem; }
+.sip-flow-pop .sl-marker { height: 22px; }
+.sip-flow-pop .sl-marker .lb { font-size: 0.8rem; }
+.sip-flow-pop .sl-row { min-height: 24px; }
+
 .sl-head {
     position: sticky;
     top: 0;

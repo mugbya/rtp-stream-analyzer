@@ -556,7 +556,11 @@ function renderCalls(calls, captureWarning, uploads) {
                 <summary class="text-muted small" style="cursor:pointer">
                     SIP 信令流程（${msgCount} 条消息${negTxt ? ` · ${negTxt}` : ''}${fmShort ? ` · ${fmShort}` : ''}）
                 </summary>
-                <div class="mt-2 p-2 border rounded bg-white">
+                <div class="mt-2 p-2 border rounded bg-white sip-flow-box">
+                    <button type="button" class="btn btn-sm sip-flow-zoom"
+                        title="放大到弹窗查看完整信令流程，不用滚动" data-title="${_esc(callLabel(c.call_id))}">
+                        <i class="bi bi-arrows-fullscreen"></i> 放大
+                    </button>
                     <div class="sip-flow">${_sipLadder(flow, c)}</div>
                 </div>
             </details>`;
@@ -589,6 +593,18 @@ function renderCalls(calls, captureWarning, uploads) {
     });
 
     container.innerHTML = html;
+
+    // 事件委托（只绑一次）：点「放大」把当前阶梯图整份搬进弹窗
+    if (!container.dataset.sfmBound) {
+        container.dataset.sfmBound = '1';
+        container.addEventListener('click', e => {
+            const btn = e.target.closest('.sip-flow-zoom');
+            if (!btn) return;
+            const ladder = btn.closest('.sip-flow-box')?.querySelector('.sip-flow');
+            if (ladder) openSipFlowModal(
+                `${_esc(btn.dataset.title || '')} · SIP 信令流程`, ladder.innerHTML);
+        });
+    }
 }
 
 // ====== SIP 信令流程展示 ======
@@ -934,6 +950,72 @@ function _sipLadder(flow, call) {
             rows.splice(it.anchor, 0, `<div class="sl-codecs">${it.html}</div>`);
     }
     return html + rows.join('') + `</div>`;
+}
+
+// ====== SIP 信令流程放大弹窗 ======
+// 点击卡片右上角「放大」，把阶梯图整份搬进近全屏弹窗：默认整图等比缩放适配
+// 窗口高度，整个信令流程一眼看完不用滚动；「原始大小」切回 1:1 并允许内部
+// 滚动（列头吸顶仍生效）
+let _sfmFitMode = true;
+
+function _sfmApply() {
+    const modal = document.getElementById('sipFlowModal');
+    if (!modal) return;
+    const stage = modal.querySelector('.sfm-body');
+    const fit = modal.querySelector('.sfm-fit');
+    const flow = modal.querySelector('.sip-flow-pop');
+    const btn = modal.querySelector('#sfm-fit-toggle');
+    fit.style.transform = 'none';
+    if (_sfmFitMode) {
+        flow.style.overflow = 'visible';
+        flow.style.height = 'auto';
+        // 额外再收 2%：规避不同视口下 modal 过渡/圆角导致的实测高度偏差，
+        // 保证底部至少留出十几像素余量
+        const s = Math.min(1,
+            (stage.clientHeight - 20) / flow.scrollHeight,
+            (stage.clientWidth - 20) / flow.scrollWidth) * 0.98;
+        fit.style.transform = `scale(${s})`;
+        btn.innerHTML = '<i class="bi bi-zoom-in me-1"></i>原始大小';
+    } else {
+        flow.style.overflow = 'auto';
+        flow.style.height = '100%';
+        btn.innerHTML = '<i class="bi bi-arrows-fullscreen me-1"></i>适应窗口';
+    }
+}
+
+function openSipFlowModal(title, ladderHtml) {
+    let modal = document.getElementById('sipFlowModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.className = 'modal sip-flow-modal';
+        modal.id = 'sipFlowModal';
+        modal.innerHTML =
+            '<div class="modal-dialog modal-dialog-centered"><div class="modal-content">' +
+            '<div class="modal-header py-2">' +
+            `<h6 class="modal-title mb-0"><i class="bi bi-diagram-2 me-1"></i>${title}</h6>` +
+            '<div class="d-flex align-items-center gap-2">' +
+            '<button type="button" class="btn btn-sm btn-outline-secondary" id="sfm-fit-toggle"></button>' +
+            '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>' +
+            '</div></div>' +
+            '<div class="modal-body sfm-body"><div class="sfm-fit">' +
+            '<div class="sip-flow sip-flow-pop">' + ladderHtml + '</div>' +
+            '</div></div></div></div>';
+        document.body.appendChild(modal);
+        modal.querySelector('#sfm-fit-toggle').addEventListener('click', () => {
+            _sfmFitMode = !_sfmFitMode;
+            _sfmApply();
+        });
+        modal.addEventListener('shown.bs.modal', _sfmApply);
+        window.addEventListener('resize', () => {
+            if (_sfmFitMode && modal.classList.contains('show')) _sfmApply();
+        });
+    } else {
+        modal.querySelector('.modal-title').innerHTML =
+            `<i class="bi bi-diagram-2 me-1"></i>${title}`;
+        modal.querySelector('.sip-flow-pop').innerHTML = ladderHtml;
+    }
+    _sfmFitMode = true;
+    bootstrap.Modal.getOrCreateInstance(modal).show();
 }
 
 // 卡片头部的「谁打给谁」摘要：主叫 → （FS）→ 被叫，身份与阶梯图列头一致。
