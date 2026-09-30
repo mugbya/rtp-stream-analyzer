@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}RTP Analyzer - 会话已过期{% endblock %}
+
+{% block content %}
+<div class="page-results">
+    <div class="text-center py-5">
+        <div class="display-3 text-muted mb-3"><i class="bi bi-hourglass-split"></i></div>
+        <h2>会话已过期</h2>
+        <p class="text-muted mt-3 mb-1" style="max-width: 34rem; margin-left: auto; margin-right: auto;">
+            这份分析会话已不存在：分析会话保存在服务器内存里，服务重启（如版本更新部署）
+            或长时间未访问后会自动清空，之前的抓包与分析结果不再保留。
+        </p>
+        <p class="text-muted small mb-4">如需查看结果，请回到首页重新上传抓包文件分析。</p>
+        <a href="/" class="btn btn-primary btn-lg">
+            <i class="bi bi-house-door"></i> 回到首页重新上传
+        </a>
+    </div>
+</div>
+{% endblock %}

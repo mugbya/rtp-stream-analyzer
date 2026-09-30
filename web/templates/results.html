@@ -65,8 +65,21 @@ const SESSION_ID = '{{ session_id }}';
 
 document.addEventListener('DOMContentLoaded', () => {
     fetch(`/api/session/${SESSION_ID}`)
-        .then(r => r.json())
-        .then(data => {
+        .then(r => r.json().then(data => ({ok: r.ok, status: r.status, data})))
+        .then(({ok, status, data}) => {
+            if (!ok && data.error === 'session_expired') {
+                // 会话在页面打开期间失效（服务重启/过期）：友好提示而不是
+                // 裸报错，引导回首页重新上传
+                document.getElementById('result-loading').innerHTML =
+                    '<div class="py-5">' +
+                    '<div class="display-4 text-muted mb-3"><i class="bi bi-hourglass-split"></i></div>' +
+                    '<h4>会话已过期</h4>' +
+                    '<p class="text-muted mt-2">这份分析会话已不存在（服务重启或长时间未访问会清空会话）。' +
+                    '如需查看结果，请回到首页重新上传抓包文件分析。</p>' +
+                    '<a href="/" class="btn btn-primary mt-2"><i class="bi bi-house-door"></i> 回到首页重新上传</a>' +
+                    '</div>';
+                return;
+            }
             if (data.results) {
                 showResults(data.results);
                 // 追加分析提示：会话里还有本次没分析的媒体类型时展示切换按钮
@@ -94,12 +107,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else {
                 document.getElementById('result-loading').innerHTML =
-                    '<p class="text-warning">No results found for this session.</p>';
+                    '<p class="text-warning">未找到本次分析的结果，请回到首页重新上传分析。</p>';
             }
         })
         .catch(err => {
             document.getElementById('result-loading').innerHTML =
-                '<p class="text-danger">Failed to load results: ' + err.message + '</p>';
+                '<p class="text-danger">加载结果失败：' + _esc(err.message) +
+                '，请刷新重试或<a href="/">回到首页</a>。</p>';
         });
 });
 

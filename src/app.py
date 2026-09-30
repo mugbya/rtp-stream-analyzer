@@ -417,7 +417,8 @@ def run_analysis():
     check_quality = bool(checks.get('quality', True))
 
     if session_id not in sessions:
-        return jsonify({'error': 'Session not found'}), 404
+        return jsonify({'error': 'session_expired',
+                        'message': '分析会话已过期或不存在（服务重启/长时间未访问会清空会话），请重新上传抓包文件'}), 404
 
     session = sessions[session_id]
     session_dir = session['session_dir']
@@ -748,8 +749,9 @@ def run_analysis():
 def get_session(session_id):
     """获取会话信息。"""
     if session_id not in sessions:
-        return jsonify({'error': 'Session not found'}), 404
-    
+        return jsonify({'error': 'session_expired',
+                        'message': '分析会话已过期或不存在（服务重启/长时间未访问会清空会话），请重新上传抓包文件'}), 404
+
     session = sessions[session_id]
     
     # results 中可能包含不可 JSON 序列化的字段（packets 字典等），只返回可序列化的部分
@@ -842,7 +844,9 @@ def serve_media(filepath):
 def results_page(session_id):
     """结果展示页。"""
     if session_id not in sessions:
-        return "Session not found", 404
+        # 会话只存内存，重启/过期即失效：给用户一个可理解的过期页而不是
+        # 裸的 "Session not found"，引导回首页重新上传
+        return render_template('session_expired.html'), 404
     return _track_page(
         make_response(render_template('results.html', session_id=session_id)),
         '/results')
