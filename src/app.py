@@ -177,56 +177,149 @@ def index():
 
 @app.route('/api/upload', methods=['POST'])
 def upload_files():
-    """上传抓包文件并自动识别端点角色。"""
+    """上传抓包文件并自动识别端点角色（小文件整包上传）。"""
     session_id = str(uuid.uuid4())
     session_dir = os.path.join(app.config['UPLOAD_FOLDER'], session_id)
     os.makedirs(session_dir, exist_ok=True)
-    
-    files_info = []
-    all_ips = set()
-    all_streams = {}
-    rtp_captures = {}  # role -> rtp_data（不含载荷，供通话检测使用）
 
+    # 展示名保留用户上传的原始文件名（含中文）；secure_filename 会把
+    # 非 ASCII 字符全部删掉（"坐席端.pcap" → "pcap"），不能用于展示。
+    # 磁盘存储名用 uuid 生成、仅保留原扩展名，规避路径穿越/同名互覆/
+    # 超长文件名问题；抓包解析按文件内容嗅探，不依赖文件名
+    saved = []
     for key in request.files:
         file = request.files[key]
         if file.filename:
-            # 展示名保留用户上传的原始文件名（含中文）；secure_filename 会把
-            # 非 ASCII 字符全部删掉（"坐席端.pcap" → "pcap"），不能用于展示
-            filename = file.filename
-            # 磁盘存储名用 uuid 生成、仅保留原扩展名，规避路径穿越/同名互覆/
-            # 超长文件名问题；抓包解析按文件内容嗅探，不依赖文件名
-            ext = os.path.splitext(filename)[1].lower()
+            ext = os.path.splitext(file.filename)[1].lower()
             ext = ext if re.fullmatch(r'\.[A-Za-z0-9]{1,10}', ext) else ''
             stored_name = uuid.uuid4().hex + ext
             filepath = os.path.join(session_dir, stored_name)
             file.save(filepath)
+            saved.append((key, file.filename, filepath))
 
-            # 解析 RTP；无法解析的文件直接报错（其余文件不受影响）
-            try:
-                rtp_data = extract_rtp_packets(filepath)
-            except Exception:
-                return jsonify({'error': f'文件 {filename} 无法解析为抓包文件'
-                                         '（格式不支持或已损坏）'}), 400
-            rtp_captures[key] = rtp_data
+    return _process_uploaded_files(session_id, session_dir, saved)
 
-            # 收集流信息
-            for ssrc, info in rtp_data['streams'].items():
-                all_streams[ssrc] = info
 
-            all_ips.update(rtp_data['ips'])
+def _valid_session_id(session_id):
+    """分片上传的会话 id 由前端生成，只接受 uuid 形态，防路径穿越。"""
+    return bool(re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+        session_id or ''))
 
-            files_info.append({
-                'role': key,
-                'filename': filename,
-                'stored': stored_name,
-                'total_packets': rtp_data['total_count'],
-                'ips': sorted([ip for ip in rtp_data['ips']
-                              if not ip.startswith('224.') and not ip.startswith('239.')
-                              and ip not in ('0.0.0.0', '255.255.255.255')]),
-                'stream_count': len(rtp_data['streams']),
-                # 抓包完整性（截短/文件尾损坏）：只提示，不阻断分析
-                'integrity': rtp_data['integrity'],
-            })
+
+@app.route('/api/upload/chunk', methods=['POST'])
+def upload_chunk():
+    """接收一个上传分片（大文件分片上传）。
+
+    跨境单条 TCP 连接吞吐有限（实测 ~0.8MB/s），前端把大文件切成 2MB
+    分片、多路并发上传；分片按序号暂存在
+    UPLOAD_FOLDER/<session_id>/chunks/<field>/ 下，全部到齐后由
+    /api/upload/assemble 合并并走识别流程。中途放弃的分片目录由既有的
+    按保留时长清理巡检兜底删除。
+    """
+    session_id = request.form.get('session_id', '')
+    field = request.form.get('field', '')
+    try:
+        index = int(request.form.get('index', ''))
+    except ValueError:
+        return jsonify({'error': '分片参数无效'}), 400
+    if not _valid_session_id(session_id):
+        return jsonify({'error': 'session_id 无效'}), 400
+    if not re.fullmatch(r'[A-Za-z0-9_\-]{1,32}', field):
+        return jsonify({'error': 'field 无效'}), 400
+    if not 0 <= index <= 100000:
+        return jsonify({'error': '分片序号无效'}), 400
+    chunk = request.files.get('chunk')
+    if chunk is None:
+        return jsonify({'error': '缺少分片数据'}), 400
+
+    chunk_dir = os.path.join(app.config['UPLOAD_FOLDER'], session_id,
+                             'chunks', field)
+    os.makedirs(chunk_dir, exist_ok=True)
+    chunk.save(os.path.join(chunk_dir, str(index)))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/upload/assemble', methods=['POST'])
+def upload_assemble():
+    """合并分片并走识别流程（分片上传的收口，响应与 /api/upload 一致）。"""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id', '')
+    if not _valid_session_id(session_id):
+        return jsonify({'error': 'session_id 无效'}), 400
+
+    session_dir = os.path.join(app.config['UPLOAD_FOLDER'], session_id)
+    chunks_root = os.path.join(session_dir, 'chunks')
+    saved = []
+    for fm in data.get('files') or []:
+        field = fm.get('field', '')
+        filename = fm.get('filename', '')
+        try:
+            nchunks = int(fm.get('chunks', 0))
+        except (TypeError, ValueError):
+            return jsonify({'error': '分片数量无效'}), 400
+        if not filename or not 1 <= nchunks <= 100000:
+            return jsonify({'error': '分片信息无效'}), 400
+        if not re.fullmatch(r'[A-Za-z0-9_\-]{1,32}', field):
+            return jsonify({'error': 'field 无效'}), 400
+        field_dir = os.path.join(chunks_root, field)
+        chunk_paths = [os.path.join(field_dir, str(i)) for i in range(nchunks)]
+        missing = [p for p in chunk_paths if not os.path.isfile(p)]
+        if missing:
+            return jsonify({'error': f'文件 {filename} 还有 '
+                             f'{len(missing)} 个分片未上传完成'}), 400
+
+        ext = os.path.splitext(filename)[1].lower()
+        ext = ext if re.fullmatch(r'\.[A-Za-z0-9]{1,10}', ext) else ''
+        filepath = os.path.join(session_dir, uuid.uuid4().hex + ext)
+        with open(filepath, 'wb') as out:
+            for p in chunk_paths:
+                with open(p, 'rb') as src:
+                    shutil.copyfileobj(src, out, 1024 * 1024)
+        saved.append((field, filename, filepath))
+
+    # 全部合并完成后分片暂存目录整体清掉（含空目录本身）
+    shutil.rmtree(chunks_root, ignore_errors=True)
+
+    if not saved:
+        return jsonify({'error': '没有可合并的文件'}), 400
+    return _process_uploaded_files(session_id, session_dir, saved)
+
+
+def _process_uploaded_files(session_id, session_dir, saved):
+    """识别上传完成的抓包：解析 RTP、检测通话、分类流，存会话并返回响应。
+
+    saved: [(role, 原始文件名, 磁盘路径)]，整包上传与分片上传共用。
+    """
+    files_info = []
+    all_streams = {}
+    rtp_captures = {}  # role -> rtp_data（不含载荷，供通话检测使用）
+
+    for role, filename, filepath in saved:
+        # 解析 RTP；无法解析的文件直接报错（其余文件不受影响）
+        try:
+            rtp_data = extract_rtp_packets(filepath)
+        except Exception:
+            return jsonify({'error': f'文件 {filename} 无法解析为抓包文件'
+                                     '（格式不支持或已损坏）'}), 400
+        rtp_captures[role] = rtp_data
+
+        # 收集流信息
+        for ssrc, info in rtp_data['streams'].items():
+            all_streams[ssrc] = info
+
+        files_info.append({
+            'role': role,
+            'filename': filename,
+            'stored': os.path.basename(filepath),
+            'total_packets': rtp_data['total_count'],
+            'ips': sorted([ip for ip in rtp_data['ips']
+                          if not ip.startswith('224.') and not ip.startswith('239.')
+                          and ip not in ('0.0.0.0', '255.255.255.255')]),
+            'stream_count': len(rtp_data['streams']),
+            # 抓包完整性（截短/文件尾损坏）：只提示，不阻断分析
+            'integrity': rtp_data['integrity'],
+        })
 
     # 自动检测服务器 IP（单侧抓包打平时用 SIP INVITE 的 Via 数消歧）
     all_sip_events = [ev for rd in rtp_captures.values()

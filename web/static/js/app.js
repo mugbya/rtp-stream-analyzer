@@ -164,69 +164,164 @@ function _uploadProgress(pct, label) {
         `role="progressbar" style="width: ${pct}%"></div></div></div>`;
 }
 
+// ====== 上传 ======
+// 跨境链路单条 TCP 连接吞吐有限（实测 ~0.8MB/s，多路并发可线性叠加），
+// 大文件切成分片并发上传；小文件整包直传省去分片开销
+const CHUNK_SIZE = 2 * 1024 * 1024;          // 分片大小：2MB
+const UPLOAD_CONCURRENCY = 5;                // 并发分片数
+const CHUNKED_THRESHOLD = 8 * 1024 * 1024;   // 任一文件超过 8MB 走分片
+
+function _newSessionId() {
+    // https/localhost 下有原生实现；不支持的环境退化为随机拼接
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+}
+
+// 单个分片上传，失败自动重试（跨境链路偶发中断，重试比整包重来便宜得多）
+async function _uploadChunkWithRetry(sessionId, field, index, blob, retries) {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            const fd = new FormData();
+            fd.append('session_id', sessionId);
+            fd.append('field', field);
+            fd.append('index', index);
+            fd.append('chunk', blob);
+            const resp = await fetch('/api/upload/chunk', { method: 'POST', body: fd });
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                throw new Error(data.error || ('HTTP ' + resp.status));
+            }
+            return;
+        } catch (err) {
+            if (attempt >= retries) throw err;
+            await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+        }
+    }
+}
+
+// 工作池：把 tasks 按并发数轮流执行，每完成一个分片推进一次进度
+async function _runUploadPool(tasks, concurrency, uploadedBytes, totalBytes, status) {
+    let next = 0;
+    async function worker() {
+        while (next < tasks.length) {
+            const t = tasks[next++];
+            await t.run();
+            uploadedBytes.done += t.size;
+            const pct = Math.min(99, Math.round(uploadedBytes.done / totalBytes * 100));
+            status.innerHTML = _uploadProgress(pct, '正在上传（分片并发）');
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker));
+}
+
 function uploadFiles() {
     const btn = document.getElementById('btn-upload');
     const status = document.getElementById('upload-status');
 
-    const formData = new FormData();
-    const fileInputs = document.querySelectorAll('.file-input');
-    let hasFiles = false;
-
-    fileInputs.forEach(input => {
+    const entries = [];
+    let totalBytes = 0;
+    let maxFileBytes = 0;
+    document.querySelectorAll('.file-input').forEach(input => {
         if (input.files[0]) {
-            formData.append(input.dataset.role, input.files[0]);
-            hasFiles = true;
+            entries.push({ field: input.dataset.role, file: input.files[0] });
+            totalBytes += input.files[0].size;
+            maxFileBytes = Math.max(maxFileBytes, input.files[0].size);
         }
     });
 
-    if (!hasFiles) {
+    if (!entries.length) {
         status.innerHTML = '<span class="text-danger">请至少上传一个抓包文件</span>';
         return;
     }
     btn.disabled = true;
     status.innerHTML = _uploadProgress(0, '正在上传');
 
-    // XHR 才有上传进度事件：先按传输字节显示百分比，传输完成后请求仍会
-    // 挂着（服务端在解析抓包、识别通话），此时切换到"解析中"提示
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload');
-    xhr.responseType = 'json';
-    xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && e.total > 0) {
-            const pct = Math.min(100, Math.round(e.loaded / e.total * 100));
-            status.innerHTML = _uploadProgress(pct, '正在上传');
-        }
-    };
-    xhr.upload.onload = () => {
-        status.innerHTML =
-            '<span class="text-primary"><div class="spinner-border spinner-border-sm me-2"></div>' +
-            '上传完成，正在解析抓包与识别通话…（大文件需要一些时间）</span>';
-    };
-    xhr.onload = () => {
-        const data = xhr.response;
-        if (!data || data.error) {
-            status.innerHTML = `<span class="text-danger">${(data && data.error) || ('上传失败 (HTTP ' + xhr.status + ')')}</span>`;
-            btn.disabled = false;
-            return;
-        }
-
+    const useChunked = maxFileBytes > CHUNKED_THRESHOLD;
+    const doUpload = useChunked ? _uploadChunked(entries, totalBytes, status)
+                                : _uploadWhole(entries, totalBytes, status);
+    doUpload.then(data => {
         sessionId = data.session_id;
         detectedCalls = data.calls || [];
         // 新上传 = 新会话：记录完整性警告并重置确认状态（重新弹窗）
         integrityWarning = data.integrity_warning || null;
         integrityConfirmed = false;
         status.innerHTML = '<span class="text-success">✓ 上传成功，已识别 ' + data.files.length + ' 个文件</span>';
-
-        // 显示识别结果
         showDetectionResults(data);
-        // 显示分析配置
         showConfigPanel(data);
-    };
-    xhr.onerror = () => {
-        status.innerHTML = '<span class="text-danger">上传失败：网络错误，请检查连接后重试</span>';
+    }).catch(err => {
+        status.innerHTML = `<span class="text-danger">上传失败: ${err.message}</span>`;
         btn.disabled = false;
-    };
-    xhr.send(formData);
+    });
+}
+
+// 小文件：整包直传（原路径，保留 XHR 进度）
+function _uploadWhole(entries, totalBytes, status) {
+    return new Promise((resolve, reject) => {
+        const formData = new FormData();
+        entries.forEach(e => formData.append(e.field, e.file));
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload');
+        xhr.responseType = 'json';
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable && e.total > 0) {
+                status.innerHTML = _uploadProgress(
+                    Math.min(99, Math.round(e.loaded / e.total * 100)), '正在上传');
+            }
+        };
+        xhr.upload.onload = () => {
+            status.innerHTML =
+                '<span class="text-primary"><div class="spinner-border spinner-border-sm me-2"></div>' +
+                '上传完成，正在解析抓包与识别通话…</span>';
+        };
+        xhr.onload = () => {
+            const data = xhr.response;
+            if (!data || data.error) {
+                reject(new Error((data && data.error) || ('HTTP ' + xhr.status)));
+                return;
+            }
+            resolve(data);
+        };
+        xhr.onerror = () => reject(new Error('网络错误，请检查连接后重试'));
+        xhr.send(formData);
+    });
+}
+
+// 大文件：分片并发上传，全部到齐后请求合并识别（识别在服务端，约 1 秒）
+async function _uploadChunked(entries, totalBytes, status) {
+    const sessionId = _newSessionId();
+    const uploadedBytes = { done: 0 };
+    const tasks = [];
+    const fileMetas = [];
+
+    entries.forEach(e => {
+        const nchunks = Math.max(1, Math.ceil(e.file.size / CHUNK_SIZE));
+        fileMetas.push({ field: e.field, filename: e.file.name, chunks: nchunks });
+        for (let i = 0; i < nchunks; i++) {
+            const blob = e.file.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, e.file.size));
+            tasks.push({ size: blob.size, run: () =>
+                _uploadChunkWithRetry(sessionId, e.field, i, blob, 3) });
+        }
+    });
+
+    await _runUploadPool(tasks, UPLOAD_CONCURRENCY, uploadedBytes, totalBytes, status);
+    status.innerHTML =
+        '<span class="text-primary"><div class="spinner-border spinner-border-sm me-2"></div>' +
+        '上传完成，正在合并分片并识别通话…</span>';
+
+    const resp = await fetch('/api/upload/assemble', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, files: fileMetas }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.error) {
+        throw new Error(data.error || ('HTTP ' + resp.status));
+    }
+    return data;
 }
 
 // ====== 识别结果展示 ======
