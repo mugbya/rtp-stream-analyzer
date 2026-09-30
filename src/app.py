@@ -760,6 +760,8 @@ def get_session(session_id):
             'direction': results.get('direction'),
             'media_type': results.get('media_type'),
             'call_id': results.get('call_id'),
+            # 选中通话的真实 SIP Call-ID：标题据此显示，缺了会被误标成（无信令）
+            'sip_call_ids': results.get('sip_call_ids'),
             'report': results.get('report'),
             'summary': _build_summary(results),
             'media_manifest': results.get('media_manifest'),
