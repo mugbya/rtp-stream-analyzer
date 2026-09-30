@@ -11,9 +11,11 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     {% block extra_head %}{% endblock %}
     <script>
-        // 当前界面语言(g.lang,按域名判定,?lang= 预览时为显式值)。
-        // 英文预览(?lang=en)只作用于页面请求,fetch 的接口请求不带语言,
-        // 服务器会按域名回中文,这里把语言注入 JS 供接口调用续传。
+        // 当前界面语言(g.lang:域名默认 > 语言 cookie > ?lang= 显式参数)。
+        // 语言 cookie 由 ?lang= 的响应种下(导航栏切换开关走的就是它)，
+        // 之后不带参数的页面/接口请求都沿用所选语言。
+        // apiLang 给 fetch 追加 ?lang=en:首访未种 cookie 时接口请求也能
+        // 与当前页面语言保持一致，英文模式下自动续传。
         window.APP_LANG = '{{ lang }}';
         window.apiLang = function (u) {
             return window.APP_LANG === 'en'
@@ -29,9 +31,20 @@
                 <i class="bi bi-soundwave"></i>
                 <span>RTP Stream Analyzer</span>
             </a>
-            <span class="navbar-text d-none d-md-inline-block">
-                音视频流延迟 & 抖动分析平台
-            </span>
+            <div class="nav-right">
+                <span class="navbar-text d-none d-md-inline-block">
+                    音视频流延迟 & 抖动分析平台
+                </span>
+                {% if not request.path.startswith('/admin') %}
+                {# 语言切换：点击带 ?lang= 重新加载当前页，服务端生效并种 cookie 记住；
+                   管理页固定中文，不放开关 #}
+                <a class="lang-toggle" id="langToggle" href="/"
+                   title="{{ '切换到中文' if lang == 'en' else 'Switch to English' }}">
+                    <i class="bi bi-translate"></i>
+                    {{ '中文' if lang == 'en' else 'English' }}
+                </a>
+                {% endif %}
+            </div>
         </div>
     </nav>
 
@@ -115,6 +128,17 @@
             document.addEventListener('keydown', function (e) {
                 if (e.key === 'Escape' && !modal.hidden) closeModal();
             });
+        })();
+    </script>
+
+    <script>
+        // 语言切换链接：当前地址换 lang 参数(保留路径与其它查询参数)
+        (function () {
+            var t = document.getElementById('langToggle');
+            if (!t || !window.APP_LANG) return;
+            var u = new URL(location.href);
+            u.searchParams.set('lang', window.APP_LANG === 'en' ? 'zh' : 'en');
+            t.href = u.href;
         })();
     </script>
 

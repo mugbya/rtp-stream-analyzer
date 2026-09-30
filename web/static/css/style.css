@@ -67,6 +67,31 @@ body {
     justify-content: space-between;
     gap: 1rem;
 }
+/* 导航栏右侧：副标题 + 语言切换开关成组靠右 */
+.nav-right {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+}
+.lang-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    color: #e2e8f0;
+    background: rgba(255, 255, 255, .08);
+    border: 1px solid rgba(255, 255, 255, .16);
+    border-radius: 999px;
+    padding: .32rem .85rem;
+    font-size: .82rem;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background .15s ease;
+}
+.lang-toggle:hover,
+.lang-toggle:focus {
+    color: #fff;
+    background: rgba(255, 255, 255, .16);
+}
 .navbar-brand {
     display: flex;
     align-items: center;

@@ -21,9 +21,11 @@ Nginx (80→443, 多域名共用证书) ──► 127.0.0.1:5050
 
 > 按你的选择，CI 不跑测试：部署后的健康检查（服务起得来、首页能访问）是唯一自动门禁。推送前想验证代码，本地跑一遍测试：`for f in tests/test_*.py; do python3 "$f"; done`
 
-## 多语言：一套部署按域名切语言
+## 多语言：域名定默认语言，页面可切换
 
-三个域名共用同一个服务，界面语言按访问域名自动切换，映射关系在 `config.py` 的 `DOMAIN_LANGUAGES`（rtp-analyzer.com → 英文，rtp-analyzer.cn / .site → 中文）。实现是"中文字典整体替换"（`src/i18n.py`）：英文站把 HTML 渲染结果、`/api/*` JSON 文案、`app.js` 源码里的中文按字典换成英文，字典没有的中文原样兜底——**新增文案后若要英文站同步显示，需在 `src/i18n_entries_*.py` 补对应条目**。管理统计页 `/admin/stats` 不翻译。本地/预览可在 URL 后加 `?lang=en`（或 `?lang=zh`）强制语言，仅当次请求生效，不做记忆。
+三个域名共用同一个服务。域名决定**默认**语言（`config.py` 的 `DOMAIN_LANGUAGES`：rtp-analyzer.com → 英文，rtp-analyzer.cn / .site → 中文），导航栏右侧有语言切换开关，用户可随时切到另一种语言——切换通过 `?lang=zh/en` 跳转实现，服务端生效并种一年期 cookie（`site_lang`）记住，之后不带参数的页面与接口请求都沿用所选语言。
+
+实现是"中文字典整体替换"（`src/i18n.py`）：英文界面把 HTML 渲染结果、`/api/*` JSON 文案、`app.js` 源码里的中文按字典换成英文，字典没有的中文原样兜底——**新增文案后若要英文界面同步显示，需在 `src/i18n_entries_*.py` 补对应条目**。管理统计页 `/admin/stats` 不翻译、不放开关。本地开发可在 URL 后加 `?lang=en`（或 `?lang=zh`）预览另一种语言。
 
 ## 前置条件（都已满足/仅核对）
 

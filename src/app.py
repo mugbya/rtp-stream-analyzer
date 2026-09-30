@@ -210,21 +210,40 @@ def _no_cache_html(response):
 
 
 # ---------------------------------------------------------------------------
-# 多语言：按访问域名切语言（config.DOMAIN_LANGUAGES），一套代码一套部署。
-# 英文站不在输出层做模板分支，而是把中文按字典替换成英文（src/i18n.py）：
-# HTML 渲染结果整体替换、/api JSON 字符串值深度替换、app.js 翻译源码后下发。
-# 字典没有的中文保持原样兜底，/admin 管理页不翻译。
-# ?lang=zh/en 仅对当次请求生效（本地预览用），不做记忆，语言始终以域名为准。
+# 多语言：域名定默认语言（config.DOMAIN_LANGUAGES），页面上有语言切换开关，
+# 一套代码一套部署。英文站不在输出层做模板分支，而是把中文按字典替换成英文
+# （src/i18n.py）：HTML 渲染结果整体替换、/api JSON 字符串值深度替换、
+# app.js 翻译源码后下发。字典没有的中文保持原样兜底，/admin 管理页不翻译。
+# 优先级：?lang= 显式参数（切换开关即用它跳转，生效并写 cookie 记住一年）
+# > 语言 cookie > 域名默认值。
 # ---------------------------------------------------------------------------
+
+# 语言选择 cookie：切换开关写入，之后所有请求（含 fetch 接口）都据此定语言
+LANG_COOKIE = 'site_lang'
 
 
 @app.before_request
 def _i18n_detect_language():
     lang = request.args.get('lang')
+    if lang in ('zh', 'en'):
+        g.lang = lang
+        g.lang_from_param = True  # 显式选择，响应里种 cookie 记住
+        return
+    lang = request.cookies.get(LANG_COOKIE)
     if lang not in ('zh', 'en'):
         host = (request.host or '').split(':')[0].lower()
         lang = config.DOMAIN_LANGUAGES.get(host, config.DEFAULT_LANGUAGE)
     g.lang = lang
+
+
+@app.after_request
+def _i18n_remember_language(response):
+    """?lang= 显式切换时种一年期 cookie：之后不带参数的页面/接口请求
+    都沿用该语言（域名只决定没选过时的默认值）。/admin 不翻译也不记忆。"""
+    if g.get('lang_from_param') and not request.path.startswith('/admin'):
+        response.set_cookie(LANG_COOKIE, g.lang, max_age=365 * 86400,
+                            samesite='Lax')
+    return response
 
 
 @app.after_request
