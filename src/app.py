@@ -60,6 +60,33 @@ app.config['MAX_CONTENT_LENGTH'] = config.MAX_CONTENT_LENGTH
 app.config['FILE_RETENTION_HOURS'] = config.FILE_RETENTION_HOURS
 app.config['FILE_CLEANUP_INTERVAL_MINUTES'] = config.FILE_CLEANUP_INTERVAL_MINUTES
 
+# 静态资源 URL 自动带 ?v=<文件mtime> 做缓存版本号：文件一更新 URL 就变，
+# 浏览器会拉取新文件，用户不必手动强刷。配合下面一年的 max-age，未变的文件
+# 仍然走浏览器缓存不重复下载。
+@app.url_defaults
+def _add_static_version(endpoint, values):
+    if endpoint != 'static':
+        return
+    filename = values.get('filename')
+    if not filename:
+        return
+    try:
+        values['v'] = int(os.stat(os.path.join(app.static_folder, filename)).st_mtime)
+    except OSError:
+        pass
+
+# 静态资源 URL 已带版本号，可以放心长缓存；HTML 是动态页面，禁止缓存，
+# 否则缓存的旧 HTML 还会引用旧版本号的静态资源。
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 31536000
+
+
+@app.after_request
+def _no_cache_html(response):
+    if response.mimetype == 'text/html':
+        response.headers['Cache-Control'] = 'no-cache'
+    return response
+
+
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
 
