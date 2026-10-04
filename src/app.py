@@ -494,6 +494,28 @@ def _process_uploaded_files(session_id, session_dir, saved):
         'integrity_warning': integrity_warning,
     }
 
+    # 使用统计：口径 = 一次上传识别（一个包可能含多通通话，逐通详析在详情
+    # 页内进行，不重复计数）。媒体类型按识别出的流推断；无访客 cookie 时
+    # 退化为按 IP 去重。
+    try:
+        n_audio = len(classified.get('audio', {}))
+        n_video = len(classified.get('video', {}))
+        media_type = ('all' if n_audio and n_video
+                      else 'video' if n_video else 'audio')
+        stats_mod.record_analysis(
+            request.cookies.get(stats_mod.visitor_cookie_name())
+            or 'ip:' + stats_mod.client_ip(request),
+            stats_mod.client_ip(request), session_id, media_type,
+            # 包内全部通话的真实 SIP Call-ID（多通逗号连接）；内部编号
+            # 不再入库，检出通话数落 call_count 列
+            None,
+            ', '.join(sorted({cid for c in calls
+                              for cid in (c.get('sip_call_ids') or [])})),
+            len(calls),
+            stats_mod.request_domain(request))
+    except Exception:
+        pass
+
     return jsonify({
         'session_id': session_id,
         'files': files_info,
@@ -803,25 +825,9 @@ def run_analysis():
     # === 生成报告 ===
     report = generate_report(results)
     results['report'] = report
-    
+
     # 保存结果到会话
     session['results'] = results
-
-    # 使用统计：一次成功完成的分析（地域/访客信息尽力获取）；
-    # 无访客 cookie 时退化为按 IP 去重
-    try:
-        stats_mod.record_analysis(
-            request.cookies.get(stats_mod.visitor_cookie_name())
-            or 'ip:' + stats_mod.client_ip(request),
-            stats_mod.client_ip(request), session_id, media_type,
-            selected_call['call_id'] if selected_call else None,
-            # 真实 SIP Call-ID（B2BUA 一通电话每条腿一个），管理页展示用；
-            # 内部编号对不上 Wireshark，展示和检索都以它为准
-            (', '.join(sorted(selected_call.get('sip_call_ids') or []))
-             if selected_call else ''),
-            stats_mod.request_domain(request))
-    except Exception:
-        pass
 
     return jsonify({
         'success': True,

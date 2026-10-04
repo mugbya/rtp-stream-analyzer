@@ -187,7 +187,16 @@
                             <td class="text-nowrap">{{ a.time }}</td>
                             <td class="text-nowrap">{{ a.region }}</td>
                             <td>{{ {'audio': '音频', 'video': '视频', 'all': '音视频'}.get(a.media_type, a.media_type or '—') }}</td>
-                            <td class="text-muted text-truncate" style="max-width: 10rem;">{{ a.sip_call_id or a.call_id or '—' }}</td>
+                            <!-- 通话列：优先真实 SIP Call-ID（多通逗号连接，悬浮看全）；
+                                 无 Call-ID 但检出通话 = 抓包没解析到信令（纯 RTP/加密 SIP），
+                                 明示原因避免误读；历史行没有 call_count，用 call_id 兜底 -->
+                            {% if a.sip_call_id %}
+                            <td class="text-muted text-truncate" style="max-width: 10rem;" title="{{ a.sip_call_id }}">{{ a.sip_call_id }}</td>
+                            {% elif a.call_count or a.call_id %}
+                            <td class="text-muted" title="抓包中未解析到 SIP 信令，无法取得真实 Call-ID（检出 {{ a.call_count or 1 }} 通通话）">未捕获信令</td>
+                            {% else %}
+                            <td class="text-muted">—</td>
+                            {% endif %}
                         </tr>
                         {% else %}
                         <tr><td colspan="4" class="text-center text-muted py-4">暂无数据</td></tr>

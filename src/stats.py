@@ -3,7 +3,8 @@
 
 记录两类事件：
 - 访问（页面打开）：谁（cookie 去重）在什么时间、从哪个省市、看了哪个页面
-- 分析（执行分析）：一次成功完成的分析，附带媒体类型/通话
+- 分析（上传识别）：一次上传 + 初步识别算一次（一个包可能含多通通话，
+  逐通详析在详情页内进行，不再单独计数），附带媒体类型/检出的通话数
 
 给 /admin/stats 管理页提供汇总查询。全部尽力而为：统计出错不能影响主业务，
 所有对外函数内部兜底吞异常。
@@ -154,6 +155,7 @@ def _init_db():
                 media_type TEXT DEFAULT '',
                 call_id TEXT DEFAULT '',
                 sip_call_id TEXT DEFAULT '',
+                call_count INTEGER DEFAULT 0,
                 domain TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_analyses_day ON analyses(day);
@@ -175,6 +177,10 @@ def _migrate():
                 conn.execute(
                     f'ALTER TABLE {table} ADD COLUMN sip_call_id '
                     f'TEXT DEFAULT ""')
+            if table == 'analyses' and 'call_count' not in cols:
+                conn.execute(
+                    f'ALTER TABLE {table} ADD COLUMN call_count '
+                    f'INTEGER DEFAULT 0')
 
 
 _init_db()
@@ -201,19 +207,24 @@ def record_visit(vid, ip, path, domain=''):
 
 
 def record_analysis(vid, ip, session_id, media_type, call_id,
-                    sip_call_id='', domain=''):
+                    sip_call_id='', call_count=0, domain=''):
+    """记录一次分析（口径 = 一次上传识别）。
+
+    call_count: 该包检出的通话数；sip_call_id: 包内全部通话的真实
+    SIP Call-ID（多通逗号连接）。多通时 call_id 列不再存内部编号。"""
     try:
         country, province, city = lookup_region(ip)
         now = time.time()
         with _connect() as conn:
             conn.execute(
                 'INSERT INTO analyses (ts, day, vid, ip, country, province, '
-                'city, session_id, media_type, call_id, sip_call_id, domain) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'city, session_id, media_type, call_id, sip_call_id, '
+                'call_count, domain) VALUES '
+                '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (int(now), time.strftime('%Y-%m-%d', time.localtime(now)),
                  vid, ip, country, province, city, session_id or '',
                  media_type or '', str(call_id or ''), str(sip_call_id or ''),
-                 domain or ''))
+                 int(call_count or 0), domain or ''))
     except Exception:
         pass
 
