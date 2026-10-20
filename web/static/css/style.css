@@ -1108,3 +1108,29 @@ footer {
     white-space: nowrap;
     vertical-align: 1px;
 }
+.github-release {
+    margin-top: .75rem;
+    margin-bottom: 0;
+}
+.github-release a {
+    display: inline-flex;
+    align-items: center;
+    gap: .55rem;
+    color: #fff;
+    background: linear-gradient(135deg, #24292f, #3d4450);
+    border-radius: 999px;
+    padding: .65rem 1.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    text-decoration: none;
+    box-shadow: 0 10px 24px -10px rgba(15, 23, 42, .55);
+    transition: transform .15s ease, box-shadow .15s ease;
+}
+.github-release a i {
+    font-size: 1.15rem;
+}
+.github-release a:hover {
+    color: #fff;
+    transform: translateY(-1px);
+    box-shadow: 0 14px 28px -10px rgba(15, 23, 42, .6);
+}

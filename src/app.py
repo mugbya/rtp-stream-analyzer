@@ -1148,6 +1148,37 @@ def _cos_download_items():
     return items
 
 
+# GitHub Releases 最新版本号查询缓存：未认证 API 限流严（60 次/小时/IP），
+# 缓存 10 分钟；查询失败记 None，页面只少显示版本号、入口链接仍在
+_github_cache = {'ts': 0.0, 'tag': None}
+
+
+def _github_release():
+    """GitHub Releases 备用渠道信息，未配置 GITHUB_REPO_URL 时返回 None。
+
+    返回 {'tag': 最新版本号或 None, 'url': releases 页面地址}。
+    """
+    repo = (config.GITHUB_REPO_URL or '').rstrip('/')
+    if repo.endswith('.git'):
+        repo = repo[:-len('.git')]
+    if not repo:
+        return None
+    now = time.time()
+    if now - _github_cache['ts'] < config.GITHUB_RELEASE_CACHE_SECONDS:
+        return {'tag': _github_cache['tag'], 'url': repo + '/releases'}
+    tag = None
+    try:
+        data = json.loads(_cos_http_get(
+            'https://api.github.com/repos/'
+            + repo.split('github.com/', 1)[-1] + '/releases/latest'))
+        tag = data.get('tag_name') or None
+    except Exception:
+        pass
+    _github_cache['ts'] = now
+    _github_cache['tag'] = tag
+    return {'tag': tag, 'url': repo + '/releases'}
+
+
 def _list_download_groups():
     """合并本地目录与 COS 下载源的安装包清单，按平台分组（组内时间倒序）。
 
@@ -1181,7 +1212,8 @@ def _list_download_groups():
 def download_page():
     """桌面版程序下载页。"""
     resp = make_response(render_template(
-        'download.html', groups=_list_download_groups()))
+        'download.html', groups=_list_download_groups(),
+        github=_github_release()))
     return _track_page(resp, '/download')
 
 

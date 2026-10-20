@@ -78,6 +78,8 @@ ENTRIES = [
     ('Intel 芯片', 'Intel chip'),
     ('64 位（Intel/AMD）', '64-bit (Intel/AMD)'),
     ('ARM 版', 'ARM build'),
+    ('也可从 GitHub Releases 下载', 'Also available on GitHub Releases'),
+    ('（最新版本 {}）', '(latest: {})'),
 ]
 
 # 全角标点:英文输出统一为半角(中文语境下这些标点只出现在中文文案里)

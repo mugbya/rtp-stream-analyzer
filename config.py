@@ -80,6 +80,13 @@ COS_DOWNLOAD_BASE = os.environ.get('COS_DOWNLOAD_BASE', '')
 # COS 列举结果缓存秒数：避免每次打开下载页都请求 COS
 COS_LIST_CACHE_SECONDS = 60
 
+# GitHub Releases 备用下载渠道（可选）。填仓库地址即可，下载页顶部会出现
+# "也可从 GitHub Releases 下载"入口并展示最新版本号；国内访问 GitHub 不稳，
+# 页面清单仍以 COS/本地目录为主，这里只是第二渠道
+GITHUB_REPO_URL = os.environ.get('GITHUB_REPO_URL', '')
+# 最新版本号查询结果缓存秒数（GitHub 未认证 API 限流 60 次/小时/IP）
+GITHUB_RELEASE_CACHE_SECONDS = 600
+
 # ---------------------------------------------------------------------------
 # 上传限制
 # ---------------------------------------------------------------------------

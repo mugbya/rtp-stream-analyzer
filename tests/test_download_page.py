@@ -17,6 +17,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_mod, 'DB_PATH', str(tmp_path / 'stats.db'))
     # COS 下载源默认关闭，并清掉模块级列举缓存（避免用例间串味）
     monkeypatch.setattr(config, 'COS_DOWNLOAD_BASE', '')
+    monkeypatch.setattr(config, 'GITHUB_REPO_URL', '')
     import app as app_mod
     app_mod._cos_list_cache['ts'] = 0.0
     app_mod._cos_list_cache['good'] = []
@@ -180,3 +181,46 @@ def test_only_latest_version_per_platform_arch(client):
     # macOS 不同芯片各自保留最新版
     assert 'RTPAnalyzer-2.0.0-arm64.dmg' in html
     assert 'RTPAnalyzer-2.0.0-x64.dmg' in html
+
+
+# ---------------------------------------------------------------------------
+# GitHub Releases 备用下载渠道
+# ---------------------------------------------------------------------------
+
+def _reset_github_cache():
+    import app as app_mod
+    app_mod._github_cache['ts'] = 0.0
+    app_mod._github_cache['tag'] = None
+
+
+def test_github_release_link_with_version(client, monkeypatch):
+    c, _dl = client
+    monkeypatch.setattr(config, 'GITHUB_REPO_URL', 'https://github.com/mugbya/rtpshark')
+    import app as app_mod
+    monkeypatch.setattr(app_mod, '_cos_http_get', lambda url: b'{"tag_name": "v0.4.0"}')
+    _reset_github_cache()
+    html = c.get('/download').get_data(as_text=True)
+    assert 'https://github.com/mugbya/rtpshark/releases' in html
+    assert 'v0.4.0' in html
+    assert 'GitHub Releases' in html
+
+
+def test_github_release_link_without_version_on_api_failure(client, monkeypatch):
+    c, _dl = client
+    monkeypatch.setattr(config, 'GITHUB_REPO_URL', 'https://github.com/mugbya/rtpshark')
+    import app as app_mod
+
+    def _boom(url):
+        raise OSError('github unreachable')
+    monkeypatch.setattr(app_mod, '_cos_http_get', _boom)
+    _reset_github_cache()
+    html = c.get('/download').get_data(as_text=True)
+    assert 'GitHub Releases' in html       # API 挂了入口仍在
+    assert '最新版本' not in html           # 只是不显示版本号
+
+
+def test_github_release_hidden_when_not_configured(client):
+    c, _dl = client
+    _reset_github_cache()
+    html = c.get('/download').get_data(as_text=True)
+    assert 'GitHub Releases' not in html

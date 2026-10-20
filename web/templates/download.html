@@ -11,6 +11,14 @@
         <p class="hero-sub">
             选择对应操作系统的安装包下载
         </p>
+        {% if github %}
+        <p class="github-release">
+            <a href="{{ github.url }}" target="_blank" rel="noopener">
+                <i class="bi bi-github"></i>
+                也可从 GitHub Releases 下载{% if github.tag %}（最新版本 {{ github.tag }}）{% endif %}
+            </a>
+        </p>
+        {% endif %}
     </div>
 
     {% if groups %}
