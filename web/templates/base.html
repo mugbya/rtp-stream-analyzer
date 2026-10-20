@@ -36,6 +36,10 @@
                     音视频流延迟 & 抖动分析平台
                 </span>
                 {% if not request.path.startswith('/admin') %}
+                <a class="lang-toggle" href="/download" title="下载桌面版程序">
+                    <i class="bi bi-download"></i>
+                    桌面版
+                </a>
                 {# 语言切换：点击带 ?lang= 重新加载当前页，服务端生效并种 cookie 记住；
                    管理页固定中文，不放开关 #}
                 <a class="lang-toggle" id="langToggle" href="/"

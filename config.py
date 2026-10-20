@@ -8,6 +8,35 @@ import os
 # 仓库根目录（config.py 所在目录），运行时目录均以它为基准
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def _load_dotenv(path):
+    """把 .env 里的 KEY=VALUE 灌进环境变量（真实环境变量优先，不覆盖）。
+
+    不引入 python-dotenv 依赖：只支持 KEY=VALUE 与 # 注释行，值两侧成对
+    的单/双引号会剥掉。.env 被 .gitignore 忽略，本机与生产各自的私密
+    配置（如 COS 桶地址）写在这个文件里，不必改动被 git 管理的文件。
+    """
+    try:
+        with open(path, encoding='utf-8') as fp:
+            lines = fp.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in '\'"':
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+# 必须在读任何环境变量之前加载（下面 HOST/PORT/COS_DOWNLOAD_BASE 等都吃它）
+_load_dotenv(os.path.join(BASE_DIR, '.env'))
+
 # ---------------------------------------------------------------------------
 # Web 服务
 # ---------------------------------------------------------------------------
@@ -38,6 +67,18 @@ RUNTIME_DIR = os.path.join(BASE_DIR, 'var')      # 易失运行时数据（自�
 # 上传的抓包与生成的媒体文件，按保留时长自动清理
 UPLOAD_FOLDER = os.path.join(RUNTIME_DIR, 'uploads')
 OUTPUT_FOLDER = os.path.join(RUNTIME_DIR, 'outputs')
+
+# 桌面版安装包下载目录：把安装包放进这里，/download 页面自动列出。
+# 位于 DATA_DIR，是持久数据，不会被自动清理线程删除
+DOWNLOADS_DIR = os.path.join(DATA_DIR, 'downloads')
+
+# 腾讯云 COS 下载源（可选）。配置后 /download 页会自动列出 COS 桶里的安装包，
+# 下载直连 COS/CDN 不占用本机带宽；往 COS 上传/替换文件，页面自动更新。
+# 取值形如 https://<bucket-appid>.cos.<region>.myqcloud.com
+# 要求桶允许匿名列举（公有读权限）；未配置或列举失败时只展示本地目录
+COS_DOWNLOAD_BASE = os.environ.get('COS_DOWNLOAD_BASE', '')
+# COS 列举结果缓存秒数：避免每次打开下载页都请求 COS
+COS_LIST_CACHE_SECONDS = 60
 
 # ---------------------------------------------------------------------------
 # 上传限制

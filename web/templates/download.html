@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}RTP Analyzer - Download{% endblock %}
+
+{% block content %}
+<div class="page-main download-page">
+    <div class="hero text-center mb-4">
+        <h1 class="hero-title">
+            <i class="bi bi-download"></i>
+            下载桌面版
+        </h1>
+        <p class="hero-sub">
+            选择对应操作系统的安装包下载
+        </p>
+    </div>
+
+    {% if groups %}
+        {% for g in groups %}
+        <div class="card mb-4 dl-group">
+            <div class="card-header dl-group-head">
+                <h5 class="mb-0"><i class="bi {{ g.icon }}"></i> {{ g.name }}</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="list-group list-group-flush">
+                    {% for f in g.files %}
+                    <a class="dl-item list-group-item list-group-item-action"
+                       href="{{ f.url }}">
+                        <span class="dl-icon"><i class="bi bi-file-earmark-arrow-down"></i></span>
+                        <span class="dl-meta">
+                            <span class="dl-name">{{ f.name }}
+                                {% if f.arch_label %}<span class="dl-arch">{{ f.arch_label }}</span>{% endif %}
+                            </span>
+                            <small class="text-muted">大小：{{ f.size }} · 更新于 {{ f.date }}</small>
+                        </span>
+                        <span class="btn btn-primary btn-sm"><i class="bi bi-download"></i> 下载</span>
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <div class="card">
+            <div class="card-body text-center py-5">
+                <i class="bi bi-inbox dl-empty-icon"></i>
+                <p class="mb-1 mt-2">暂无可供下载的安装包</p>
+                <small class="text-muted">安装包发布后会在这里提供下载，请稍后再来</small>
+            </div>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}

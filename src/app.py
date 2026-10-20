@@ -19,6 +19,9 @@ import uuid
 import shutil
 import threading
 import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import date
 from flask import (Flask, render_template, request, jsonify, send_file,
                    url_for, make_response, g)
@@ -102,6 +105,7 @@ def _no_cache_html(response):
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
+os.makedirs(config.DOWNLOADS_DIR, exist_ok=True)
 
 # 存储分析会话
 sessions = {}
@@ -962,6 +966,242 @@ def results_page(session_id):
     return _track_page(
         make_response(render_template('results.html', session_id=session_id)),
         '/results')
+
+
+# ---------------------------------------------------------------------------
+# 桌面版程序下载：安装包放在 data/downloads/（持久目录，不参与自动清理），
+# /download 页面按平台分组自动列出，增删安装包只需放/删文件，无需改代码。
+# ---------------------------------------------------------------------------
+
+# 扩展名 → 平台分组。元组按声明顺序匹配，.tar.gz 这类双扩展名必须排在
+# 更短的扩展名之前（本表没有 .gz/.ar 单扩展冲突项，仍保持长扩展在前）
+_DOWNLOAD_PLATFORM_BY_EXT = (
+    ('.exe', 'windows'),
+    ('.msi', 'windows'),
+    ('.dmg', 'macos'),
+    ('.pkg', 'macos'),
+    ('.appimage', 'linux'),
+    ('.deb', 'linux'),
+    ('.rpm', 'linux'),
+    ('.flatpak', 'linux'),
+    ('.tar.gz', 'linux'),
+    ('.tgz', 'linux'),
+)
+_DOWNLOAD_GROUP_ORDER = ('windows', 'macos', 'linux', 'other')
+_DOWNLOAD_GROUP_META = {
+    'windows': ('Windows', 'bi-windows'),
+    'macos': ('macOS', 'bi-apple'),
+    'linux': ('Linux', 'bi-terminal'),
+    'other': ('其他', 'bi-box-seam'),
+}
+# 不进下载清单的文件：元数据（version.json 等）与给自动更新器用的包
+# （macOS 的 *.app.tar.gz 是 updater 解包用的，不是用户手动安装的）
+_DOWNLOAD_EXCLUDE_EXTS = ('.json', '.xml', '.txt', '.app.tar.gz')
+
+
+def _human_size(n):
+    """字节数 → 人类可读大小（B/KB/MB/GB/TB）。"""
+    size = float(n)
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if size < 1024 or unit == 'TB':
+            return ('{:.0f} {}' if unit in ('B', 'TB')
+                    else '{:.1f} {}').format(size, unit)
+        size /= 1024.0
+    return '{} TB'.format(size)
+
+
+def _platform_of(name):
+    """按扩展名判平台分组（长扩展名在前，见 _DOWNLOAD_PLATFORM_BY_EXT）。"""
+    lower = name.lower()
+    for ext, p in _DOWNLOAD_PLATFORM_BY_EXT:
+        if lower.endswith(ext):
+            return p
+    return 'other'
+
+
+def _is_downloadable(name):
+    """该文件名是否应进下载清单（排除元数据与隐藏文件）。"""
+    lower = name.lower()
+    return (not name.startswith('.')
+            and not lower.endswith(_DOWNLOAD_EXCLUDE_EXTS))
+
+
+def _arch_of(name):
+    """从文件名推断芯片架构，作为「只保留最新版」的分组维度。
+
+    识别不到架构时返回空串，归入该平台的独立分组——文件名不带架构
+    的包（如 RTPAnalyzer.dmg）也能正确参与"只留最新"。
+    """
+    lower = name.lower()
+    if 'arm64' in lower or 'aarch64' in lower:
+        return 'arm64'
+    if ('x64' in lower or 'win64' in lower or 'x86_64' in lower
+            or 'x86-64' in lower or 'amd64' in lower or 'intel' in lower):
+        return 'x64'
+    return ''
+
+
+# 芯片架构在界面上的说明（防止用户下载错安装包）：
+# macOS 的 arm64 是 M 系列（Apple Silicon），x64 是 Intel
+_ARCH_LABELS = {
+    ('macos', 'arm64'): 'M 系列芯片（Apple Silicon）',
+    ('macos', 'x64'): 'Intel 芯片',
+    ('windows', 'x64'): '64 位（Intel/AMD）',
+    ('windows', 'arm64'): 'ARM 版',
+    ('linux', 'x64'): '64 位（Intel/AMD）',
+    ('linux', 'arm64'): 'ARM 版',
+}
+
+
+def _arch_label(platform, arch):
+    return _ARCH_LABELS.get((platform, arch), '')
+
+
+def _local_download_items():
+    """本地 downloads 目录里的安装包条目（url 走本站下载路由）。"""
+    try:
+        names = sorted(os.listdir(config.DOWNLOADS_DIR))
+    except OSError:
+        names = []
+    items = []
+    for name in names:
+        path = os.path.join(config.DOWNLOADS_DIR, name)
+        # 隐藏文件、子目录与元数据文件不进清单
+        if not os.path.isfile(path) or not _is_downloadable(name):
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        platform = _platform_of(name)
+        items.append({
+            'name': name,
+            'platform': platform,
+            'arch_label': _arch_label(platform, _arch_of(name)),
+            'size': _human_size(st.st_size),
+            'date': time.strftime('%Y-%m-%d', time.localtime(st.st_mtime)),
+            'sort_ts': st.st_mtime,
+            'url': url_for('download_file', filename=name),
+        })
+    return items
+
+
+# COS 列举结果缓存：短缓存避免每次打开下载页都请求 COS；
+# good 保存最近一次成功的结果，COS 抖动时回退用它，页面不至于瞬间清空
+_cos_list_cache = {'ts': 0.0, 'good': []}
+
+
+def _cos_http_get(url):
+    """GET 一个 URL 返回响应体（下载源列举专用，测试时可替换）。"""
+    req = urllib.request.Request(url, headers={'User-Agent': 'rtp-analyzer'})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.read()
+
+
+def _cos_download_items():
+    """匿名列举 COS 桶（config.COS_DOWNLOAD_BASE），返回安装包条目。
+
+    条目与本地条目同构，url 直连 COS/CDN，下载不占用本站带宽。
+    要求桶允许匿名列举（公有读权限）。列举失败（网络抖动/权限收紧）
+    时回退最近一次成功的结果，不更新缓存时间戳以便下次重试。
+    """
+    base = (config.COS_DOWNLOAD_BASE or '').rstrip('/')
+    if not base:
+        return []
+    now = time.time()
+    if now - _cos_list_cache['ts'] < config.COS_LIST_CACHE_SECONDS:
+        return _cos_list_cache['good']
+    items = []
+    try:
+        root = ET.fromstring(_cos_http_get(base + '/?max-keys=1000'))
+        ns = ''
+        if root.tag.startswith('{'):
+            ns = root.tag[:root.tag.index('}') + 1]
+        for content in root.iter(ns + 'Contents'):
+            key = content.findtext(ns + 'Key') or ''
+            base_name = key.rsplit('/', 1)[-1]
+            # 目录占位项、隐藏文件与元数据文件不进清单
+            if (not key or key.endswith('/')
+                    or not _is_downloadable(base_name)):
+                continue
+            modified = content.findtext(ns + 'LastModified') or ''
+            try:
+                sort_ts = time.mktime(
+                    time.strptime(modified[:19], '%Y-%m-%dT%H:%M:%S'))
+            except ValueError:
+                sort_ts = 0.0
+            platform = _platform_of(key)
+            items.append({
+                'name': base_name,
+                'platform': platform,
+                'arch_label': _arch_label(platform, _arch_of(key)),
+                'size': _human_size(int(content.findtext(ns + 'Size') or 0)),
+                'date': modified[:10],
+                'sort_ts': sort_ts,
+                # key 可能带中文/空格/子目录前缀，拼 URL 时逐段转义
+                'url': base + '/' + urllib.parse.quote(key),
+            })
+    except Exception:
+        return _cos_list_cache['good']
+    _cos_list_cache['ts'] = now
+    _cos_list_cache['good'] = items
+    return items
+
+
+def _list_download_groups():
+    """合并本地目录与 COS 下载源的安装包清单，按平台分组（组内时间倒序）。
+
+    同名文件本地优先（本地是明确手动放置的，且下载不经过外网）。
+    每个「平台 + 芯片架构」组合只保留最新的一个版本，历史版本不展示
+    （文件仍留在 COS/目录里，不上页面）。
+    """
+    by_name = {}
+    for it in _local_download_items() + _cos_download_items():
+        by_name.setdefault(it['name'], it)
+    latest = {}
+    for it in by_name.values():
+        key = (it['platform'], _arch_of(it['name']))
+        cur = latest.get(key)
+        if cur is None or (it['sort_ts'], it['name']) > (cur['sort_ts'],
+                                                         cur['name']):
+            latest[key] = it
+    items = sorted(latest.values(),
+                   key=lambda it: (-it['sort_ts'], it['name']))
+    groups = []
+    for key in _DOWNLOAD_GROUP_ORDER:
+        files = [it for it in items if it['platform'] == key]
+        if not files:
+            continue
+        name, icon = _DOWNLOAD_GROUP_META[key]
+        groups.append({'name': name, 'icon': icon, 'files': files})
+    return groups
+
+
+@app.route('/download')
+def download_page():
+    """桌面版程序下载页。"""
+    resp = make_response(render_template(
+        'download.html', groups=_list_download_groups()))
+    return _track_page(resp, '/download')
+
+
+@app.route('/download/<path:filename>')
+def download_file(filename):
+    """下载一个安装包（以附件形式下发，浏览器直接保存）。
+
+    安全：拒绝带路径分隔符/以点开头的文件名，realpath 校验必须落在
+    downloads 目录内，防目录穿越读到配置、数据库等敏感文件。
+    """
+    if (filename != os.path.basename(filename) or filename.startswith('.')
+            or filename != filename.strip()):
+        return 'Not Found', 404
+    root = os.path.realpath(config.DOWNLOADS_DIR)
+    full = os.path.realpath(os.path.join(root, filename))
+    if not full.startswith(root + os.sep):
+        return 'Forbidden', 403
+    if not os.path.isfile(full):
+        return 'Not Found', 404
+    return send_file(full, as_attachment=True, download_name=filename)
 
 
 @app.route('/admin/stats')

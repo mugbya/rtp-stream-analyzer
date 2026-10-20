@@ -15,3 +15,6 @@ samples/**/*.pcapng
 data/stats.db
 data/stats.db-*
 data/admin_key.txt
+
+# 桌面版安装包（体积大，只在部署机上放实际文件，/download 页自动列出）
+data/downloads/

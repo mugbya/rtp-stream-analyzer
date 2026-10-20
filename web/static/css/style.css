@@ -1043,3 +1043,68 @@ footer {
     font-family: var(--bs-font-monospace, monospace);
     color: #475569;
 }
+
+/* ====== 桌面版下载页 ====== */
+.download-page {
+    max-width: 980px;
+    margin-inline: auto;
+}
+.dl-group-head {
+    background: linear-gradient(115deg, #eef2ff, #f5f3ff);
+    border-bottom: 1px solid var(--line);
+}
+.dl-group-head h5 i {
+    color: var(--brand);
+    margin-right: .35rem;
+}
+.dl-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: .9rem 1.25rem;
+}
+.dl-item:hover {
+    background: #f6f8ff;
+}
+.dl-icon {
+    display: inline-grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #6366f1, #a855f7);
+    box-shadow: 0 6px 14px -6px rgba(129, 140, 248, .7);
+    color: #fff;
+    font-size: 1.15rem;
+    flex: 0 0 auto;
+}
+.dl-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+.dl-name {
+    font-weight: 600;
+    word-break: break-all;
+}
+.dl-item .btn {
+    flex: 0 0 auto;
+}
+.dl-empty-icon {
+    font-size: 2.6rem;
+    color: #cbd5e1;
+}
+.dl-arch {
+    display: inline-block;
+    font-size: .72rem;
+    font-weight: 600;
+    color: var(--brand);
+    background: #eef2ff;
+    border: 1px solid #e0e7ff;
+    border-radius: 999px;
+    padding: .1rem .55rem;
+    margin-left: .4rem;
+    white-space: nowrap;
+    vertical-align: 1px;
+}

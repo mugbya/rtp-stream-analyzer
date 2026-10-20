@@ -62,6 +62,22 @@ ENTRIES = [
     ('延迟方向', 'Delay direction'),
     ('自动根据上传的抓包文件识别可用方向', 'Available directions are detected from the uploaded captures'),
     ('开始分析', 'Start analysis'),
+
+    # --- base.html 导航入口 / download.html 下载页 ---
+    ('桌面版', 'Desktop App'),
+    ('下载桌面版程序', 'Download the desktop app'),
+    ('下载桌面版', 'Download the Desktop App'),
+    ('选择对应操作系统的安装包下载', 'Pick the installer for your operating system and download it'),
+    ('其他', 'Other'),
+    ('大小：{}', 'Size: {}'),
+    ('更新于 {}', 'Updated {}'),
+    ('下载', 'Download'),
+    ('暂无可供下载的安装包', 'No installers available yet'),
+    ('安装包发布后会在这里提供下载，请稍后再来', 'Installers will show up here once published — please check back later'),
+    ('M 系列芯片（Apple Silicon）', 'M-series chip (Apple Silicon)'),
+    ('Intel 芯片', 'Intel chip'),
+    ('64 位（Intel/AMD）', '64-bit (Intel/AMD)'),
+    ('ARM 版', 'ARM build'),
 ]
 
 # 全角标点:英文输出统一为半角(中文语境下这些标点只出现在中文文案里)
