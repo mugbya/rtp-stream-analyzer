@@ -29,7 +29,10 @@ jobs:
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       # 同步代码到服务器；var/（uploads/outputs 运行时数据，含旧版根目录下的
-      # uploads/ outputs/）为运行时数据，既不覆盖也不删除
+      # uploads/ outputs/）为运行时数据，既不覆盖也不删除。
+      # .env 是各环境自己的私密配置（被 git 忽略、仓库里没有），加了 --delete
+      # 后必须排除，否则每次部署都会把服务器上的 .env 删掉。
+      # data/downloads/ 同理：桌面版安装包只存在于服务器上，不能被清掉。
       - name: Sync code
         run: |
           rsync -az --delete \
@@ -42,6 +45,8 @@ jobs:
             --exclude 'uploads/' \
             --exclude 'outputs/' \
             --exclude 'var/' \
+            --exclude '.env' \
+            --exclude 'data/downloads/' \
             --exclude 'tests/' \
             --exclude 'data/stats.db' \
             --exclude 'data/stats.db-*' \
